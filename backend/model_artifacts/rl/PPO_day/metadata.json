@@ -1,0 +1,757 @@
+{
+  "algorithm": "PPO",
+  "model_name": "PPO_day",
+  "total_timesteps": 100000,
+  "hyperparams": {
+    "learning_rate": 0.0003,
+    "n_steps": 512,
+    "clip_range": 0.2,
+    "ent_coef": 0.01,
+    "n_epochs": 10,
+    "batch_size": 512,
+    "policy_kwargs": {
+      "net_arch": [
+        256,
+        256
+      ]
+    }
+  },
+  "feature_cols": [
+    "dow",
+    "month",
+    "day",
+    "n_open",
+    "n_high",
+    "n_close",
+    "n_low",
+    "n_volume",
+    "Top",
+    "Green",
+    "Red",
+    "Bottom",
+    "rsi",
+    "srsi",
+    "kama",
+    "vwkama",
+    "obv",
+    "bbl_h",
+    "bbl_l",
+    "bbl",
+    "macd",
+    "macd_signal",
+    "macd_hist",
+    "adx",
+    "adx_neg",
+    "adx_pos",
+    "sma_5",
+    "sma_12",
+    "sma_24",
+    "sma_50",
+    "sma_100",
+    "sma_200",
+    "regime_confidence",
+    "atr",
+    "regime_id",
+    "quality_score",
+    "regime_trend_bullish",
+    "regime_trend_bearish",
+    "regime_trend_neutral",
+    "regime_vol_high"
+  ],
+  "num_features": 40,
+  "seq_len": 15,
+  "obs_mode": "flat",
+  "min_quality": 0.8,
+  "regime_ids": [
+    0,
+    1
+  ],
+  "reward_function": "risk_adjusted_pnl",
+  "data_rows": 559,
+  "training_metrics": [
+    {
+      "timestep": 1000,
+      "fps": 942.3,
+      "progress": 0.01
+    },
+    {
+      "timestep": 2000,
+      "fps": 1365.4,
+      "progress": 0.02
+    },
+    {
+      "timestep": 3000,
+      "fps": 1570.2,
+      "progress": 0.03
+    },
+    {
+      "timestep": 4000,
+      "fps": 1639.9,
+      "progress": 0.04
+    },
+    {
+      "timestep": 4096,
+      "fps": 1651.1,
+      "progress": 0.041
+    },
+    {
+      "timestep": 5000,
+      "fps": 1293.8,
+      "progress": 0.05
+    },
+    {
+      "timestep": 6000,
+      "fps": 1373.3,
+      "progress": 0.06
+    },
+    {
+      "timestep": 7000,
+      "fps": 1463.3,
+      "progress": 0.07
+    },
+    {
+      "timestep": 8000,
+      "fps": 1523.0,
+      "progress": 0.08
+    },
+    {
+      "timestep": 8192,
+      "fps": 1535.8,
+      "progress": 0.0819,
+      "loss": 429.924866,
+      "value_loss": 951.098546
+    },
+    {
+      "timestep": 9000,
+      "fps": 1327.9,
+      "progress": 0.09
+    },
+    {
+      "timestep": 10000,
+      "fps": 1390.3,
+      "progress": 0.1
+    },
+    {
+      "timestep": 11000,
+      "fps": 1445.9,
+      "progress": 0.11
+    },
+    {
+      "timestep": 12000,
+      "fps": 1500.6,
+      "progress": 0.12
+    },
+    {
+      "timestep": 12288,
+      "fps": 1515.1,
+      "progress": 0.1229,
+      "loss": 345.158234,
+      "value_loss": 827.76856
+    },
+    {
+      "timestep": 13000,
+      "fps": 1434.1,
+      "progress": 0.13
+    },
+    {
+      "timestep": 14000,
+      "fps": 1463.7,
+      "progress": 0.14
+    },
+    {
+      "timestep": 15000,
+      "fps": 1497.4,
+      "progress": 0.15
+    },
+    {
+      "timestep": 16000,
+      "fps": 1532.4,
+      "progress": 0.16
+    },
+    {
+      "timestep": 16384,
+      "fps": 1541.0,
+      "progress": 0.1638,
+      "loss": 713.286926,
+      "value_loss": 1615.340712
+    },
+    {
+      "timestep": 17000,
+      "fps": 1481.3,
+      "progress": 0.17
+    },
+    {
+      "timestep": 18000,
+      "fps": 1515.4,
+      "progress": 0.18
+    },
+    {
+      "timestep": 19000,
+      "fps": 1538.1,
+      "progress": 0.19
+    },
+    {
+      "timestep": 20000,
+      "fps": 1553.2,
+      "progress": 0.2
+    },
+    {
+      "timestep": 20480,
+      "fps": 1566.3,
+      "progress": 0.2048,
+      "loss": 1235.318115,
+      "value_loss": 2236.303662
+    },
+    {
+      "timestep": 21000,
+      "fps": 1515.6,
+      "progress": 0.21
+    },
+    {
+      "timestep": 22000,
+      "fps": 1542.6,
+      "progress": 0.22
+    },
+    {
+      "timestep": 23000,
+      "fps": 1562.7,
+      "progress": 0.23
+    },
+    {
+      "timestep": 24000,
+      "fps": 1580.7,
+      "progress": 0.24
+    },
+    {
+      "timestep": 24576,
+      "fps": 1593.8,
+      "progress": 0.2458,
+      "loss": 327.946198,
+      "value_loss": 857.037906
+    },
+    {
+      "timestep": 25000,
+      "fps": 1540.6,
+      "progress": 0.25
+    },
+    {
+      "timestep": 26000,
+      "fps": 1562.3,
+      "progress": 0.26
+    },
+    {
+      "timestep": 27000,
+      "fps": 1582.6,
+      "progress": 0.27
+    },
+    {
+      "timestep": 28000,
+      "fps": 1600.0,
+      "progress": 0.28
+    },
+    {
+      "timestep": 28672,
+      "fps": 1606.4,
+      "progress": 0.2867,
+      "loss": 368.290802,
+      "value_loss": 856.583145
+    },
+    {
+      "timestep": 29000,
+      "fps": 1568.9,
+      "progress": 0.29
+    },
+    {
+      "timestep": 30000,
+      "fps": 1579.3,
+      "progress": 0.3
+    },
+    {
+      "timestep": 31000,
+      "fps": 1592.1,
+      "progress": 0.31
+    },
+    {
+      "timestep": 32000,
+      "fps": 1610.5,
+      "progress": 0.32
+    },
+    {
+      "timestep": 32768,
+      "fps": 1624.8,
+      "progress": 0.3277,
+      "loss": 727.235291,
+      "value_loss": 1472.774223
+    },
+    {
+      "timestep": 33000,
+      "fps": 1589.6,
+      "progress": 0.33
+    },
+    {
+      "timestep": 34000,
+      "fps": 1600.2,
+      "progress": 0.34
+    },
+    {
+      "timestep": 35000,
+      "fps": 1612.8,
+      "progress": 0.35
+    },
+    {
+      "timestep": 36000,
+      "fps": 1623.7,
+      "progress": 0.36
+    },
+    {
+      "timestep": 36864,
+      "fps": 1636.1,
+      "progress": 0.3686,
+      "loss": 320.808655,
+      "value_loss": 738.701542
+    },
+    {
+      "timestep": 37000,
+      "fps": 1601.1,
+      "progress": 0.37
+    },
+    {
+      "timestep": 38000,
+      "fps": 1611.1,
+      "progress": 0.38
+    },
+    {
+      "timestep": 39000,
+      "fps": 1625.5,
+      "progress": 0.39
+    },
+    {
+      "timestep": 40000,
+      "fps": 1635.6,
+      "progress": 0.4
+    },
+    {
+      "timestep": 40960,
+      "fps": 1647.6,
+      "progress": 0.4096,
+      "loss": 1735.808716,
+      "value_loss": 3162.723773
+    },
+    {
+      "timestep": 41000,
+      "fps": 1607.2,
+      "progress": 0.41
+    },
+    {
+      "timestep": 42000,
+      "fps": 1613.4,
+      "progress": 0.42
+    },
+    {
+      "timestep": 43000,
+      "fps": 1625.8,
+      "progress": 0.43
+    },
+    {
+      "timestep": 44000,
+      "fps": 1637.0,
+      "progress": 0.44
+    },
+    {
+      "timestep": 45000,
+      "fps": 1644.6,
+      "progress": 0.45
+    },
+    {
+      "timestep": 45056,
+      "fps": 1644.7,
+      "progress": 0.4506,
+      "loss": 1485.395996,
+      "value_loss": 4249.539401
+    },
+    {
+      "timestep": 46000,
+      "fps": 1618.3,
+      "progress": 0.46
+    },
+    {
+      "timestep": 47000,
+      "fps": 1628.6,
+      "progress": 0.47
+    },
+    {
+      "timestep": 48000,
+      "fps": 1639.8,
+      "progress": 0.48
+    },
+    {
+      "timestep": 49000,
+      "fps": 1652.2,
+      "progress": 0.49
+    },
+    {
+      "timestep": 49152,
+      "fps": 1653.1,
+      "progress": 0.4915,
+      "loss": 1791.352295,
+      "value_loss": 3610.249423
+    },
+    {
+      "timestep": 50000,
+      "fps": 1628.5,
+      "progress": 0.5
+    },
+    {
+      "timestep": 51000,
+      "fps": 1638.3,
+      "progress": 0.51
+    },
+    {
+      "timestep": 52000,
+      "fps": 1643.3,
+      "progress": 0.52
+    },
+    {
+      "timestep": 53000,
+      "fps": 1646.7,
+      "progress": 0.53
+    },
+    {
+      "timestep": 53248,
+      "fps": 1648.9,
+      "progress": 0.5325,
+      "loss": 1747.625,
+      "value_loss": 4665.479752
+    },
+    {
+      "timestep": 54000,
+      "fps": 1632.4,
+      "progress": 0.54
+    },
+    {
+      "timestep": 55000,
+      "fps": 1639.4,
+      "progress": 0.55
+    },
+    {
+      "timestep": 56000,
+      "fps": 1650.2,
+      "progress": 0.56
+    },
+    {
+      "timestep": 57000,
+      "fps": 1653.5,
+      "progress": 0.57
+    },
+    {
+      "timestep": 57344,
+      "fps": 1655.5,
+      "progress": 0.5734,
+      "loss": 569.945129,
+      "value_loss": 1211.309862
+    },
+    {
+      "timestep": 58000,
+      "fps": 1638.6,
+      "progress": 0.58
+    },
+    {
+      "timestep": 59000,
+      "fps": 1648.1,
+      "progress": 0.59
+    },
+    {
+      "timestep": 60000,
+      "fps": 1658.8,
+      "progress": 0.6
+    },
+    {
+      "timestep": 61000,
+      "fps": 1660.4,
+      "progress": 0.61
+    },
+    {
+      "timestep": 61440,
+      "fps": 1664.1,
+      "progress": 0.6144,
+      "loss": 485.121185,
+      "value_loss": 1333.862019
+    },
+    {
+      "timestep": 62000,
+      "fps": 1642.0,
+      "progress": 0.62
+    },
+    {
+      "timestep": 63000,
+      "fps": 1650.2,
+      "progress": 0.63
+    },
+    {
+      "timestep": 64000,
+      "fps": 1657.0,
+      "progress": 0.64
+    },
+    {
+      "timestep": 65000,
+      "fps": 1663.5,
+      "progress": 0.65
+    },
+    {
+      "timestep": 65536,
+      "fps": 1667.8,
+      "progress": 0.6554,
+      "loss": 1012.405396,
+      "value_loss": 2322.519414
+    },
+    {
+      "timestep": 66000,
+      "fps": 1647.9,
+      "progress": 0.66
+    },
+    {
+      "timestep": 67000,
+      "fps": 1656.2,
+      "progress": 0.67
+    },
+    {
+      "timestep": 68000,
+      "fps": 1659.5,
+      "progress": 0.68
+    },
+    {
+      "timestep": 69000,
+      "fps": 1665.3,
+      "progress": 0.69
+    },
+    {
+      "timestep": 69632,
+      "fps": 1669.3,
+      "progress": 0.6963,
+      "loss": 924.320129,
+      "value_loss": 1933.80256
+    },
+    {
+      "timestep": 70000,
+      "fps": 1652.3,
+      "progress": 0.7
+    },
+    {
+      "timestep": 71000,
+      "fps": 1659.8,
+      "progress": 0.71
+    },
+    {
+      "timestep": 72000,
+      "fps": 1661.8,
+      "progress": 0.72
+    },
+    {
+      "timestep": 73000,
+      "fps": 1667.8,
+      "progress": 0.73
+    },
+    {
+      "timestep": 73728,
+      "fps": 1672.2,
+      "progress": 0.7373,
+      "loss": 471.30426,
+      "value_loss": 1314.293848
+    },
+    {
+      "timestep": 74000,
+      "fps": 1650.7,
+      "progress": 0.74
+    },
+    {
+      "timestep": 75000,
+      "fps": 1658.2,
+      "progress": 0.75
+    },
+    {
+      "timestep": 76000,
+      "fps": 1663.3,
+      "progress": 0.76
+    },
+    {
+      "timestep": 77000,
+      "fps": 1670.9,
+      "progress": 0.77
+    },
+    {
+      "timestep": 77824,
+      "fps": 1673.3,
+      "progress": 0.7782,
+      "loss": 348.279266,
+      "value_loss": 919.241687
+    },
+    {
+      "timestep": 78000,
+      "fps": 1656.3,
+      "progress": 0.78
+    },
+    {
+      "timestep": 79000,
+      "fps": 1658.4,
+      "progress": 0.79
+    },
+    {
+      "timestep": 80000,
+      "fps": 1665.0,
+      "progress": 0.8
+    },
+    {
+      "timestep": 81000,
+      "fps": 1671.1,
+      "progress": 0.81
+    },
+    {
+      "timestep": 81920,
+      "fps": 1677.6,
+      "progress": 0.8192,
+      "loss": 711.306396,
+      "value_loss": 1443.433839
+    },
+    {
+      "timestep": 82000,
+      "fps": 1660.9,
+      "progress": 0.82
+    },
+    {
+      "timestep": 83000,
+      "fps": 1662.2,
+      "progress": 0.83
+    },
+    {
+      "timestep": 84000,
+      "fps": 1669.8,
+      "progress": 0.84
+    },
+    {
+      "timestep": 85000,
+      "fps": 1671.7,
+      "progress": 0.85
+    },
+    {
+      "timestep": 86000,
+      "fps": 1677.0,
+      "progress": 0.86
+    },
+    {
+      "timestep": 86016,
+      "fps": 1676.6,
+      "progress": 0.8602,
+      "loss": 390.185944,
+      "value_loss": 857.497868
+    },
+    {
+      "timestep": 87000,
+      "fps": 1664.5,
+      "progress": 0.87
+    },
+    {
+      "timestep": 88000,
+      "fps": 1671.3,
+      "progress": 0.88
+    },
+    {
+      "timestep": 89000,
+      "fps": 1675.8,
+      "progress": 0.89
+    },
+    {
+      "timestep": 90000,
+      "fps": 1681.2,
+      "progress": 0.9
+    },
+    {
+      "timestep": 90112,
+      "fps": 1681.7,
+      "progress": 0.9011,
+      "loss": 190.935272,
+      "value_loss": 484.113421
+    },
+    {
+      "timestep": 91000,
+      "fps": 1665.6,
+      "progress": 0.91
+    },
+    {
+      "timestep": 92000,
+      "fps": 1671.3,
+      "progress": 0.92
+    },
+    {
+      "timestep": 93000,
+      "fps": 1677.4,
+      "progress": 0.93
+    },
+    {
+      "timestep": 94000,
+      "fps": 1683.7,
+      "progress": 0.94
+    },
+    {
+      "timestep": 94208,
+      "fps": 1683.2,
+      "progress": 0.9421,
+      "loss": 412.192871,
+      "value_loss": 931.868541
+    },
+    {
+      "timestep": 95000,
+      "fps": 1669.3,
+      "progress": 0.95
+    },
+    {
+      "timestep": 96000,
+      "fps": 1672.7,
+      "progress": 0.96
+    },
+    {
+      "timestep": 97000,
+      "fps": 1678.2,
+      "progress": 0.97
+    },
+    {
+      "timestep": 98000,
+      "fps": 1682.8,
+      "progress": 0.98
+    },
+    {
+      "timestep": 98304,
+      "fps": 1684.9,
+      "progress": 0.983,
+      "loss": 908.389709,
+      "value_loss": 2206.653632
+    },
+    {
+      "timestep": 99000,
+      "fps": 1670.1,
+      "progress": 0.99
+    },
+    {
+      "timestep": 100000,
+      "fps": 1675.7,
+      "progress": 1.0
+    },
+    {
+      "timestep": 101000,
+      "fps": 1679.2,
+      "progress": 1.01
+    },
+    {
+      "timestep": 102000,
+      "fps": 1683.1,
+      "progress": 1.02
+    },
+    {
+      "timestep": 102400,
+      "fps": 1683.3,
+      "progress": 1.024,
+      "loss": 757.272034,
+      "value_loss": 1442.896045
+    }
+  ],
+  "best_reward": -Infinity
+}

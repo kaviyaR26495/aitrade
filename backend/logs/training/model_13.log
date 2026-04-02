@@ -1,0 +1,6 @@
+============================================================
+  Model #13  PPO  stock=13  day  steps=100,000
+  Started: 2026-04-02 10:16:02
+============================================================
+[10:16:02] INFO   GPU verified: NVIDIA GeForce RTX 4050 Laptop GPU (6.2 GB · CUDA 12.4) — memory cleared
+[10:16:03] ERROR  Insufficient quality data after filtering: 6 rows (need >= 100)

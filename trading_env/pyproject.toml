@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trading-env"
+version = "0.1.0"
+description = "Custom Gymnasium trading environment for RL-based stock trading"
+requires-python = ">=3.10"
+dependencies = [
+    "gymnasium>=1.0.0",
+    "numpy>=1.24.0",
+    "pandas>=2.0.0",
+]
+
+[project.entry-points."gymnasium.envs"]
+SwingTradingEnv = "trading_env.envs:SwingTradingEnv"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["trading_env*"]

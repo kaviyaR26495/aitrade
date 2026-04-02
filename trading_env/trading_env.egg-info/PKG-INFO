@@ -1,0 +1,8 @@
+Metadata-Version: 2.4
+Name: trading-env
+Version: 0.1.0
+Summary: Custom Gymnasium trading environment for RL-based stock trading
+Requires-Python: >=3.10
+Requires-Dist: gymnasium>=1.0.0
+Requires-Dist: numpy>=1.24.0
+Requires-Dist: pandas>=2.0.0

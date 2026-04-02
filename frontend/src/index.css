@@ -1,0 +1,330 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:ital,wght@0,300;0,400;0,500;0,600;0,700;1,400&family=JetBrains+Mono:wght@400;500;600&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --radius-xs: 6px;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 20px;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   THEME PRESETS — switchable via data-theme on <html>
+   ═══════════════════════════════════════════════════════════════ */
+
+:root,
+[data-theme="deep-ocean"] {
+  /* ── Surfaces ── */
+  --bg:             #060b16;
+  --bg-card:        #0c1322;
+  --bg-card-solid:  #0c1322;
+  --bg-card-hover:  #101a2e;
+  --bg-input:       #090f1c;
+  --bg-hover:       #131d33;
+  --bg-active:      #182744;
+  --bg-elevated:    #111b30;
+
+  /* ── Borders ── */
+  --border:         #1a2742;
+  --border-light:   #131e35;
+  --border-focus:   #6366f1;
+  --border-subtle:  #0f1a2d;
+
+  /* ── Text ── */
+  --text:           #e8edf8;
+  --text-secondary: #b8c6d8;
+  --text-muted:     #8fa0bc;
+  --text-dim:       #56688a;
+
+  /* ── Controls ── */
+  --control-h:      40px;
+  --section-gap:    28px;
+
+  /* ── Brand / Primary ── */
+  --primary:        #6366f1;
+  --primary-hover:  #818cf8;
+  --primary-dark:   #4f46e5;
+  --primary-glow:   rgba(99, 102, 241, 0.15);
+  --primary-subtle: rgba(99, 102, 241, 0.08);
+
+  /* ── Semantic ── */
+  --success:        #10b981;
+  --success-glow:   rgba(16, 185, 129, 0.12);
+  --danger:         #f43f5e;
+  --danger-glow:    rgba(244, 63, 94, 0.12);
+  --warning:        #f59e0b;
+  --warning-glow:   rgba(245, 158, 11, 0.12);
+  --info:           #06b6d4;
+  --info-glow:      rgba(6, 182, 212, 0.12);
+
+  /* ── Gradient ── */
+  --gradient-start: #6366f1;
+  --gradient-end:   #06b6d4;
+
+  /* ── Shadows ── */
+  --shadow-xs:    0 1px 2px rgba(0,0,0,0.3);
+  --shadow-sm:    0 1px 3px rgba(0,0,0,0.35), 0 1px 2px rgba(0,0,0,0.2);
+  --shadow-md:    0 4px 12px rgba(0,0,0,0.4);
+  --shadow-lg:    0 8px 30px rgba(0,0,0,0.5);
+  --shadow-xl:    0 16px 50px rgba(0,0,0,0.6);
+  --shadow-glow:  0 0 24px rgba(99, 102, 241, 0.12);
+
+  /* ── Radii ── */
+  --radius:       12px;
+  --radius-lg:    16px;
+  --radius-sm:    8px;
+  --radius-xs:    6px;
+  --radius-xl:    20px;
+
+  /* ── Layout ── */
+  --content-max:  1440px;
+  --sidebar-w:    256px;
+  --sidebar-collapsed: 68px;
+  --overlay:      rgba(0, 0, 0, 0.6);
+
+  /* ── Table ── */
+  --table-header-bg:  rgba(255,255,255,0.02);
+  --table-row-hover:  var(--bg-hover);
+  --table-border:     var(--border);
+
+  /* ── Chart ── */
+  --chart-grid:          rgba(255,255,255,0.04);
+  --chart-axis:          var(--text-dim);
+  --chart-tooltip-bg:    var(--bg-card-solid);
+  --chart-tooltip-border: var(--border);
+
+  /* ── Sidebar ── */
+  --sidebar-bg:          var(--bg-card-solid);
+  --sidebar-border:      var(--border);
+  --sidebar-item-hover:  var(--bg-hover);
+  --sidebar-item-active: var(--primary-subtle);
+
+  /* ── Modal ── */
+  --modal-bg:     var(--bg-card-solid);
+  --modal-border: var(--border);
+  --modal-shadow: var(--shadow-xl);
+
+  /* ── Transitions ── */
+  --transition-fast: 150ms;
+  --transition-base: 200ms;
+  --transition-slow: 300ms;
+
+  /* ── Typography ── */
+  --font-sans:  'Inter', system-ui, -apple-system, sans-serif;
+  --font-mono:  'JetBrains Mono', ui-monospace, 'Cascadia Code', monospace;
+}
+
+[data-theme="midnight"] {
+  --bg:             #0b0a14;
+  --bg-card:        #13112a;
+  --bg-card-solid:  #13112a;
+  --bg-card-hover:  #1a1738;
+  --bg-input:       #0e0d1e;
+  --bg-hover:       #1e1a3a;
+  --bg-active:      #282248;
+  --bg-elevated:    #181530;
+  --border:         #2a2450;
+  --border-light:   #1e1a3a;
+  --border-focus:   #a78bfa;
+  --border-subtle:  #161330;
+  --text:           #ede9fe;
+  --text-secondary: #c4b5fd;
+  --text-muted:     #8b7dc8;
+  --text-dim:       #564e80;
+  --primary:        #8b5cf6;
+  --primary-hover:  #a78bfa;
+  --primary-dark:   #7c3aed;
+  --primary-glow:   rgba(139, 92, 246, 0.15);
+  --primary-subtle: rgba(139, 92, 246, 0.08);
+  --gradient-start: #8b5cf6;
+  --gradient-end:   #ec4899;
+  --shadow-glow:  0 0 24px rgba(139, 92, 246, 0.12);
+}
+
+[data-theme="carbon"] {
+  --bg:             #0e0e0e;
+  --bg-card:        #1a1a1a;
+  --bg-card-solid:  #1a1a1a;
+  --bg-card-hover:  #222222;
+  --bg-input:       #141414;
+  --bg-hover:       #252525;
+  --bg-active:      #303030;
+  --bg-elevated:    #1e1e1e;
+  --border:         #2e2e2e;
+  --border-light:   #242424;
+  --border-focus:   #3b82f6;
+  --border-subtle:  #1c1c1c;
+  --text:           #f0f0f0;
+  --text-secondary: #b8b8b8;
+  --text-muted:     #808080;
+  --text-dim:       #555555;
+  --primary:        #3b82f6;
+  --primary-hover:  #60a5fa;
+  --primary-dark:   #2563eb;
+  --primary-glow:   rgba(59, 130, 246, 0.15);
+  --primary-subtle: rgba(59, 130, 246, 0.08);
+  --gradient-start: #3b82f6;
+  --gradient-end:   #10b981;
+  --shadow-glow:  0 0 24px rgba(59, 130, 246, 0.12);
+}
+
+[data-theme="emerald"] {
+  --bg:             #06120e;
+  --bg-card:        #0c1e16;
+  --bg-card-solid:  #0c1e16;
+  --bg-card-hover:  #12291e;
+  --bg-input:       #091810;
+  --bg-hover:       #163025;
+  --bg-active:      #1c3d30;
+  --bg-elevated:    #102820;
+  --border:         #1a3d2e;
+  --border-light:   #132e22;
+  --border-focus:   #10b981;
+  --border-subtle:  #0f2418;
+  --text:           #e6f4ec;
+  --text-secondary: #a3d4b8;
+  --text-muted:     #6da888;
+  --text-dim:       #4a7864;
+  --primary:        #10b981;
+  --primary-hover:  #34d399;
+  --primary-dark:   #059669;
+  --primary-glow:   rgba(16, 185, 129, 0.15);
+  --primary-subtle: rgba(16, 185, 129, 0.08);
+  --gradient-start: #10b981;
+  --gradient-end:   #06b6d4;
+  --shadow-glow:  0 0 24px rgba(16, 185, 129, 0.12);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   GLOBAL RESET & TYPOGRAPHY
+   ═══════════════════════════════════════════════════════════════ */
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; }
+
+html { scroll-behavior: smooth; }
+
+body {
+  font-family: var(--font-sans);
+  font-size: 14px;
+  background-color: var(--bg);
+  color: var(--text);
+  line-height: 1.6;
+  letter-spacing: -0.01em;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow: hidden;
+}
+
+input, select, textarea, button { font-family: inherit; font-size: inherit; line-height: inherit; }
+
+/* Monospace for financial / numeric data */
+.font-mono, .tabular-nums { font-family: var(--font-mono); }
+
+/* Global focus ring */
+*:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   SCROLLBAR
+   ═══════════════════════════════════════════════════════════════ */
+
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 10px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-dim); }
+/* Firefox */
+* { scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+::selection { background: rgba(99, 102, 241, 0.3); color: #fff; }
+
+/* ═══════════════════════════════════════════════════════════════
+   CARD & SURFACE UTILITIES
+   ═══════════════════════════════════════════════════════════════ */
+
+.glass {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+.glass:hover { border-color: color-mix(in srgb, var(--border) 60%, var(--primary) 40%); }
+
+.gradient-text {
+  background: linear-gradient(135deg, var(--gradient-start), var(--gradient-end));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   ANIMATIONS
+   ═══════════════════════════════════════════════════════════════ */
+
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes slide-up {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes shimmer {
+  0%   { background-position: -200% 0; }
+  100% { background-position:  200% 0; }
+}
+@keyframes spotlight-fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes spotlight-pulse {
+  0%, 100% { box-shadow: 0 0 0 3px var(--primary), 0 0 30px var(--primary-glow); }
+  50%      { box-shadow: 0 0 0 5px var(--primary), 0 0 55px var(--primary-glow); }
+}
+
+.page-enter { animation: fade-in 0.3s ease-out; }
+
+.skeleton {
+  background: linear-gradient(90deg, var(--bg-input) 25%, var(--bg-hover) 50%, var(--bg-input) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.4s ease-in-out infinite;
+  border-radius: var(--radius-sm);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   SPOTLIGHT (chatbot guidance)
+   ═══════════════════════════════════════════════════════════════ */
+
+.spotlight-overlay {
+  position: fixed; inset: 0;
+  background: var(--overlay);
+  z-index: 44;
+  animation: spotlight-fade-in 0.25s ease-out;
+  backdrop-filter: blur(8px);
+}
+.spotlight-target {
+  position: relative; z-index: 45;
+  box-shadow: 0 0 0 3px var(--primary), 0 0 40px var(--primary-glow);
+  border-radius: var(--radius);
+  animation: spotlight-pulse 1.5s ease-in-out infinite;
+}
+
+.divider { height: 1px; background: var(--border-light); margin: 1.5rem 0; }
+.glow-hover { transition: box-shadow 0.2s ease, border-color 0.2s ease; }
+.glow-hover:hover { border-color: color-mix(in srgb, var(--border) 60%, var(--primary) 40%); box-shadow: var(--shadow-md); }
+
+/* ═══════════════════════════════════════════════════════════════
+   ACCESSIBILITY — Reduced motion
+   ═══════════════════════════════════════════════════════════════ */
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+  .page-enter { animation: none; }
+}

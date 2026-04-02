@@ -1,0 +1,36 @@
+import { Routes, Route } from 'react-router-dom';
+import Layout from './components/Layout';
+import { ErrorBoundary } from './components/ErrorBoundary';
+import Dashboard from './pages/Dashboard';
+import DataManager from './pages/DataManager';
+import RegimeAnalysis from './pages/RegimeAnalysis';
+import ModelStudio from './pages/ModelStudio';
+import PatternLab from './pages/PatternLab';
+import Backtest from './pages/Backtest';
+import LiveTrading from './pages/LiveTrading';
+import Portfolio from './pages/Portfolio';
+import Settings from './pages/Settings';
+import ThemeShowcase from './components/ThemeShowcase';
+import StockSelector from './pages/StockSelector';
+
+export default function App() {
+  return (
+    <ErrorBoundary>
+      <Routes>
+        <Route element={<Layout />}>
+          <Route path="/" element={<Dashboard />} />
+          <Route path="/data" element={<DataManager />} />
+          <Route path="/stocks" element={<StockSelector />} />
+          <Route path="/regime" element={<RegimeAnalysis />} />
+          <Route path="/models" element={<ModelStudio />} />
+          <Route path="/patterns" element={<PatternLab />} />
+          <Route path="/backtest" element={<Backtest />} />
+          <Route path="/trading" element={<LiveTrading />} />
+          <Route path="/portfolio" element={<Portfolio />} />
+          <Route path="/settings" element={<Settings />} />
+          <Route path="/theme" element={<ThemeShowcase />} />
+        </Route>
+      </Routes>
+    </ErrorBoundary>
+  );
+}

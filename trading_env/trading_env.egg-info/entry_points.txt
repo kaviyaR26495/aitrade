@@ -1,0 +1,2 @@
+[gymnasium.envs]
+SwingTradingEnv = trading_env.envs:SwingTradingEnv

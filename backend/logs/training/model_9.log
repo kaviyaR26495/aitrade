@@ -1,0 +1,6 @@
+============================================================
+  Model #9  PPO  stock=13  day  steps=100,000
+  Started: 2026-04-01 23:53:46
+============================================================
+[23:53:46] INFO   GPU verified: NVIDIA GeForce RTX 4050 Laptop GPU (6.2 GB · CUDA 12.4) — memory cleared
+[23:53:55] ERROR  

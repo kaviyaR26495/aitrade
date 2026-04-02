@@ -1,0 +1,6 @@
+============================================================
+  Model #10  PPO  stock=13  day  steps=100,000
+  Started: 2026-04-01 23:57:26
+============================================================
+[23:57:27] INFO   GPU verified: NVIDIA GeForce RTX 4050 Laptop GPU (6.2 GB · CUDA 12.4) — memory cleared
+[23:57:28] ERROR  Insufficient data after normalization: 0 rows (need >= 100). Try relaxing min_quality or regime filters.

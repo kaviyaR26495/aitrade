@@ -1,0 +1,6 @@
+============================================================
+  Model #7  PPO  stock=13  day  steps=100,000
+  Started: 2026-04-01 23:46:57
+============================================================
+[23:46:58] INFO   Using device: cpu
+[23:46:59] ERROR  cannot access local variable 'params' where it is not associated with a value
