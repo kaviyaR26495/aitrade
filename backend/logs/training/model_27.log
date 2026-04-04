@@ -1,0 +1,17 @@
+============================================================
+  Model #27  PPO  stock=13  day  steps=100,000
+  Started: 2026-04-03 22:32:40
+============================================================
+[22:32:41] INFO   GPU requested but CUDA init failed: CUDA error: unspecified launch failure
+CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+For debugging consider passing CUDA_LAUNCH_BLOCKING=1
+Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
+ — falling back to CPU
+[22:32:43] TRAIN  Step 1,000/100,000 (1.0%) | FPS 823
+[22:32:44] TRAIN  Step 2,000/100,000 (2.0%) | FPS 858
+[22:32:44] TRAIN  Step 2,048/100,000 (2.0%) | FPS 847
+[22:32:44] ERROR  CUDA error: unspecified launch failure
+CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+For debugging consider passing CUDA_LAUNCH_BLOCKING=1
+Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
+

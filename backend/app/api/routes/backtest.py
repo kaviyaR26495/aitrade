@@ -1,23 +1,32 @@
 from __future__ import annotations
 
-from datetime import date
+import logging
+from datetime import date, timedelta
+from pathlib import Path
 
+import numpy as np
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.api.deps import get_db
+from app.config import settings
 from app.db import crud
 from app.db.models import BacktestResult as BacktestResultModel
+from app.db.models import KNNPrediction, LSTMPrediction, EnsemblePrediction
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
 class BacktestRequest(BaseModel):
     model_type: str  # "rl", "knn", "lstm", "ensemble"
-    model_id: int
-    stock_ids: list[int]
+    model_id: int | None = None
+    knn_name: str | None = None
+    lstm_name: str | None = None
+    stock_ids: list[int] | None = None
+    stock_id: int | None = None
     interval: str = "day"
     start_date: date | None = None
     end_date: date | None = None
@@ -53,25 +62,278 @@ async def run_backtest(
     if req.model_type not in valid_types:
         raise HTTPException(status_code=400, detail=f"model_type must be one of {valid_types}")
 
-    # Store placeholder result (actual backtesting runs via worker)
-    from app.db.models import BacktestResult as BRM
-    result = BRM(
-        model_type=req.model_type,
-        model_id=req.model_id,
-        stock_id=req.stock_ids[0] if req.stock_ids else None,
-        interval=req.interval,
-        start_date=req.start_date or date(2020, 1, 1),
-        end_date=req.end_date or date.today(),
+    stock_id = req.stock_id
+    if not stock_id and req.stock_ids:
+        stock_id = req.stock_ids[0]
+
+    if not stock_id:
+        raise HTTPException(status_code=400, detail="stock_id is required")
+
+    start_d = req.start_date or date(2020, 1, 1)
+    end_d = req.end_date or date.today()
+
+    # 1. Fetch OHLCV for the exact backtest window
+    ohlcv = await crud.get_ohlcv(db, stock_id, req.interval, start_d, end_d)
+    if not ohlcv:
+        raise HTTPException(status_code=400, detail=f"No OHLCV data found for stock {stock_id} in range {start_d} – {end_d}")
+
+    dates = [x.date for x in ohlcv]
+    close_prices = np.array([x.close for x in ohlcv])
+
+    # 2. Try to fetch predictions from DB first
+    pred_dict: dict = {}
+    if req.model_type in ("knn", "ensemble"):
+        q = select(KNNPrediction).where(
+            KNNPrediction.stock_id == stock_id,
+            KNNPrediction.interval == req.interval,
+            KNNPrediction.date.in_(dates),
+        )
+        if req.model_id and req.model_type == "knn":
+            q = q.where(KNNPrediction.knn_model_id == req.model_id)
+        res = await db.execute(q)
+        for p in res.scalars():
+            pred_dict[p.date] = {"action": p.action, "confidence": p.confidence, "regime_id": p.regime_id}
+
+    if req.model_type in ("lstm",):
+        q = select(LSTMPrediction).where(
+            LSTMPrediction.stock_id == stock_id,
+            LSTMPrediction.interval == req.interval,
+            LSTMPrediction.date.in_(dates),
+        )
+        if req.model_id:
+            q = q.where(LSTMPrediction.lstm_model_id == req.model_id)
+        res = await db.execute(q)
+        for p in res.scalars():
+            pred_dict[p.date] = {"action": p.action, "confidence": p.confidence, "regime_id": p.regime_id}
+
+    if req.model_type == "ensemble" and not pred_dict:
+        q = select(EnsemblePrediction).where(
+            EnsemblePrediction.stock_id == stock_id,
+            EnsemblePrediction.interval == req.interval,
+            EnsemblePrediction.date.in_(dates),
+        )
+        if req.model_id:
+            q = q.where(EnsemblePrediction.ensemble_config_id == req.model_id)
+        res = await db.execute(q)
+        for p in res.scalars():
+            pred_dict[p.date] = {"action": p.action, "confidence": p.confidence, "regime_id": p.regime_id}
+
+    # 3. If no predictions in DB, run live inference from model artifacts
+    coverage = len(pred_dict) / max(len(dates), 1)
+    if coverage < 0.1 and req.model_type != "rl":
+        logger.info(
+            "Only %.0f%% predictions in DB for stock %d — running live inference from model artifacts",
+            coverage * 100, stock_id,
+        )
+        pred_dict = await _run_live_inference(
+            db, stock_id, req.interval, dates, start_d, end_d,
+            knn_name=req.knn_name, lstm_name=req.lstm_name
+        )
+
+    predictions = [pred_dict.get(d, {"action": 0, "confidence": 0.0, "regime_id": None}) for d in dates]
+
+    # 4. Execute backtest simulation
+    from app.ml.backtester import BacktestConfig, run_backtest as ml_run_backtest
+    config = BacktestConfig(
+        initial_capital=req.initial_capital,
+        stoploss_pct=req.stoploss_pct,
+        target_pct=req.target_pct,
+        min_confidence=req.min_confidence,
+        max_positions=req.max_positions,
     )
-    db.add(result)
+    bt_result = ml_run_backtest(predictions, close_prices, dates, config)
+
+    # 5. Persist backtest record
+    record = BacktestResultModel(
+        model_type=req.model_type,
+        model_id=req.model_id or 0,
+        stock_id=stock_id,
+        interval=req.interval,
+        start_date=start_d,
+        end_date=end_d,
+        total_return=bt_result.total_return_pct / 100.0,
+        win_rate=bt_result.win_rate / 100.0,
+        max_drawdown=bt_result.max_drawdown_pct / 100.0,
+        sharpe=bt_result.sharpe_ratio,
+        profit_factor=bt_result.profit_factor if bt_result.profit_factor != float("inf") else 999.0,
+        trades_count=bt_result.total_trades,
+        trade_log=bt_result.trade_log,
+    )
+    db.add(record)
     await db.commit()
-    await db.refresh(result)
+    await db.refresh(record)
+
+    # 6. Build equity curve for the frontend chart
+    equity_data = []
+    if bt_result.equity_curve and close_prices[0] > 0:
+        base_price = float(close_prices[0])
+        for idx, (dt, eq) in enumerate(zip(dates, bt_result.equity_curve)):
+            benchmark = req.initial_capital * (float(close_prices[idx]) / base_price)
+            equity_data.append({"date": str(dt), "equity": round(eq, 2), "benchmark": round(benchmark, 2)})
 
     return {
-        "backtest_id": result.id,
-        "status": "pending",
-        "message": f"Backtest created for {req.model_type} model {req.model_id}. Trigger execution via worker.",
+        "id": record.id,
+        "model_type": record.model_type,
+        "model_id": record.model_id,
+        "stock_id": record.stock_id,
+        "interval": record.interval,
+        "start_date": str(record.start_date),
+        "end_date": str(record.end_date),
+        "total_return": record.total_return,
+        "win_rate": record.win_rate,
+        "max_drawdown": record.max_drawdown,
+        "sharpe": record.sharpe,
+        "sharpe_ratio": bt_result.sharpe_ratio,
+        "profit_factor": record.profit_factor,
+        "trades_count": record.trades_count,
+        "trade_log": record.trade_log,
+        "equity_curve": equity_data,
+        "total_trades": bt_result.total_trades,
+        "winning_trades": bt_result.winning_trades,
+        "losing_trades": bt_result.losing_trades,
+        "buy_hold_return": bt_result.buy_hold_return_pct / 100.0,
     }
+
+
+async def _run_live_inference(
+    db,
+    stock_id: int,
+    interval: str,
+    target_dates: list,
+    start_d: date,
+    end_d: date,
+    knn_name: str | None = None,
+    lstm_name: str | None = None,
+) -> dict:
+    """
+    Load specific or latest KNN+LSTM distilled models from disk and run sliding-window
+    inference over the requested date range. Returns a {date: prediction_dict} map.
+
+    Model output class encoding: 0=HOLD, 1=BUY, 2=SELL
+    Backtester encoding:         0=HOLD, 1=BUY, -1=SELL   (2 → -1 mapping applied here)
+    """
+    distill_dir = settings.MODEL_DIR / "distill"
+    if not distill_dir.exists():
+        logger.warning("No distill directory found at %s", distill_dir)
+        return {}
+
+    # Resolve actual model paths
+    if knn_name:
+        knn_path = distill_dir / knn_name / "knn_model.joblib"
+        if not knn_path.exists():
+            logger.error("Requested KNN model not found: %s", knn_path)
+            knn_path = None
+    else:
+        knn_path = _latest_model_path(distill_dir, prefix="knn", filename="knn_model.joblib")
+
+    if lstm_name:
+        lstm_path = distill_dir / lstm_name / "lstm_model.pt"
+        if not lstm_path.exists():
+            logger.error("Requested LSTM model not found: %s", lstm_path)
+            lstm_path = None
+    else:
+        lstm_path = _latest_model_path(distill_dir, prefix="lstm", filename="lstm_model.pt")
+
+    if not knn_path or not lstm_path:
+        logger.warning("Missing required model artifacts for live inference")
+        return {}
+
+    # Load models
+    from app.ml.knn_distiller import load_knn_model, predict_knn
+    from app.ml.lstm_distiller import load_lstm_model, predict_lstm
+
+    try:
+        knn_model = load_knn_model(str(knn_path))
+        lstm_model = load_lstm_model(str(lstm_path))
+    except Exception as exc:
+        logger.error("Failed to load model artifacts: %s", exc)
+        return {}
+
+    # Fetch features with warmup so every backtest date has a full seq_len window
+    seq_len = settings.DEFAULT_SEQ_LEN_DAILY if interval == "day" else settings.DEFAULT_SEQ_LEN_WEEKLY
+    # Indicators like SMA_200 need ~200 trading days of warmup; fetch extra data
+    warmup_start = start_d - timedelta(days=400)
+
+    from app.core.data_service import get_model_ready_data
+    from app.core.normalizer import prepare_model_input
+
+    df, feature_cols = await get_model_ready_data(
+        db, stock_id, interval, seq_len=seq_len, start_date=warmup_start, end_date=end_d,
+    )
+    if df.empty or len(df) < seq_len + 1:
+        logger.warning("Insufficient feature data for live inference on stock %d", stock_id)
+        return {}
+
+    # date column name
+    date_col = "date" if "date" in df.columns else df.index.name or None
+    if date_col and date_col in df.columns:
+        all_dates = list(df[date_col])
+    else:
+        # try index
+        all_dates = list(df.index)
+
+    X_all = prepare_model_input(df, feature_cols, seq_len=seq_len)  # (n_windows, seq_len, features)
+    if len(X_all) == 0:
+        return {}
+
+    # Run individual models
+    knn_preds_raw, knn_probs_raw = predict_knn(knn_model, X_all)
+    lstm_preds_raw, lstm_probs_raw = predict_lstm(lstm_model, X_all)
+
+    # KNN may have been trained on only [1, 2] classes → expand to 3-column prob [HOLD, BUY, SELL]
+    knn_classes = list(knn_model.classes_)  # e.g. [1, 2]
+    if knn_probs_raw.shape[1] != 3:
+        expanded = np.zeros((len(knn_probs_raw), 3), dtype=np.float32)
+        for col_idx, cls in enumerate(knn_classes):
+            if 0 <= cls <= 2:
+                expanded[:, cls] = knn_probs_raw[:, col_idx]
+        knn_probs_raw = expanded
+
+    # Run ensemble combination
+    from app.ml.ensemble import ensemble_predict
+    preds_list = ensemble_predict(
+        knn_preds_raw, knn_probs_raw,
+        lstm_preds_raw, lstm_probs_raw,
+        knn_weight=0.5, lstm_weight=0.5,
+        agreement_required=True,
+    )
+
+    # Each window[i] covers data rows [i, i+seq_len-1] → prediction is for all_dates[i+seq_len-1]
+    result: dict = {}
+    target_date_set = set(target_dates)
+    for i, p in enumerate(preds_list):
+        date_idx = i + seq_len - 1
+        if date_idx >= len(all_dates):
+            break
+        d = all_dates[date_idx]
+        # Normalise to a plain date object
+        if hasattr(d, "date"):
+            d = d.date()
+        if d not in target_date_set:
+            continue
+        raw_action = p["action"]  # 0=HOLD, 1=BUY, 2=SELL
+        mapped_action = -1 if raw_action == 2 else raw_action  # convert SELL → -1 for backtester
+        result[d] = {
+            "action": mapped_action,
+            "confidence": p["confidence"],
+            "regime_id": None,
+        }
+
+    logger.info("Live inference produced %d predictions for %d target dates", len(result), len(target_dates))
+    return result
+
+
+def _latest_model_path(distill_dir: Path, prefix: str, filename: str) -> Path | None:
+    """Find the numerically highest-versioned model directory under distill_dir."""
+    candidates = sorted(
+        [d for d in distill_dir.iterdir() if d.is_dir() and d.name.startswith(prefix)],
+        key=lambda p: int("".join(filter(str.isdigit, p.name)) or "0"),
+    )
+    for candidate in reversed(candidates):
+        model_file = candidate / filename
+        if model_file.exists():
+            return model_file
+    return None
 
 
 @router.get("/results/{backtest_id}")

@@ -53,7 +53,7 @@ async def run_daily_predictions(
 
     results = []
     errors = []
-    seq_len = settings.SEQ_LEN
+    seq_len = settings.DEFAULT_SEQ_LEN_DAILY if interval == "day" else settings.DEFAULT_SEQ_LEN_WEEKLY
 
     for stock in stocks:
         try:

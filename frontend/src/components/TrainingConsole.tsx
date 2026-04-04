@@ -34,7 +34,7 @@ function ModelPill({
   algorithm: string;
   isActive: boolean;
   selected: boolean;
-  onClick: () => void;
+  onClick: (e?: React.MouseEvent) => void;
 }) {
   return (
     <button
@@ -297,7 +297,7 @@ export default function TrainingConsole() {
                 <span>No log data yet — waiting for training to start…</span>
               </div>
             ) : (
-              lines.map((line, i) => (
+              (lines as string[]).map((line: string, i: number) => (
                 <div key={i} className={`whitespace-pre-wrap break-all ${lineClass(line)}`}>
                   {line}
                 </div>

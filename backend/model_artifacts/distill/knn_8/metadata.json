@@ -1,0 +1,47 @@
+{
+  "model_name": "knn_8",
+  "metrics": {
+    "accuracy": 0.8367,
+    "precision_buy": 0.84,
+    "precision_sell": 0.8333,
+    "train_samples": 195,
+    "test_samples": 49,
+    "k_neighbors": 5,
+    "class_distribution_train": {
+      "1": 95,
+      "2": 100
+    },
+    "class_distribution_test": {
+      "1": 25,
+      "2": 24
+    },
+    "classification_report": {
+      "1": {
+        "precision": 0.84,
+        "recall": 0.84,
+        "f1-score": 0.84,
+        "support": 25.0
+      },
+      "2": {
+        "precision": 0.8333333333333334,
+        "recall": 0.8333333333333334,
+        "f1-score": 0.8333333333333334,
+        "support": 24.0
+      },
+      "accuracy": 0.8367346938775511,
+      "macro avg": {
+        "precision": 0.8366666666666667,
+        "recall": 0.8366666666666667,
+        "f1-score": 0.8366666666666667,
+        "support": 49.0
+      },
+      "weighted avg": {
+        "precision": 0.8367346938775511,
+        "recall": 0.8367346938775511,
+        "f1-score": 0.8367346938775511,
+        "support": 49.0
+      }
+    }
+  },
+  "feature_cols": null
+}

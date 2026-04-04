@@ -40,12 +40,11 @@ def extract_patterns(
     from trading_env import SwingTradingEnv
 
     env = SwingTradingEnv(
-        df=feature_data,
-        close_prices=close_prices,
+        data=feature_data,
+        prices=close_prices,
         seq_len=seq_len,
         obs_mode=obs_mode,
-        reward_function=reward_function,
-        regime_ids=regime_ids,
+        reward_type=reward_function,
     )
 
     obs, info = env.reset()
@@ -56,7 +55,7 @@ def extract_patterns(
     # Collect all actions
     while not done:
         action, _ = model.predict(obs, deterministic=True)
-        obs, reward, terminated, truncated, info = env.step(action)
+        obs, reward, terminated, truncated, info = env.step(int(action))
         actions.append(int(action))
         step_idx += 1
         done = terminated or truncated
@@ -116,8 +115,9 @@ def extract_patterns(
             "pnl_percent": round(float(pnl_pct), 4),
             "regime_id": rid,
             "confidence": round(float(confidence), 4),
-            "feature_window": feature_window.tobytes(),
-            "feature_shape": list(feature_window.shape),
+            "feature_window": feature_window.astype(np.float32).tobytes(),
+            # shape is (seq_len, n_features) — inferred from bytes when reloading
+            "_feature_shape": list(feature_window.shape),
         }
         patterns.append(pattern)
 
@@ -154,9 +154,16 @@ def patterns_to_training_data(
     y_list = []
 
     for p in patterns:
-        window = np.frombuffer(p["feature_window"], dtype=np.float32)
-        shape = p["feature_shape"]
-        window = window.reshape(shape)
+        raw = p["feature_window"]
+        # _feature_shape is set in-memory by extract_patterns; DB rows don't have it.
+        # Infer shape: n_features = total_floats / seq_len
+        if "_feature_shape" in p:
+            shape = p["_feature_shape"]
+        else:
+            total_floats = len(raw) // 4  # float32 = 4 bytes
+            n_features = total_floats // seq_len
+            shape = [seq_len, n_features]
+        window = np.frombuffer(raw, dtype=np.float32).reshape(shape)
         X_list.append(window)
 
         # Map label: 1 (BUY) → 1, -1 (SELL) → 2, 0 (HOLD) → 0

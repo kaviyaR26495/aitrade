@@ -77,7 +77,19 @@ async def chat_stream(req: ChatRequest, db: AsyncSession = Depends(get_db)):
             ):
                 yield f"data: {json.dumps({'content': chunk})}\n\n"
         except Exception as e:
-            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+            err_str = str(e)
+            # Return a clean, readable error instead of a raw SDK dump
+            if "429" in err_str or "quota" in err_str.lower() or "rate" in err_str.lower():
+                user_msg = (
+                    "⚠️ **Gemini rate limit reached.**\n\n"
+                    "You've hit the free-tier quota for this model. Try:\n"
+                    "- Waiting a minute and retrying\n"
+                    "- Switching to **gemini-1.5-flash** (separate quota)\n"
+                    "- Enabling billing at [Google AI Studio](https://aistudio.google.com)"
+                )
+            else:
+                user_msg = f"Error: {err_str[:300]}"
+            yield f"data: {json.dumps({'error': user_msg})}\n\n"
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
@@ -126,5 +138,6 @@ async def chat_status(db: AsyncSession = Depends(get_db)):
         "configured": configured,
         "provider": provider,
         "model": model,
+        "api_key": api_key,
         "ollama_base_url": ollama_url,
     }

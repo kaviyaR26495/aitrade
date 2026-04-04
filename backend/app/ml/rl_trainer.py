@@ -200,16 +200,18 @@ def train_rl_model(
     # ── Create vectorised environment ─────────────────────────────────
     from trading_env import SwingTradingEnv
     from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv
+    from stable_baselines3.common.monitor import Monitor
 
     def _make_env():
         def _init():
-            return SwingTradingEnv(
+            env = SwingTradingEnv(
                 data=feature_data,
                 prices=close_prices,
                 seq_len=seq_len,
                 obs_mode=obs_mode,
                 reward_type=reward_function,
             )
+            return Monitor(env)
         return _init
 
     VecEnvClass = SubprocVecEnv if device == "cuda" else DummyVecEnv

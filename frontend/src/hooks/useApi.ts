@@ -2,6 +2,20 @@ import { useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import * as api from '../services/api';
 
+const TERMINAL_RL_STATUSES = new Set(['completed', 'failed', 'stopped']);
+
+function syncRlModelStatus(qc: ReturnType<typeof useQueryClient>, modelId: number | null, status?: string | null) {
+  if (!modelId || !status) return;
+  qc.setQueryData(['rl-models'], (prev: any[] | undefined) => {
+    if (!Array.isArray(prev)) return prev;
+    return prev.map((model) => {
+      if (model.id !== modelId) return model;
+      if (model.status === status) return model;
+      return { ...model, status };
+    });
+  });
+}
+
 // ── Auth hooks ──
 export const useAuthStatus = () =>
   useQuery({
@@ -99,25 +113,40 @@ export const useRlModelLogs = (modelId: number | null, isActive = false) => {
     enabled: !!modelId,
     refetchInterval: (q) => {
       if (!isActive) return false;
-      if (q.state.data?.source === 'db') return false;
+      if (q.state.data?.is_active === false) return false;
+      if (TERMINAL_RL_STATUSES.has(q.state.data?.status)) return false;
       return 3000;
     },
   });
-  // When backend confirms training is done, immediately refresh the model list
-  // so useRlModels stops polling and the status badge updates without waiting.
   useEffect(() => {
-    if (isActive && query.data?.source === 'db') {
+    const status = query.data?.status;
+    if (query.data?.is_active === false && TERMINAL_RL_STATUSES.has(status)) {
+      syncRlModelStatus(qc, modelId, status);
       qc.invalidateQueries({ queryKey: ['rl-models'] });
     }
-  }, [query.data?.source, isActive]);
+  }, [modelId, query.data?.is_active, query.data?.status, qc]);
   return query;
 };
 
 export const useKnnModels = () =>
-  useQuery({ queryKey: ['knn-models'], queryFn: () => api.listKnnModels().then(r => r.data) });
+  useQuery({
+    queryKey: ['knn-models'],
+    queryFn: () => api.listKnnModels().then(r => r.data),
+    refetchInterval: (q) => {
+      const models: any[] = q.state.data ?? [];
+      return models.some(m => m.status === 'training' || m.status === 'pending') ? 3000 : false;
+    },
+  });
 
 export const useLstmModels = () =>
-  useQuery({ queryKey: ['lstm-models'], queryFn: () => api.listLstmModels().then(r => r.data) });
+  useQuery({
+    queryKey: ['lstm-models'],
+    queryFn: () => api.listLstmModels().then(r => r.data),
+    refetchInterval: (q) => {
+      const models: any[] = q.state.data ?? [];
+      return models.some(m => m.status === 'training' || m.status === 'pending') ? 3000 : false;
+    },
+  });
 
 export const useTrainModel = () => {
   const qc = useQueryClient();
@@ -171,16 +200,17 @@ export const useTrainingLogFile = (modelId: number | null, isActive: boolean) =>
     refetchInterval: (q) => {
       if (!isActive) return false;
       if (q.state.data?.is_active === false) return false;
+      if (TERMINAL_RL_STATUSES.has(q.state.data?.status)) return false;
       return 2000;
     },
   });
-  // When the backend marks the session inactive, immediately refresh the model
-  // list so all coupled polls stop together.
   useEffect(() => {
-    if (isActive && query.data?.is_active === false) {
+    const status = query.data?.status;
+    if (query.data?.is_active === false && TERMINAL_RL_STATUSES.has(status)) {
+      syncRlModelStatus(qc, modelId, status);
       qc.invalidateQueries({ queryKey: ['rl-models'] });
     }
-  }, [query.data?.is_active, isActive]);
+  }, [modelId, query.data?.is_active, query.data?.status, qc]);
   return query;
 };
 
@@ -218,7 +248,77 @@ export const useDistillModel = () => {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['knn-models'] });
       qc.invalidateQueries({ queryKey: ['lstm-models'] });
+      qc.invalidateQueries({ queryKey: ['ensemble-configs'] });
     },
+  });
+};
+
+const TERMINAL_DISTILL_STATUSES = new Set(['completed', 'failed']);
+
+export const useDistillLog = (knnModelId: number | null, isActive = false) => {
+  const qc = useQueryClient();
+  const query = useQuery({
+    queryKey: ['distill-log', knnModelId],
+    queryFn: () => api.getDistillLog(knnModelId!).then(r => r.data),
+    enabled: !!knnModelId,
+    refetchInterval: (q) => {
+      if (!isActive) return false;
+      if (q.state.data?.is_active === false) return false;
+      return 3000;
+    },
+  });
+  useEffect(() => {
+    if (query.data?.is_active === false) {
+      qc.invalidateQueries({ queryKey: ['knn-models'] });
+      qc.invalidateQueries({ queryKey: ['lstm-models'] });
+      qc.invalidateQueries({ queryKey: ['ensemble-configs'] });
+    }
+  }, [query.data?.is_active, qc]);
+  return query;
+};
+
+export const useDeleteKnnModel = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: number) => api.deleteKnnModel(id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['knn-models'] });
+      qc.invalidateQueries({ queryKey: ['ensemble-configs'] });
+    },
+  });
+};
+
+export const useDeleteLstmModel = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: number) => api.deleteLstmModel(id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['lstm-models'] });
+      qc.invalidateQueries({ queryKey: ['ensemble-configs'] });
+    },
+  });
+};
+
+export const useEnsembleConfigs = () =>
+  useQuery({
+    queryKey: ['ensemble-configs'],
+    queryFn: () => api.listEnsembleConfigs().then(r => r.data),
+  });
+
+export const useUpdateEnsemble = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, data }: { id: number; data: { knn_weight: number; lstm_weight: number; agreement_required: boolean } }) =>
+      api.updateEnsembleConfig(id, data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['ensemble-configs'] }),
+  });
+};
+
+export const useDeleteEnsemble = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: number) => api.deleteEnsembleConfig(id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['ensemble-configs'] }),
   });
 };
 
@@ -283,3 +383,8 @@ export const useZerodhaInstruments = (exchange = 'NSE') =>
     staleTime: 60 * 60 * 1000, // 1 hour — mirrors server-side TTL
     retry: false,              // fail fast if not authenticated
   });;
+export const useGoldenPatterns = (rl_model_id?: number) =>
+  useQuery({
+    queryKey: ['golden_patterns', rl_model_id],
+    queryFn: () => api.getGoldenPatterns(rl_model_id).then(res => res.data),
+  });

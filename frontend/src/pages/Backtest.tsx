@@ -13,6 +13,8 @@ export default function Backtest() {
   const { addNotification } = useAppStore();
 
   const [modelType, setModelType] = useState('ensemble');
+  const [knnName, setKnnName] = useState('');
+  const [lstmName, setLstmName] = useState('');
   const [stockId, setStockId] = useState('');
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
@@ -28,6 +30,8 @@ export default function Backtest() {
     runBacktest.mutate(
       {
         model_type: modelType,
+        knn_name: knnName || undefined,
+        lstm_name: lstmName || undefined,
         stock_id: stockId ? parseInt(stockId) : undefined,
         start_date: startDate || undefined,
         end_date: endDate || undefined,
@@ -58,6 +62,14 @@ export default function Backtest() {
               { value: 'lstm', label: 'LSTM Only' },
               { value: 'rl', label: 'RL Model' },
             ]} />
+            
+            {['ensemble', 'knn'].includes(modelType) && (
+              <Input value={knnName} onChange={setKnnName} label="KNN Model Name" placeholder="e.g. knn_9 (leave empty for latest)" />
+            )}
+            {['ensemble', 'lstm'].includes(modelType) && (
+              <Input value={lstmName} onChange={setLstmName} label="LSTM Model Name" placeholder="e.g. lstm_9 (leave empty for latest)" />
+            )}
+
             <SearchableSelect value={stockId} onChange={setStockId} options={stockOptions} label="Stock" placeholder="Search stocks..." />
             <div className="grid grid-cols-2 gap-4">
               <Input value={startDate} onChange={setStartDate} label="Start Date" type="date" />

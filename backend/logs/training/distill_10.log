@@ -1,0 +1,11 @@
+[09:15:34] ============================================================
+[09:15:34]   Distillation  RL#25 → KNN#10 + LSTM#10
+[09:15:34]   Stocks: [3474]  Interval: day
+[09:15:34]   KNN k=5  LSTM hidden=128 layers=2
+[09:15:34] ============================================================
+[09:15:34] INFO   RL algorithm=PPO  seq_len=15  obs_mode=flat
+[09:15:34] INFO   Stock #3474: fetching OHLCV data...
+[09:15:34] INFO   Stock #3474: 1982 candles loaded. Preparing features...
+[09:15:35] INFO   Stock #3474: 479 quality rows, 40 features. Loading RL model...
+[09:15:35] ERROR  Stock #3474: could not load RL model: [Errno 2] No such file or directory: '/home/karthi/work/aitrade/backend/model_artifacts/rl/PPO_day/final_model.zip.zip'
+[09:15:35] ERROR  No golden patterns extracted. Check RL model quality and data availability.

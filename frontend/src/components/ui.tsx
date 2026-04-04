@@ -4,8 +4,8 @@ import { type ReactNode, type HTMLAttributes, useEffect, useCallback, useRef, us
    CARD — Primary content container
    ═══════════════════════════════════════════════════════════ */
 
-interface CardProps extends HTMLAttributes<HTMLDivElement> {
-  title?: string;
+interface CardProps extends Omit<HTMLAttributes<HTMLDivElement>, 'title'> {
+  title?: ReactNode;
   children: ReactNode;
   className?: string;
   action?: ReactNode;

@@ -169,7 +169,7 @@ def run_backtest(
                             "confidence": confidence,
                         }
 
-        elif action == 2 and confidence >= config.min_confidence:
+        elif action == -1 and confidence >= config.min_confidence:
             # SELL signal — close all positions
             for key, pos in list(positions.items()):
                 exit_value = pos["quantity"] * price * (1 - config.commission_pct)

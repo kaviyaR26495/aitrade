@@ -303,11 +303,14 @@ async def list_training_runs(db: AsyncSession, rl_model_id: int) -> Sequence[RLT
 
 
 async def delete_rl_model(db: AsyncSession, model_id: int) -> bool:
-    """Delete an RL model and all associated training runs. Returns True if found."""
+    """Delete an RL model and all directly associated rows. Returns True if found.
+    Caller is responsible for cascading through knn_models/lstm_models first.
+    """
     model = await get_rl_model(db, model_id)
     if not model:
         return False
-    # Delete child training runs first (FK constraint)
+    # golden_patterns references rl_models via FK — must go before rl_models
+    await db.execute(delete(GoldenPattern).where(GoldenPattern.rl_model_id == model_id))
     await db.execute(delete(RLTrainingRun).where(RLTrainingRun.rl_model_id == model_id))
     await db.execute(delete(RLModel).where(RLModel.id == model_id))
     await db.commit()
@@ -361,12 +364,64 @@ async def create_knn_model(db: AsyncSession, **kwargs) -> KNNModel:
     return m
 
 
+async def update_knn_model_status(db: AsyncSession, model_id: int, status: str) -> None:
+    await db.execute(update(KNNModel).where(KNNModel.id == model_id).values(status=status))
+    await db.commit()
+
+
+async def update_knn_model_completed(
+    db: AsyncSession,
+    model_id: int,
+    model_path: str | None,
+    norm_params_path: str | None,
+    accuracy: float | None,
+    precision_buy: float | None,
+    precision_sell: float | None,
+) -> None:
+    await db.execute(
+        update(KNNModel).where(KNNModel.id == model_id).values(
+            status="completed",
+            model_path=model_path,
+            norm_params_path=norm_params_path,
+            accuracy=accuracy,
+            precision_buy=precision_buy,
+            precision_sell=precision_sell,
+        )
+    )
+    await db.commit()
+
+
 async def create_lstm_model(db: AsyncSession, **kwargs) -> LSTMModel:
     m = LSTMModel(**kwargs)
     db.add(m)
     await db.commit()
     await db.refresh(m)
     return m
+
+
+async def update_lstm_model_status(db: AsyncSession, model_id: int, status: str) -> None:
+    await db.execute(update(LSTMModel).where(LSTMModel.id == model_id).values(status=status))
+    await db.commit()
+
+
+async def update_lstm_model_completed(
+    db: AsyncSession,
+    model_id: int,
+    model_path: str | None,
+    accuracy: float | None,
+    precision_buy: float | None,
+    precision_sell: float | None,
+) -> None:
+    await db.execute(
+        update(LSTMModel).where(LSTMModel.id == model_id).values(
+            status="completed",
+            model_path=model_path,
+            accuracy=accuracy,
+            precision_buy=precision_buy,
+            precision_sell=precision_sell,
+        )
+    )
+    await db.commit()
 
 
 async def create_ensemble_config(db: AsyncSession, **kwargs) -> EnsembleConfig:

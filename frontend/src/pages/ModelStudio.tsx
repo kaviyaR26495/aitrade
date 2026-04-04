@@ -2,8 +2,9 @@ import { useState, useRef, useEffect } from 'react';
 import { Card, Button, Select, SearchableSelect, Input, Badge, StatCard, EmptyState, PageHeader, Tabs, ListItem } from '../components/ui';
 import {
   useAlgorithms, useRlModels, useKnnModels, useLstmModels,
-  useUniverseStocks, useTrainModel, useDistillModel, useRlModelLogs, useDeviceInfo,
+  useUniverseStocks, useTrainModel, useDistillModel, useDistillLog, useRlModelLogs, useDeviceInfo,
   useStopTraining, usePauseTraining, useResumeTraining, useDeleteRlModel,
+  useDeleteKnnModel, useDeleteLstmModel, useEnsembleConfigs, useUpdateEnsemble, useDeleteEnsemble
 } from '../hooks/useApi';
 import { useAppStore } from '../store/appStore';
 import { Brain, Cpu, Layers, ChevronDown, ChevronUp, Zap, Square, Pause, Play, Trash2, ToggleLeft, ToggleRight } from 'lucide-react';
@@ -45,6 +46,8 @@ export default function ModelStudio() {
   const [logsVisible, setLogsVisible] = useState(true);
   // Id of model pending delete confirmation
   const [deleteConfirmId, setDeleteConfirmId] = useState<number | null>(null);
+  const [deleteConfirmKnnId, setDeleteConfirmKnnId] = useState<number | null>(null);
+  const [deleteConfirmLstmId, setDeleteConfirmLstmId] = useState<number | null>(null);
 
   const hasGpu = device?.device === 'cuda';
   // User can force CPU even when GPU is available; default to GPU if present
@@ -55,6 +58,22 @@ export default function ModelStudio() {
   const [kNeighbors, setKNeighbors] = useState('5');
   const [lstmHidden, setLstmHidden] = useState('128');
   const [lstmLayers, setLstmLayers] = useState('2');
+  const [rlModelName, setRlModelName] = useState('');
+  const [knnName, setKnnName] = useState('');
+  const [lstmName, setLstmName] = useState('');
+
+  // Active distillation log tracking
+  const [activeDistillKnnId, setActiveDistillKnnId] = useState<number | null>(null);
+  const { data: distillLogData } = useDistillLog(
+    activeDistillKnnId,
+    activeDistillKnnId !== null,
+  );
+  const distillLogRef = useRef<HTMLPreElement>(null);
+  useEffect(() => {
+    if (distillLogRef.current) {
+      distillLogRef.current.scrollTop = distillLogRef.current.scrollHeight;
+    }
+  }, [distillLogData?.content]);
 
   const algoOptions = algorithms && Array.isArray(algorithms)
     ? algorithms.map((a: any) => ({ value: a.name, label: a.name }))
@@ -73,14 +92,16 @@ export default function ModelStudio() {
   const handleTrain = () => _doTrain();
 
   const _doTrain = () => {
+    const parsedStockId = parseInt(stockId);
     trainMutation.mutate(
       {
-        stock_ids: [parseInt(stockId)],
+        stock_ids: !isNaN(parsedStockId) ? [parsedStockId] : [],
         algorithm: algo,
         total_timesteps: parseInt(timesteps),
         interval,
         min_quality: parseFloat(minQuality),
         regime_ids: regimeFilter.length > 0 ? regimeFilter : undefined,
+        model_name: rlModelName || undefined,
         device: effectiveDevice,
       },
       {
@@ -104,14 +125,19 @@ export default function ModelStudio() {
     distillMutation.mutate(
       {
         rl_model_id: parseInt(rlModelId),
-        stock_ids: [parseInt(stockId)],
         interval,
         k_neighbors: parseInt(kNeighbors),
         lstm_hidden_size: parseInt(lstmHidden),
         lstm_num_layers: parseInt(lstmLayers),
+        knn_name: knnName || undefined,
+        lstm_name: lstmName || undefined,
       },
       {
-        onSuccess: () => addNotification({ type: 'success', message: 'Distillation complete' }),
+        onSuccess: (res: any) => {
+          const knnId = res?.data?.knn_model_id ?? null;
+          if (knnId) setActiveDistillKnnId(knnId);
+          addNotification({ type: 'success', message: 'Distillation started — watch the log below' });
+        },
         onError: (e: any) => {
           let msg = 'Distillation failed';
           const d = e?.response?.data?.detail;
@@ -122,6 +148,9 @@ export default function ModelStudio() {
       }
     );
   };
+
+  const deleteKnnMutation = useDeleteKnnModel();
+  const deleteLstmMutation = useDeleteLstmModel();
 
   const toggleRegime = (id: number) => {
     setRegimeFilter((prev) =>
@@ -225,6 +254,8 @@ export default function ModelStudio() {
                 </div>
               </div>
 
+              <Input value={rlModelName} onChange={setRlModelName} label="Model Name" placeholder="e.g. PPO_RELIANCE_bullish (auto if blank)" />
+
               <Button onClick={handleTrain} loading={trainMutation.isPending} disabled={!stockId} data-guide-id="train-btn">
                 Start Training
               </Button>
@@ -273,7 +304,7 @@ export default function ModelStudio() {
                         left={
                           <div className="w-full">
                             <div className="flex items-center gap-2 mb-1">
-                              <span className="font-medium">{m.algorithm}</span>
+                              <span className="font-medium">{m.name ?? m.algorithm}</span>
                               <Badge color={badgeColor}>
                                 {m.status}
                               </Badge>
@@ -282,7 +313,7 @@ export default function ModelStudio() {
                               )}
                             </div>
                             <div className="text-xs text-[var(--text-dim)]">
-                              {stockIds.length > 0 ? `Stock IDs: ${stockIds.join(', ')}` : ''}
+                              {m.algorithm}{stockIds.length > 0 ? ` · Stocks: ${stockIds.join(', ')}` : ''}
                               {steps ? ` · ${steps.toLocaleString()} steps` : ''}
                               {m.interval ? ` · ${m.interval}` : ''}
                             </div>
@@ -401,6 +432,9 @@ export default function ModelStudio() {
               <div className="border-t border-[var(--border)] pt-4">
                 <h4 className="text-sm font-medium mb-3">KNN Settings</h4>
                 <Input value={kNeighbors} onChange={setKNeighbors} label="K Neighbors" type="number" />
+                <div className="mt-3">
+                  <Input value={knnName} onChange={setKnnName} label="KNN Model Name" placeholder="e.g. KNN_v1_bullish (auto if blank)" />
+                </div>
               </div>
 
               <div className="border-t border-[var(--border)] pt-4">
@@ -408,6 +442,9 @@ export default function ModelStudio() {
                 <div className="grid grid-cols-2 gap-3">
                   <Input value={lstmHidden} onChange={setLstmHidden} label="Hidden Size" type="number" />
                   <Input value={lstmLayers} onChange={setLstmLayers} label="Num Layers" type="number" />
+                </div>
+                <div className="mt-3">
+                  <Input value={lstmName} onChange={setLstmName} label="LSTM Model Name" placeholder="e.g. LSTM_v1_volatile (auto if blank)" />
                 </div>
               </div>
 
@@ -424,12 +461,42 @@ export default function ModelStudio() {
                   {knnModels.map((m: any) => (
                     <div key={m.id} className="p-3 rounded-[var(--radius-sm)] bg-[var(--bg-input)] hover:bg-[var(--bg-hover)] transition-colors text-sm">
                       <div className="flex items-center justify-between">
-                        <span className="font-medium">KNN (k={m.k_neighbors})</span>
-                        <Badge color="green">{m.status}</Badge>
+                        <div>
+                          <span className="font-medium">{m.name ?? `KNN (k=${m.k_neighbors})`}</span>
+                          <div className="text-xs text-[var(--text-dim)] mt-0.5">k={m.k_neighbors}</div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <Badge color={m.status === 'failed' ? 'red' : 'green'}>{m.status}</Badge>
+                          {deleteConfirmKnnId === m.id ? (
+                            <div className="flex items-center gap-1">
+                              <button
+                                className="px-2 py-0.5 rounded-[var(--radius-sm)] text-xs bg-red-500/20 text-red-400 hover:bg-red-500/30 transition-colors font-medium border border-transparent"
+                                onClick={() => { deleteKnnMutation.mutate(m.id); setDeleteConfirmKnnId(null); }}
+                                disabled={deleteKnnMutation.isPending}
+                              >
+                                Yes
+                              </button>
+                              <button
+                                className="px-2 py-0.5 rounded-[var(--radius-sm)] text-xs bg-[var(--surface-2)] text-[var(--text-dim)] hover:bg-[var(--surface-3)] transition-colors font-medium border border-transparent"
+                                onClick={() => setDeleteConfirmKnnId(null)}
+                              >
+                                No
+                              </button>
+                            </div>
+                          ) : (
+                            <button
+                              onClick={() => setDeleteConfirmKnnId(m.id)}
+                              className="p-1 text-[var(--text-dim)] hover:text-rose-400 rounded-sm hover:bg-[var(--surface-3)] transition-colors"
+                              title="Delete model"
+                            >
+                              <Trash2 size={14} />
+                            </button>
+                          )}
+                        </div>
                       </div>
-                      {m.metrics && (
+                      {(m.metrics || m.accuracy != null) && (
                         <div className="text-xs text-[var(--text-dim)] mt-1 tabular-nums">
-                          Accuracy: {(m.metrics.accuracy * 100).toFixed(1)}%
+                          Accuracy: {((m.metrics?.accuracy ?? m.accuracy) * 100).toFixed(1)}%
                         </div>
                       )}
                     </div>
@@ -446,12 +513,42 @@ export default function ModelStudio() {
                   {lstmModels.map((m: any) => (
                     <div key={m.id} className="p-3 rounded-[var(--radius-sm)] bg-[var(--bg-input)] hover:bg-[var(--bg-hover)] transition-colors text-sm">
                       <div className="flex items-center justify-between">
-                        <span className="font-medium">LSTM (h={m.hidden_size})</span>
-                        <Badge color="green">{m.status}</Badge>
+                        <div>
+                          <span className="font-medium">{m.name ?? `LSTM (h=${m.hidden_size})`}</span>
+                          <div className="text-xs text-[var(--text-dim)] mt-0.5">hidden={m.hidden_size} · layers={m.num_layers}</div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <Badge color={m.status === 'failed' ? 'red' : 'green'}>{m.status}</Badge>
+                          {deleteConfirmLstmId === m.id ? (
+                            <div className="flex items-center gap-1">
+                              <button
+                                className="px-2 py-0.5 rounded-[var(--radius-sm)] text-xs bg-red-500/20 text-red-400 hover:bg-red-500/30 transition-colors font-medium border border-transparent"
+                                onClick={() => { deleteLstmMutation.mutate(m.id); setDeleteConfirmLstmId(null); }}
+                                disabled={deleteLstmMutation.isPending}
+                              >
+                                Yes
+                              </button>
+                              <button
+                                className="px-2 py-0.5 rounded-[var(--radius-sm)] text-xs bg-[var(--surface-2)] text-[var(--text-dim)] hover:bg-[var(--surface-3)] transition-colors font-medium border border-transparent"
+                                onClick={() => setDeleteConfirmLstmId(null)}
+                              >
+                                No
+                              </button>
+                            </div>
+                          ) : (
+                            <button
+                              onClick={() => setDeleteConfirmLstmId(m.id)}
+                              className="p-1 text-[var(--text-dim)] hover:text-rose-400 rounded-sm hover:bg-[var(--surface-3)] transition-colors"
+                              title="Delete model"
+                            >
+                              <Trash2 size={14} />
+                            </button>
+                          )}
+                        </div>
                       </div>
-                      {m.metrics && (
+                      {(m.metrics || m.accuracy != null) && (
                         <div className="text-xs text-[var(--text-dim)] mt-1 tabular-nums">
-                          Accuracy: {(m.metrics.accuracy * 100).toFixed(1)}%
+                          Accuracy: {((m.metrics?.accuracy ?? m.accuracy) * 100).toFixed(1)}%
                         </div>
                       )}
                     </div>
@@ -462,40 +559,275 @@ export default function ModelStudio() {
               )}
             </Card>
           </div>
+
+          {/* Distillation Log Panel */}
+          {(activeDistillKnnId || distillLogData) && (
+            <Card title={
+              <div className="flex items-center justify-between w-full">
+                <span className="flex items-center gap-2">
+                  Distillation Log
+                  {distillLogData?.is_active && (
+                    <span className="flex items-center gap-1 text-xs font-normal text-emerald-400">
+                      <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse inline-block" />
+                      running
+                    </span>
+                  )}
+                </span>
+                <button
+                  onClick={() => setActiveDistillKnnId(null)}
+                  className="text-xs text-[var(--text-dim)] hover:text-[var(--text)] transition-colors"
+                >
+                  dismiss
+                </button>
+              </div>
+            }>
+              <pre
+                ref={distillLogRef}
+                className="text-[11px] leading-relaxed font-mono bg-[var(--bg-input)] rounded p-3 overflow-y-auto max-h-72 whitespace-pre-wrap"
+              >
+                {distillLogData?.content
+                  ? distillLogData.content.split('\n').map((line: string, i: number) => {
+                      let cls = 'text-[var(--text)]';
+                      if (line.includes('ERROR')) cls = 'text-rose-400';
+                      else if (line.includes('DONE')) cls = 'text-emerald-400';
+                      else if (line.includes('INFO')) cls = 'text-indigo-300';
+                      else if (line.startsWith('=')) cls = 'text-[var(--text-dim)]';
+                      return <span key={i} className={cls}>{line}{'\n'}</span>;
+                    })
+                  : <span className="text-[var(--text-dim)]">Waiting for distillation to start…</span>
+                }
+              </pre>
+            </Card>
+          )}
         </div>
       )}
 
       {tab === 'ensemble' && (
-        <Card title="Ensemble Configuration">
-          <div className="space-y-4">
-            <p className="text-sm text-[var(--text-muted)]">
-              The ensemble combines KNN and LSTM predictions using weighted probabilities.
-              When agreement is required, the ensemble only outputs BUY/SELL when both models agree.
-            </p>
-
-            <div className="grid grid-cols-2 gap-5">
-              <div className="p-4 rounded-[var(--radius-sm)] bg-[var(--bg-input)]">
-                <h4 className="text-xs font-medium text-[var(--text-dim)] uppercase tracking-wider mb-2">KNN Weight</h4>
-                <div className="text-2xl font-bold text-blue-400 tabular-nums">0.5</div>
-              </div>
-              <div className="p-4 rounded-[var(--radius-sm)] bg-[var(--bg-input)]">
-                <h4 className="text-xs font-medium text-[var(--text-dim)] uppercase tracking-wider mb-2">LSTM Weight</h4>
-                <div className="text-2xl font-bold text-purple-400 tabular-nums">0.5</div>
-              </div>
-            </div>
-
-            <div className="p-4 rounded-[var(--radius-sm)] bg-[var(--bg-input)]">
-              <div className="flex items-center justify-between mb-2">
-                <h4 className="text-sm font-medium">Agreement Required</h4>
-                <Badge color="green">ON</Badge>
-              </div>
-              <p className="text-xs text-[var(--text-dim)]">
-                When enabled, predictions where KNN and LSTM disagree are set to HOLD.
-              </p>
-            </div>
-          </div>
-        </Card>
+        <EnsembleTab knnModels={knnModels ?? []} lstmModels={lstmModels ?? []} />
       )}
+    </div>
+  );
+}
+
+// ── Ensemble Tab ──────────────────────────────────────────────────────
+
+function EnsembleTab({ knnModels, lstmModels }: { knnModels: any[]; lstmModels: any[] }) {
+  const { data: ensembles, isLoading } = useEnsembleConfigs();
+  const updateMutation = useUpdateEnsemble();
+  const deleteMutation = useDeleteEnsemble();
+  const { addNotification } = useAppStore();
+
+  // per-ensemble local edit state
+  const [editState, setEditState] = useState<Record<number, { knn_weight: string; lstm_weight: string; agreement_required: boolean }>>({});
+  const [deleteConfirmId, setDeleteConfirmId] = useState<number | null>(null);
+
+  // Initialise edit state when data loads
+  useEffect(() => {
+    if (!ensembles) return;
+    const init: typeof editState = {};
+    for (const e of ensembles) {
+      if (!(e.id in editState)) {
+        init[e.id] = {
+          knn_weight: String(e.knn_weight),
+          lstm_weight: String(e.lstm_weight),
+          agreement_required: e.agreement_required,
+        };
+      }
+    }
+    if (Object.keys(init).length > 0) setEditState(prev => ({ ...prev, ...init }));
+  }, [ensembles]);
+
+  if (isLoading) return <div className="p-6 text-[var(--text-muted)] text-sm">Loading…</div>;
+  if (!ensembles || ensembles.length === 0) {
+    return (
+      <Card title="Ensemble Configuration">
+        <EmptyState
+          icon={<Layers size={32} />}
+          title="No ensemble configurations"
+          description="Run distillation on an RL model to create a KNN + LSTM ensemble pair."
+        />
+      </Card>
+    );
+  }
+
+  return (
+    <div className="space-y-5">
+      <p className="text-sm text-[var(--text-muted)] px-1">
+        The ensemble combines KNN and LSTM predictions using weighted probabilities.
+        When agreement is required, only BUY/SELL signals where both models agree are output — all others become HOLD.
+      </p>
+
+      {ensembles.map((ens: any) => {
+        const knn = knnModels.find((m: any) => m.id === ens.knn_model_id);
+        const lstm = lstmModels.find((m: any) => m.id === ens.lstm_model_id);
+        const local = editState[ens.id];
+        if (!local) return null;
+
+        const knnW = parseFloat(local.knn_weight) || 0;
+        const lstmW = parseFloat(local.lstm_weight) || 0;
+        const weightsValid = Math.abs(knnW + lstmW - 1.0) < 0.001 && knnW >= 0 && lstmW >= 0;
+
+        const handleSave = () => {
+          if (!weightsValid) {
+            addNotification({ type: 'error', message: 'KNN + LSTM weights must sum to 1.0' });
+            return;
+          }
+          updateMutation.mutate(
+            { id: ens.id, data: { knn_weight: knnW, lstm_weight: lstmW, agreement_required: local.agreement_required } },
+            {
+              onSuccess: () => addNotification({ type: 'success', message: 'Ensemble updated.' }),
+              onError: () => addNotification({ type: 'error', message: 'Failed to update ensemble.' }),
+            }
+          );
+        };
+
+        return (
+          <Card key={ens.id} title={ens.name}>
+            <div className="space-y-5">
+              {/* Model info row */}
+              <div className="grid grid-cols-2 gap-4">
+                <div className="p-3 rounded-[var(--radius-sm)] bg-[var(--bg-input)] border border-blue-500/20">
+                  <div className="text-xs font-medium text-blue-400 uppercase tracking-wider mb-2">KNN Model</div>
+                  {knn ? (
+                    <>
+                      <div className="text-sm font-medium truncate">{knn.name}</div>
+                      <div className="flex gap-3 mt-1 text-xs text-[var(--text-dim)]">
+                        <span>Acc: <span className="text-[var(--text-secondary)]">{knn.accuracy != null ? `${(knn.accuracy * 100).toFixed(1)}%` : '—'}</span></span>
+                        <span>Buy: <span className="text-[var(--text-secondary)]">{knn.precision_buy != null ? `${(knn.precision_buy * 100).toFixed(1)}%` : '—'}</span></span>
+                        <span>Sell: <span className="text-[var(--text-secondary)]">{knn.precision_sell != null ? `${(knn.precision_sell * 100).toFixed(1)}%` : '—'}</span></span>
+                      </div>
+                      <Badge color={knn.status === 'completed' ? 'green' : knn.status === 'training' ? 'yellow' : 'red'} className="mt-2">{knn.status}</Badge>
+                    </>
+                  ) : (
+                    <div className="text-xs text-[var(--text-dim)]">KNN #{ens.knn_model_id}</div>
+                  )}
+                </div>
+
+                <div className="p-3 rounded-[var(--radius-sm)] bg-[var(--bg-input)] border border-purple-500/20">
+                  <div className="text-xs font-medium text-purple-400 uppercase tracking-wider mb-2">LSTM Model</div>
+                  {lstm ? (
+                    <>
+                      <div className="text-sm font-medium truncate">{lstm.name}</div>
+                      <div className="flex gap-3 mt-1 text-xs text-[var(--text-dim)]">
+                        <span>Acc: <span className="text-[var(--text-secondary)]">{lstm.accuracy != null ? `${(lstm.accuracy * 100).toFixed(1)}%` : '—'}</span></span>
+                        <span>Buy: <span className="text-[var(--text-secondary)]">{lstm.precision_buy != null ? `${(lstm.precision_buy * 100).toFixed(1)}%` : '—'}</span></span>
+                        <span>Sell: <span className="text-[var(--text-secondary)]">{lstm.precision_sell != null ? `${(lstm.precision_sell * 100).toFixed(1)}%` : '—'}</span></span>
+                      </div>
+                      <Badge color={lstm.status === 'completed' ? 'green' : lstm.status === 'training' ? 'yellow' : 'red'} className="mt-2">{lstm.status}</Badge>
+                    </>
+                  ) : (
+                    <div className="text-xs text-[var(--text-dim)]">LSTM #{ens.lstm_model_id}</div>
+                  )}
+                </div>
+              </div>
+
+              {/* Weight inputs */}
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="text-xs font-medium text-[var(--text-dim)] uppercase tracking-wider block mb-1">KNN Weight</label>
+                  <Input
+                    type="number"
+                    min="0"
+                    max="1"
+                    step="0.05"
+                    value={local.knn_weight}
+                    onChange={e => {
+                      const kw = e.target.value;
+                      const kn = parseFloat(kw);
+                      setEditState(prev => ({
+                        ...prev,
+                        [ens.id]: {
+                          ...prev[ens.id],
+                          knn_weight: kw,
+                          lstm_weight: isNaN(kn) ? prev[ens.id].lstm_weight : String(Math.round((1 - kn) * 100) / 100),
+                        },
+                      }));
+                    }}
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-medium text-[var(--text-dim)] uppercase tracking-wider block mb-1">LSTM Weight</label>
+                  <Input
+                    type="number"
+                    min="0"
+                    max="1"
+                    step="0.05"
+                    value={local.lstm_weight}
+                    onChange={e => {
+                      const lw = e.target.value;
+                      const ln = parseFloat(lw);
+                      setEditState(prev => ({
+                        ...prev,
+                        [ens.id]: {
+                          ...prev[ens.id],
+                          lstm_weight: lw,
+                          knn_weight: isNaN(ln) ? prev[ens.id].knn_weight : String(Math.round((1 - ln) * 100) / 100),
+                        },
+                      }));
+                    }}
+                  />
+                </div>
+              </div>
+              {!weightsValid && (
+                <p className="text-xs text-red-400">Weights must sum to 1.0 (currently {(knnW + lstmW).toFixed(2)})</p>
+              )}
+
+              {/* Agreement toggle */}
+              <div className="flex items-center justify-between p-3 rounded-[var(--radius-sm)] bg-[var(--bg-input)]">
+                <div>
+                  <div className="text-sm font-medium">Agreement Required</div>
+                  <div className="text-xs text-[var(--text-dim)] mt-0.5">
+                    When ON, signals where KNN and LSTM disagree become HOLD.
+                  </div>
+                </div>
+                <button
+                  onClick={() => setEditState(prev => ({
+                    ...prev,
+                    [ens.id]: { ...prev[ens.id], agreement_required: !prev[ens.id].agreement_required },
+                  }))}
+                  className="flex items-center gap-1.5 text-sm"
+                >
+                  {local.agreement_required
+                    ? <><ToggleRight size={22} className="text-[var(--primary)]" /><span className="text-[var(--primary)] font-medium">ON</span></>
+                    : <><ToggleLeft size={22} className="text-[var(--text-dim)]" /><span className="text-[var(--text-dim)]">OFF</span></>
+                  }
+                </button>
+              </div>
+
+              {/* Action row */}
+              <div className="flex items-center justify-between pt-1">
+                <div className="text-xs text-[var(--text-dim)]">
+                  Interval: <span className="text-[var(--text-secondary)]">{ens.interval}</span>
+                </div>
+                <div className="flex gap-2">
+                  {deleteConfirmId === ens.id ? (
+                    <>
+                      <span className="text-xs text-[var(--text-muted)] self-center">Delete?</span>
+                      <Button
+                        size="sm"
+                        variant="danger"
+                        loading={deleteMutation.isPending}
+                        onClick={() => deleteMutation.mutate(ens.id, {
+                          onSuccess: () => { setDeleteConfirmId(null); addNotification({ type: 'success', message: 'Ensemble deleted.' }); },
+                          onError: () => addNotification({ type: 'error', message: 'Failed to delete.' }),
+                        })}
+                      >Yes</Button>
+                      <Button size="sm" variant="ghost" onClick={() => setDeleteConfirmId(null)}>No</Button>
+                    </>
+                  ) : (
+                    <Button size="sm" variant="ghost" onClick={() => setDeleteConfirmId(ens.id)}>
+                      <Trash2 size={13} className="mr-1" />Delete
+                    </Button>
+                  )}
+                  <Button size="sm" loading={updateMutation.isPending} onClick={handleSave} disabled={!weightsValid}>
+                    Save
+                  </Button>
+                </div>
+              </div>
+            </div>
+          </Card>
+        );
+      })}
     </div>
   );
 }
@@ -721,8 +1053,10 @@ function TrainingLogsPanel({
                   <Tooltip
                     contentStyle={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 6, fontSize: 11 }}
                     labelStyle={{ color: 'var(--text-dim)' }}
-                    formatter={(value: number, name: string) =>
-                      name === 'profit' ? [`${value.toFixed(2)}%`, 'Profit'] : [value.toFixed(4), 'Reward']
+                    formatter={(value: any, name: any): [string, string] =>
+                      name === 'profit'
+                        ? [`${(value as number).toFixed(2)}%`, 'Profit']
+                        : [`${(value as number).toFixed(4)}`, 'Reward']
                     }
                     labelFormatter={(v) => `Step ${v?.toLocaleString()}`}
                   />

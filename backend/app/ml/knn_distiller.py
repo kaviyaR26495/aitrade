@@ -33,6 +33,7 @@ def train_knn(
     k_neighbors: int = 5,
     train_ratio: float = 0.8,
     use_smote: bool = True,
+    log_fn: Any = None,
 ) -> tuple[KNeighborsClassifier, dict[str, Any]]:
     """
     Train KNN on golden patterns.
@@ -42,6 +43,11 @@ def train_knn(
 
     Returns (model, metrics_dict).
     """
+    def _log(msg: str) -> None:
+        logger.info(msg)
+        if log_fn:
+            log_fn(msg)
+
     if len(X) == 0:
         raise ValueError("No training data provided")
 
@@ -54,28 +60,30 @@ def train_knn(
     X_train, X_test = X_flat[:split_idx], X_flat[split_idx:]
     y_train, y_test = y[:split_idx], y[split_idx:]
 
-    logger.info(
-        "KNN split: train=%d, test=%d. Classes: %s",
-        len(X_train), len(X_test), dict(zip(*np.unique(y_train, return_counts=True))),
+    _log(
+        f"INFO   KNN split: train={len(X_train)}, test={len(X_test)}.  Classes: {dict(zip(*np.unique(y_train, return_counts=True)))}"
     )
 
     # SMOTE oversampling for class imbalance
     if use_smote and len(np.unique(y_train)) > 1:
         try:
             from imblearn.over_sampling import SMOTE
+            _log("INFO   Running SMOTE oversampling...")
             smote = SMOTE(random_state=42)
             X_train, y_train = smote.fit_resample(X_train, y_train)
-            logger.info("After SMOTE: %s", dict(zip(*np.unique(y_train, return_counts=True))))
+            _log(f"INFO   After SMOTE: {dict(zip(*np.unique(y_train, return_counts=True)))}")
         except ImportError:
-            logger.warning("imblearn not installed, skipping SMOTE. Install with: pip install imbalanced-learn")
+            _log("WARN   imblearn not installed, skipping SMOTE")
 
     # Train KNN
+    _log(f"INFO   Fitting KNN (k={k_neighbors}, n_train={len(X_train)}, features={X_flat.shape[1]})...")
     knn = KNeighborsClassifier(
         n_neighbors=k_neighbors,
         weights="distance",
         n_jobs=-1,
     )
     knn.fit(X_train, y_train)
+    _log("INFO   KNN fit complete. Evaluating...")
 
     # Evaluate
     y_pred = knn.predict(X_test)
@@ -99,8 +107,6 @@ def train_knn(
         "class_distribution_test": dict(zip(*[a.tolist() for a in np.unique(y_test, return_counts=True)])),
         "classification_report": report,
     }
-
-    logger.info("KNN accuracy: %.4f, prec_buy: %.4f, prec_sell: %.4f", accuracy, prec_buy, prec_sell)
 
     return knn, metrics
 

@@ -118,15 +118,22 @@ export const trainModel = (params: Record<string, unknown>) =>
   api.post('/models/train', params);
 export const distillModel = (params: Record<string, unknown>) =>
   api.post('/models/distill', params);
+export const getDistillLog = (knnModelId: number) => api.get(`/models/knn/${knnModelId}/log`);
 export const listKnnModels = () => api.get('/models/knn');
+export const deleteKnnModel = (id: number) => api.delete(`/models/knn/${id}`);
 export const listLstmModels = () => api.get('/models/lstm');
+export const deleteLstmModel = (id: number) => api.delete(`/models/lstm/${id}`);
+export const listEnsembleConfigs = () => api.get('/models/ensemble');
+export const updateEnsembleConfig = (id: number, data: { knn_weight: number; lstm_weight: number; agreement_required: boolean }) =>
+  api.put(`/models/ensemble/${id}`, data);
+export const deleteEnsembleConfig = (id: number) => api.delete(`/models/ensemble/${id}`);
 export const listAllModels = () => api.get('/models/all');
 
 // ── Backtest ──
 export const runBacktest = (params: Record<string, unknown>) =>
   api.post('/backtest/run', params);
-export const getBacktestResults = (id: number) => api.get(`/backtest/${id}`);
-export const listBacktestResults = () => api.get('/backtest/');
+export const getBacktestResults = (id: number) => api.get(`/backtest/results/${id}`);
+export const listBacktestResults = () => api.get('/backtest/results');
 
 // ── Trading ──
 export const getPredictions = (params?: Record<string, unknown>) =>
@@ -165,3 +172,5 @@ export async function sendChatMessage(
 }
 
 export default api;
+export const getGoldenPatterns = (rl_model_id?: number) =>
+  api.get('/models/patterns', { params: { rl_model_id } });

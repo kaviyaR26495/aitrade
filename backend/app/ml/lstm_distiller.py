@@ -70,6 +70,7 @@ def train_lstm(
     patience: int = 10,
     train_ratio: float = 0.8,
     device: str | None = None,
+    log_fn: Any = None,
 ) -> tuple[TradeLSTM, dict[str, Any]]:
     """
     Train LSTM on golden patterns.
@@ -82,6 +83,11 @@ def train_lstm(
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
+    def _log(msg: str) -> None:
+        logger.info(msg)
+        if log_fn:
+            log_fn(msg)
+
     n_samples, seq_len, n_features = X.shape
 
     # Chronological split
@@ -89,18 +95,18 @@ def train_lstm(
     X_train, X_val = X[:split_idx], X[split_idx:]
     y_train, y_val = y[:split_idx], y[split_idx:]
 
-    logger.info(
-        "LSTM split: train=%d, val=%d. Classes: %s",
-        len(X_train), len(X_val), dict(zip(*np.unique(y_train, return_counts=True))),
+    _log(
+        f"INFO   LSTM split: train={len(X_train)}, val={len(X_val)}.  Classes: {dict(zip(*np.unique(y_train, return_counts=True)))}"
     )
 
-    # Class weights for imbalanced data
+    # Class weights for imbalanced data (always size num_classes=3)
+    num_classes = 3
     classes, counts = np.unique(y_train, return_counts=True)
     total = counts.sum()
-    class_weights = torch.tensor(
-        [total / (len(classes) * c) for c in counts],
-        dtype=torch.float32,
-    ).to(device)
+    weight_array = np.ones(num_classes, dtype=np.float32)
+    for cls, cnt in zip(classes, counts):
+        weight_array[int(cls)] = total / (len(classes) * cnt)
+    class_weights = torch.tensor(weight_array, dtype=torch.float32).to(device)
 
     # DataLoaders
     train_ds = TensorDataset(
@@ -173,9 +179,8 @@ def train_lstm(
         scheduler.step(val_loss)
 
         if epoch % 10 == 0:
-            logger.info(
-                "Epoch %d: train_loss=%.4f, val_loss=%.4f, val_acc=%.4f",
-                epoch, train_loss, val_loss, val_acc,
+            _log(
+                f"INFO   Epoch {epoch}/{max_epochs}: train_loss={train_loss:.4f}  val_loss={val_loss:.4f}  val_acc={val_acc:.4f}"
             )
 
         # Early stopping
@@ -186,7 +191,7 @@ def train_lstm(
         else:
             epochs_no_improve += 1
             if epochs_no_improve >= patience:
-                logger.info("Early stopping at epoch %d", epoch)
+                _log(f"INFO   Early stopping at epoch {epoch} (no improvement for {patience} epochs)")
                 break
 
     # Load best model

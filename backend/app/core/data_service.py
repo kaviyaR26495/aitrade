@@ -102,7 +102,7 @@ async def get_stock_features(
     normalize: bool = True,
 ) -> pd.DataFrame:
     """
-    Get full feature matrix for a stock (OHLCV + indicators).
+    Get full feature matrix for a stock (OHLCV + indicators + regimes).
 
     Returns a DataFrame with all features, optionally normalized.
     """
@@ -115,6 +115,39 @@ async def get_stock_features(
         return pd.DataFrame()
 
     df = compute_all_indicators(df)
+
+    # Join regime features if available
+    regime_rows = await crud.get_regimes(db, stock_id, interval, start_date, end_date)
+    if regime_rows:
+        regime_data = []
+        for r in regime_rows:
+            trend_val = r.trend.value if hasattr(r.trend, 'value') else str(r.trend)
+            vol_val = r.volatility.value if hasattr(r.volatility, 'value') else str(r.volatility)
+            regime_data.append({
+                "date": r.date,
+                "regime_id": r.regime_id or 0,
+                "regime_confidence": r.regime_confidence or 0.5,
+                "quality_score": r.quality_score or 0.5,
+                "regime_trend_bullish": 1.0 if trend_val == "bullish" else 0.0,
+                "regime_trend_bearish": 1.0 if trend_val == "bearish" else 0.0,
+                "regime_trend_neutral": 1.0 if trend_val == "neutral" else 0.0,
+                "regime_vol_high": 1.0 if vol_val == "high" else 0.0,
+                "is_transition": float(r.is_transition) if r.is_transition is not None else 0.0,
+            })
+        regime_df = pd.DataFrame(regime_data)
+        if "date" in df.columns:
+            regime_df["date"] = pd.to_datetime(regime_df["date"])
+            df = df.merge(regime_df, on="date", how="left")
+        # Fill NaN regime columns with defaults
+        regime_fill = {
+            "regime_id": 0, "regime_confidence": 0.5, "quality_score": 0.5,
+            "regime_trend_bullish": 0.0, "regime_trend_bearish": 0.0,
+            "regime_trend_neutral": 1.0,
+            "regime_vol_high": 0.0, "is_transition": 0.0,
+        }
+        for col, default in regime_fill.items():
+            if col in df.columns:
+                df[col] = df[col].fillna(default)
 
     if normalize:
         df = normalize_dataframe(df)

@@ -45,6 +45,7 @@ export default function ChatBot() {
   const [provider, setProvider] = useState('openai');
   const [model, setModel] = useState('gpt-4.1-nano');
   const [apiKey, setApiKey] = useState('');
+  const [savedKeys, setSavedKeys] = useState<Record<string, string>>({});
   const [ollamaUrl, setOllamaUrl] = useState('http://localhost:11434');
   const [configLoaded, setConfigLoaded] = useState(false);
   const [configSaving, setConfigSaving] = useState(false);
@@ -74,9 +75,14 @@ export default function ChatBot() {
   const loadConfig = async () => {
     try {
       const [provRes, statusRes] = await Promise.all([getChatProviders(), getChatStatus()]);
+      const activeProvider = statusRes.data.provider || 'openai';
+      const activeKey = statusRes.data.api_key || '';
       setProviders(provRes.data);
-      setProvider(statusRes.data.provider || 'openai');
+      setProvider(activeProvider);
       setModel(statusRes.data.model || 'gpt-4.1-nano');
+      setApiKey(activeKey);
+      // Cache the key so switching providers in the panel restores the right value
+      setSavedKeys((prev) => ({ ...prev, [activeProvider]: activeKey }));
       setOllamaUrl(statusRes.data.ollama_base_url || 'http://localhost:11434');
       setConfigured(statusRes.data.configured);
       setConfigLoaded(true);
@@ -91,14 +97,17 @@ export default function ChatBot() {
       const settings = [
         { key: 'llm_provider', value: provider },
         { key: 'llm_model', value: model },
-        { key: `llm_api_key_${provider}`, value: apiKey },
         { key: 'ollama_base_url', value: ollamaUrl },
       ];
+      // Only save API key if the user actually typed one (don't wipe existing key with blank)
+      if (apiKey.trim()) {
+        settings.push({ key: `llm_api_key_${provider}`, value: apiKey.trim() });
+        setSavedKeys((prev) => ({ ...prev, [provider]: apiKey.trim() }));
+      }
       await updateConfigBatch(settings);
       setConfigured(true);
-      setApiKey('');
       setShowConfig(false);
-      await loadConfig();
+      setConfigLoaded(false); // force a fresh reload so the saved state is fetched
     } catch {
       // silently fail
     } finally {
@@ -271,8 +280,11 @@ export default function ChatBot() {
                 <select
                   value={provider}
                   onChange={(e) => {
-                    setProvider(e.target.value);
-                    const models = providers[e.target.value]?.models ?? [];
+                    const newProvider = e.target.value;
+                    setProvider(newProvider);
+                    // Restore the cached key for this provider (empty if not yet entered)
+                    setApiKey(savedKeys[newProvider] || '');
+                    const models = providers[newProvider]?.models ?? [];
                     if (models.length > 0) setModel(models[0]);
                   }}
                   className="w-full bg-[var(--bg-card-solid)] border border-[var(--border)] rounded-[var(--radius-sm)] px-2.5 py-1.5 text-xs text-[var(--text)] focus:outline-none focus:ring-1 focus:ring-[var(--primary)]"
