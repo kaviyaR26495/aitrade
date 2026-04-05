@@ -17,14 +17,115 @@ from typing import Any
 
 import joblib
 import numpy as np
-from sklearn.neighbors import KNeighborsClassifier
+from sklearn.neighbors import KNeighborsClassifier  # kept for loading legacy saved models
 from sklearn.metrics import (
     accuracy_score,
     classification_report,
     precision_score,
 )
+from sklearn.preprocessing import StandardScaler
 
 logger = logging.getLogger(__name__)
+
+
+class FaissKNNClassifier:
+    """FAISS-backed approximate nearest-neighbor classifier.
+
+    Drop-in replacement for sklearn KNeighborsClassifier.  Uses
+    IndexFlatL2 for small datasets (< 10 000 samples) and IndexIVFFlat
+    for larger ones, keeping search latency in the millisecond range.
+    Fully compatible with joblib.dump / joblib.load via custom
+    __getstate__ / __setstate__ that serialize the FAISS index to bytes.
+    """
+
+    def __init__(self, k: int = 5) -> None:
+        self.k = k
+        self._index = None
+        self._train_y: np.ndarray | None = None
+        self._classes: np.ndarray | None = None
+        self._n_features: int | None = None
+
+    # ------------------------------------------------------------------
+    # Joblib / pickle compatibility
+    # ------------------------------------------------------------------
+    def __getstate__(self) -> dict:
+        state = self.__dict__.copy()
+        if self._index is not None:
+            import faiss
+            state["_index_bytes"] = faiss.serialize_index(self._index).tobytes()
+        del state["_index"]
+        return state
+
+    def __setstate__(self, state: dict) -> None:
+        index_bytes = state.pop("_index_bytes", None)
+        self.__dict__.update(state)
+        if index_bytes is not None:
+            import faiss
+            arr = np.frombuffer(index_bytes, dtype=np.uint8)
+            self._index = faiss.deserialize_index(arr)
+        else:
+            self._index = None
+
+    # ------------------------------------------------------------------
+    # sklearn-compatible interface
+    # ------------------------------------------------------------------
+    def fit(self, X: np.ndarray, y: np.ndarray) -> "FaissKNNClassifier":
+        import faiss
+        X = np.ascontiguousarray(X, dtype=np.float32)
+        n, d = X.shape
+        self._n_features = d
+        self._train_y = np.asarray(y)
+        self._classes = np.unique(y)
+        if n < 10_000:
+            index: faiss.Index = faiss.IndexFlatL2(d)
+        else:
+            nlist = min(int(np.sqrt(n)), 256)
+            quantizer = faiss.IndexFlatL2(d)
+            index = faiss.IndexIVFFlat(quantizer, d, nlist, faiss.METRIC_L2)
+            index.train(X)
+            index.nprobe = max(10, nlist // 10)
+        index.add(X)
+        self._index = index
+        return self
+
+    def _query(self, X: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        X = np.ascontiguousarray(X, dtype=np.float32)
+        k = min(self.k, self._index.ntotal)
+        distances, indices = self._index.search(X, k)
+        return distances, indices
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        distances, indices = self._query(X)
+        n = X.shape[0]
+        preds = np.empty(n, dtype=self._train_y.dtype)
+        for i in range(n):
+            neighbor_labels = self._train_y[indices[i]]
+            weights = 1.0 / (distances[i] + 1e-8)
+            class_scores: dict = {c: 0.0 for c in self._classes}
+            for label, w in zip(neighbor_labels, weights):
+                class_scores[label] += w
+            preds[i] = max(class_scores, key=class_scores.__getitem__)
+        return preds
+
+    def predict_proba(self, X: np.ndarray) -> np.ndarray:
+        distances, indices = self._query(X)
+        n = X.shape[0]
+        n_classes = len(self._classes)
+        class_idx = {c: j for j, c in enumerate(self._classes)}
+        probs = np.zeros((n, n_classes), dtype=np.float32)
+        for i in range(n):
+            neighbor_labels = self._train_y[indices[i]]
+            weights = 1.0 / (distances[i] + 1e-8)
+            for label, w in zip(neighbor_labels, weights):
+                probs[i, class_idx[label]] += w
+            total = probs[i].sum()
+            if total > 0:
+                probs[i] /= total
+        return probs
+
+    @property
+    def classes_(self) -> np.ndarray:
+        return self._classes
 
 
 def train_knn(
@@ -64,6 +165,16 @@ def train_knn(
         f"INFO   KNN split: train={len(X_train)}, test={len(X_test)}.  Classes: {dict(zip(*np.unique(y_train, return_counts=True)))}"
     )
 
+    # Z-score normalization — fit ONLY on train to prevent data leakage
+    scaler = StandardScaler()
+    X_train = scaler.fit_transform(X_train)
+    X_test = scaler.transform(X_test)
+    norm_params: dict = {
+        "mean": scaler.mean_.tolist(),
+        "scale": scaler.scale_.tolist(),
+    }
+    _log(f"INFO   StandardScaler fitted (features={X_flat.shape[1]}).")
+
     # SMOTE oversampling for class imbalance
     if use_smote and len(np.unique(y_train)) > 1:
         try:
@@ -75,15 +186,11 @@ def train_knn(
         except ImportError:
             _log("WARN   imblearn not installed, skipping SMOTE")
 
-    # Train KNN
-    _log(f"INFO   Fitting KNN (k={k_neighbors}, n_train={len(X_train)}, features={X_flat.shape[1]})...")
-    knn = KNeighborsClassifier(
-        n_neighbors=k_neighbors,
-        weights="distance",
-        n_jobs=-1,
-    )
+    # Train FAISS-KNN
+    _log(f"INFO   Fitting FaissKNN (k={k_neighbors}, n_train={len(X_train)}, features={X_flat.shape[1]})...")
+    knn = FaissKNNClassifier(k=k_neighbors)
     knn.fit(X_train, y_train)
-    _log("INFO   KNN fit complete. Evaluating...")
+    _log("INFO   FaissKNN fit complete. Evaluating...")
 
     # Evaluate
     y_pred = knn.predict(X_test)
@@ -106,6 +213,7 @@ def train_knn(
         "class_distribution_train": dict(zip(*[a.tolist() for a in np.unique(y_train, return_counts=True)])),
         "class_distribution_test": dict(zip(*[a.tolist() for a in np.unique(y_test, return_counts=True)])),
         "classification_report": report,
+        "norm_params": norm_params,  # saved alongside model for inference-time normalization
     }
 
     return knn, metrics
@@ -137,6 +245,10 @@ def save_knn_model(
     with open(meta_file, "w") as f:
         json.dump(meta, f, indent=2, default=str)
 
+    # Pull norm_params out of metrics dict if not explicitly supplied
+    if norm_params is None:
+        norm_params = metrics.get("norm_params")
+
     # Save norm params
     if norm_params:
         norm_file = save_path / "norm_params.json"
@@ -150,21 +262,42 @@ def save_knn_model(
     }
 
 
-def load_knn_model(model_path: str) -> KNeighborsClassifier:
-    """Load a saved KNN model."""
+def load_knn_model(model_path: str) -> "FaissKNNClassifier | KNeighborsClassifier":
+    """Load a saved KNN model (FaissKNNClassifier for new models, legacy sklearn KNN for old ones)."""
     return joblib.load(model_path)
 
 
+def load_knn_norm_params(model_dir: str | Path) -> dict | None:
+    """Load norm_params.json from a trained KNN model directory."""
+    norm_file = Path(model_dir) / "norm_params.json"
+    if norm_file.exists():
+        with open(norm_file) as f:
+            return json.load(f)
+    return None
+
+
 def predict_knn(
-    model: KNeighborsClassifier,
+    model,
     X: np.ndarray,
+    norm_params: dict | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Predict with KNN. Returns (predictions, probabilities).
+
     X: (n_samples, seq_len, n_features) or already flattened.
+    norm_params: dict with 'mean' and 'scale' lists produced during training.
+                 When supplied the input is Z-score normalized identically to
+                 how training data was transformed, preventing feature-scale bias.
     """
     if X.ndim == 3:
-        X = X.reshape(X.shape[0], -1)
+        X = X.reshape(X.shape[0], -1).astype(np.float64)
+    else:
+        X = X.astype(np.float64)
+
+    if norm_params is not None:
+        mean = np.asarray(norm_params["mean"], dtype=np.float64)
+        scale = np.asarray(norm_params["scale"], dtype=np.float64)
+        X = (X - mean) / np.where(scale > 0, scale, 1.0)
 
     predictions = model.predict(X)
     probabilities = model.predict_proba(X)

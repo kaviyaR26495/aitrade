@@ -14,7 +14,7 @@ from app.config import settings
 from app.core.data_service import get_model_ready_data
 from app.core.normalizer import prepare_model_input
 from app.db import crud
-from app.ml.knn_distiller import load_knn_model, predict_knn
+from app.ml.knn_distiller import load_knn_model, predict_knn, load_knn_norm_params
 from app.ml.lstm_distiller import load_lstm_model, predict_lstm
 from app.ml.ensemble import ensemble_predict
 
@@ -41,7 +41,9 @@ async def run_daily_predictions(
     target_date = target_date or date.today()
 
     # Load models
-    knn_model = load_knn_model(str(model_path / "knn" / knn_name / "knn_model.joblib"))
+    knn_model_dir = model_path / "knn" / knn_name
+    knn_model = load_knn_model(str(knn_model_dir / "knn_model.joblib"))
+    knn_norm_params = load_knn_norm_params(knn_model_dir)
     lstm_model = load_lstm_model(str(model_path / "lstm" / lstm_name / "lstm_model.pt"))
 
     # Get stocks to predict
@@ -74,7 +76,7 @@ async def run_daily_predictions(
             # Use the last window only (most recent)
             X_last = X[-1:].copy()
 
-            knn_preds, knn_probs = predict_knn(knn_model, X_last)
+            knn_preds, knn_probs = predict_knn(knn_model, X_last, norm_params=knn_norm_params)
             lstm_preds, lstm_probs = predict_lstm(lstm_model, X_last)
 
             preds = ensemble_predict(
