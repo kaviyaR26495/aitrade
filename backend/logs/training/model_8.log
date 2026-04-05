@@ -1,6 +1,0 @@
-============================================================
-  Model #8  PPO  stock=13  day  steps=100,000
-  Started: 2026-04-01 23:49:22
-============================================================
-[23:49:22] INFO   GPU verified: NVIDIA GeForce RTX 4050 Laptop GPU (6.2 GB · CUDA 12.4) — memory cleared
-[23:49:30] ERROR  cannot access local variable 'params' where it is not associated with a value
