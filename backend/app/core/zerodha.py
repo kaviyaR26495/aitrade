@@ -297,3 +297,184 @@ def exit_all_positions() -> list[str]:
                 logger.error("Exit failed: %s — %s", h["tradingsymbol"], e)
 
     return order_ids
+
+
+# ── Limit-Chase Order ──────────────────────────────────────────────────
+# Prevents unfilled LIMIT orders from missing the trade when the stock
+# runs away.  Algorithm:
+#
+#   1. Fetch current bid (BUY) or ask (SELL) from the live order book.
+#   2. Place a LIMIT at the bid/ask.
+#   3. Poll status every ``poll_interval_s`` seconds.
+#   4. If still OPEN after ``retry_after_s``: cancel, re-fetch bid/ask,
+#      resubmit — up to ``max_attempts`` retries.
+#   5. Final attempt (or slippage budget exhausted): MARKET order.
+
+
+def _get_bid_ask(symbol: str, exchange: str) -> tuple[float, float]:
+    """Return (best_bid, best_ask) from the live order book depth."""
+    kite = get_kite()
+    key = f"{exchange}:{symbol}"
+    data = kite.quote(key)
+    depth = data[key].get("depth", {})
+    bids = depth.get("buy", [])
+    asks = depth.get("sell", [])
+    best_bid = float(bids[0]["price"]) if bids else float(data[key]["last_price"])
+    best_ask = float(asks[0]["price"]) if asks else float(data[key]["last_price"])
+    return best_bid, best_ask
+
+
+def _cancel_order(order_id: str, variety: str = "regular") -> None:
+    try:
+        get_kite().cancel_order(variety=variety, order_id=order_id)
+        logger.info("Cancelled order %s", order_id)
+    except Exception as exc:
+        logger.warning("Cancel failed for %s: %s", order_id, exc)
+
+
+def _order_status(order_id: str) -> str:
+    """Return Kite order status string e.g. 'COMPLETE', 'OPEN', 'CANCELLED'."""
+    try:
+        for o in get_kite().orders():
+            if str(o.get("order_id")) == str(order_id):
+                return str(o.get("status", "UNKNOWN")).upper()
+    except Exception as exc:
+        logger.warning("Could not fetch order status for %s: %s", order_id, exc)
+    return "UNKNOWN"
+
+
+def place_limit_chase_order(
+    symbol: str,
+    transaction_type: str,          # "BUY" or "SELL"
+    quantity: int,
+    exchange: str = "NSE",
+    product: str = "CNC",
+    max_slippage_pct: float = 0.3,  # give up if price drifts > 0.3 % from first quote
+    max_attempts: int = 5,
+    retry_after_s: float = 120.0,   # re-price after 2 minutes of no fill
+    poll_interval_s: float = 5.0,   # order-status poll frequency
+) -> str | None:
+    """Place a LIMIT order at the current bid/ask and chase the price if unfilled.
+
+    Solves the adverse-selection problem where an unfilled LIMIT order means
+    the trade only executes if price reverses against you.
+
+    Parameters
+    ----------
+    max_slippage_pct : Maximum tolerated price drift from the initial quote.
+        If the best bid/ask has moved more than this percentage from the first
+        observation, the function gives up on LIMIT and submits MARKET to
+        guarantee a fill.
+    max_attempts     : Limit-reprice iterations before falling back to MARKET.
+    retry_after_s    : Seconds to wait for a fill before cancelling and repricing.
+    poll_interval_s  : Order-status poll interval in seconds.
+
+    Returns
+    -------
+    str | None — Zerodha order_id of the successfully submitted order.
+    """
+    import time
+
+    if symbol in EXCLUDED_SYMBOLS:
+        logger.warning("Skipping excluded symbol: %s", symbol)
+        return None
+
+    kite = get_kite()
+    tags = get_tag()
+
+    # Snapshot the initial reference price for drift detection
+    bid0, ask0 = _get_bid_ask(symbol, exchange)
+    ref_price = ask0 if transaction_type == "BUY" else bid0
+    if ref_price <= 0:
+        logger.error("Cannot place order for %s — zero reference price", symbol)
+        return None
+
+    max_drift = ref_price * max_slippage_pct / 100
+    attempt = 0
+    current_order_id: str | None = None
+
+    while attempt < max_attempts:
+        attempt += 1
+
+        bid, ask = _get_bid_ask(symbol, exchange)
+        limit_price = ask if transaction_type == "BUY" else bid
+
+        # Drift check
+        if abs(limit_price - ref_price) > max_drift:
+            logger.warning(
+                "%s %s: price drifted %.3f%% beyond tolerance — switching to MARKET",
+                transaction_type, symbol, abs(limit_price - ref_price) / ref_price * 100,
+            )
+            break
+
+        try:
+            current_order_id = str(kite.place_order(
+                variety="regular",
+                exchange=exchange,
+                tradingsymbol=symbol,
+                transaction_type=transaction_type,
+                quantity=quantity,
+                product=product,
+                order_type="LIMIT",
+                price=round(limit_price, 2),
+                validity="DAY",
+                tag=tags[1],
+            ))
+            logger.info(
+                "LimitChase attempt %d/%d: %s %s qty=%d @ %.2f → %s",
+                attempt, max_attempts, transaction_type, symbol,
+                quantity, limit_price, current_order_id,
+            )
+        except Exception as exc:
+            logger.error("LimitChase place failed (attempt %d): %s", attempt, exc)
+            time.sleep(poll_interval_s)
+            continue
+
+        # Poll until filled, externally cancelled, or timeout
+        elapsed = 0.0
+        while elapsed < retry_after_s:
+            time.sleep(poll_interval_s)
+            elapsed += poll_interval_s
+            status = _order_status(current_order_id)
+            if status == "COMPLETE":
+                logger.info(
+                    "LimitChase FILLED: %s %s qty=%d @ %.2f (attempt %d)",
+                    transaction_type, symbol, quantity, limit_price, attempt,
+                )
+                return current_order_id
+            if status in ("CANCELLED", "REJECTED"):
+                logger.warning("Order %s was %s externally", current_order_id, status)
+                current_order_id = None
+                break
+
+        # Still open — cancel and re-price on next loop iteration
+        if current_order_id:
+            _cancel_order(current_order_id)
+            current_order_id = None
+
+    # ── MARKET fallback ───────────────────────────────────────────────
+    logger.warning(
+        "LimitChase exhausted %d attempts for %s %s — falling back to MARKET",
+        max_attempts, transaction_type, symbol,
+    )
+    try:
+        market_id = str(kite.place_order(
+            variety="regular",
+            exchange=exchange,
+            tradingsymbol=symbol,
+            transaction_type=transaction_type,
+            quantity=quantity,
+            product=product,
+            order_type="MARKET",
+            validity="DAY",
+            tag=tags[1],
+        ))
+        logger.info(
+            "LimitChase MARKET fallback: %s %s qty=%d → %s",
+            transaction_type, symbol, quantity, market_id,
+        )
+        return market_id
+    except Exception as exc:
+        logger.error("LimitChase MARKET fallback failed for %s: %s", symbol, exc)
+        return None
+

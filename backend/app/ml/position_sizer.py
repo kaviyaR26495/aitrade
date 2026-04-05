@@ -180,3 +180,100 @@ def size_trade(
 
     # Ensure at least a minimal position (avoid zero sizing when vol spikes briefly)
     return float(max(frac, 0.01))
+
+
+# ─── NIFTY 50 Market Breadth Kill-Switch ─────────────────────────────────────
+
+
+def nifty_breadth_multiplier(
+    nifty_close_series: "np.ndarray | list[float]",
+    dma_period: int = 200,
+    half_size_below_dma: bool = True,
+) -> float:
+    """Return a position-size multiplier based on NIFTY 50's trend health.
+
+    Rules
+    -----
+    * NIFTY close > 200-DMA  → multiplier = 1.0  (full size, trend is healthy)
+    * NIFTY close ≤ 200-DMA  → multiplier = 0.5  if ``half_size_below_dma``
+                                            else 0.0  (BUYs fully disabled)
+
+    The computation requires *at least* ``dma_period`` past closes.
+    If fewer are available the function returns 1.0 (no signal = no restriction).
+
+    Parameters
+    ----------
+    nifty_close_series : array-like of historical NIFTY 50 daily closes,
+        ordered oldest → newest.  The last element is today's close.
+    dma_period : int, default 200.  Rolling simple-average window.
+    half_size_below_dma : bool, default True.
+        True  → halve position size when below 200-DMA (conservative).
+        False → block all new BUYs when below 200-DMA (strict kill-switch).
+
+    Returns
+    -------
+    float in {0.0, 0.5, 1.0}.
+    """
+    arr = np.asarray(nifty_close_series, dtype=float)
+    if len(arr) < dma_period:
+        return 1.0  # not enough history — don't penalise
+
+    dma = float(np.mean(arr[-dma_period:]))
+    current = float(arr[-1])
+
+    if current > dma:
+        return 1.0
+    return 0.5 if half_size_below_dma else 0.0
+
+
+def size_trade_with_breadth(
+    method: str,
+    *,
+    realized_vol_daily: float,
+    nifty_close_series: "np.ndarray | list[float]",
+    trades: "list[Any] | None" = None,
+    max_risk_pct: float = 0.02,
+    stoploss_pct: float = 0.05,
+    target_vol_annual: float = 0.15,
+    kelly_mult: float = 0.5,
+    fallback_pct: float = 0.10,
+    max_positions: int = 10,
+    min_kelly_trades: int = 10,
+    dma_period: int = 200,
+    half_size_below_dma: bool = True,
+) -> float:
+    """``size_trade()`` + NIFTY 200-DMA breadth kill-switch, composed in one call.
+
+    The base fraction from ``size_trade()`` is multiplied by
+    ``nifty_breadth_multiplier()``.  A result of 0.0 means the caller
+    should skip the BUY entirely.
+
+    All parameters are identical to ``size_trade()`` except:
+
+    nifty_close_series : historical NIFTY 50 closes (oldest → newest).
+    dma_period         : 200-DMA window (default 200 trading days).
+    half_size_below_dma: True = halve size, False = full block.
+
+    Returns
+    -------
+    float — effective position fraction after breadth adjustment.
+    """
+    base_frac = size_trade(
+        method=method,
+        realized_vol_daily=realized_vol_daily,
+        trades=trades,
+        max_risk_pct=max_risk_pct,
+        stoploss_pct=stoploss_pct,
+        target_vol_annual=target_vol_annual,
+        kelly_mult=kelly_mult,
+        fallback_pct=fallback_pct,
+        max_positions=max_positions,
+        min_kelly_trades=min_kelly_trades,
+    )
+    multiplier = nifty_breadth_multiplier(
+        nifty_close_series,
+        dma_period=dma_period,
+        half_size_below_dma=half_size_below_dma,
+    )
+    return float(base_frac * multiplier)
+
