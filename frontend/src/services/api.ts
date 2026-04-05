@@ -84,6 +84,8 @@ export const getUniverse = () => api.get('/data/universe');
 export const setUniverse = (category: string, customSymbols: string[]) =>
   api.put('/data/universe', { category, custom_symbols: customSymbols });
 export const listUniverseStocks = () => api.get('/data/stocks/universe');
+export const getUniversePresetSymbols = (category: string) =>
+  api.get<{ category: string; symbols: string[]; resolved_count: number }>(`/data/universe/presets/${category}`);
 
 // ── Zerodha Instruments ──
 export const getZerodhaInstruments = (exchange = 'NSE') =>
@@ -174,3 +176,40 @@ export async function sendChatMessage(
 export default api;
 export const getGoldenPatterns = (rl_model_id?: number) =>
   api.get('/models/patterns', { params: { rl_model_id } });
+
+// ── Pipeline ──────────────────────────────────────────────────────────────────
+
+export interface PipelineRequest {
+  symbols: string[];
+}
+
+export interface PipelineStageStatus {
+  /** 0-indexed stage number */
+  stage: number;
+  /** camelCase name for the stage */
+  name: string;
+  /** 'pending' | 'running' | 'completed' | 'failed' */
+  status: 'pending' | 'running' | 'completed' | 'failed';
+  /** 0–100 progress within the running stage */
+  progress: number;
+  message?: string;
+}
+
+export interface PipelineStatus {
+  job_id: string;
+  symbols: string[];
+  /** Overall pipeline status: 'queued' | 'running' | 'completed' | 'failed' */
+  status: 'queued' | 'running' | 'completed' | 'failed';
+  /** 0-indexed index of the currently active stage */
+  current_stage: number;
+  stages: PipelineStageStatus[];
+  created_at: string;
+  updated_at: string;
+  error?: string;
+}
+
+export const startPipeline = (req: PipelineRequest) =>
+  api.post<{ job_id: string }>('/pipeline/start', req);
+
+export const getPipelineStatus = (jobId: string) =>
+  api.get<PipelineStatus>(`/pipeline/status/${jobId}`);

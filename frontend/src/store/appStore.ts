@@ -36,6 +36,56 @@ function persistLog(entries: ApiLogEntry[]) {
   } catch { /* storage quota — ignore */ }
 }
 
+export interface Notification {
+  id: string;
+  type: 'success' | 'error' | 'info' | 'warning';
+  message: string;
+}
+
+export interface StockSelectorSelection {
+  manualSelected: Set<string>;
+  activePresetCategories: Set<string>;
+  excludedSymbols: Set<string>;
+}
+
+const STOCK_SELECTOR_DRAFT_KEY = 'aitrade-stock-selector-draft';
+
+function saveStockSelectorDraft(selection: StockSelectorSelection) {
+  try {
+    const serialized = {
+      manualSelected: Array.from(selection.manualSelected),
+      activePresetCategories: Array.from(selection.activePresetCategories),
+      excludedSymbols: Array.from(selection.excludedSymbols),
+    };
+    localStorage.setItem(STOCK_SELECTOR_DRAFT_KEY, JSON.stringify(serialized));
+  } catch (e) {
+    console.error('Failed to save stock selector draft', e);
+  }
+}
+
+function loadStockSelectorDraft(): StockSelectorSelection {
+  try {
+    const raw = localStorage.getItem(STOCK_SELECTOR_DRAFT_KEY);
+    if (!raw) return createEmptyStockSelectorSelection();
+    const parsed = JSON.parse(raw);
+    return {
+      manualSelected: new Set(parsed.manualSelected || []),
+      activePresetCategories: new Set(parsed.activePresetCategories || []),
+      excludedSymbols: new Set(parsed.excludedSymbols || []),
+    };
+  } catch {
+    return createEmptyStockSelectorSelection();
+  }
+}
+
+function createEmptyStockSelectorSelection(): StockSelectorSelection {
+  return {
+    manualSelected: new Set(),
+    activePresetCategories: new Set(),
+    excludedSymbols: new Set(),
+  };
+}
+
 // ── Notifications ──────────────────────────────────────────────────────
 interface AppState {
   sidebarOpen: boolean;
@@ -65,12 +115,17 @@ interface AppState {
   toggleTrainingConsole: () => void;
   openTrainingConsole: (modelId: number) => void;
   setTrainingConsoleModelId: (id: number | null) => void;
-}
 
-export interface Notification {
-  id: string;
-  type: 'success' | 'error' | 'info' | 'warning';
-  message: string;
+  // Stock selector working draft — persists while navigating the SPA
+  stockSelectorSelection: StockSelectorSelection;
+  setStockSelectorSelection: (
+    next: StockSelectorSelection | ((prev: StockSelectorSelection) => StockSelectorSelection),
+  ) => void;
+  resetStockSelectorSelection: () => void;
+
+  // Pipeline Universe — stock symbols confirmed for One-Click Training Pipeline
+  pipelineUniverse: string[];
+  setPipelineUniverse: (symbols: string[]) => void;
 }
 
 function getStoredTheme(): ThemeId {
@@ -134,4 +189,23 @@ export const useAppStore = create<AppState>((set) => ({
   toggleTrainingConsole: () => set((s) => ({ trainingConsoleOpen: !s.trainingConsoleOpen })),
   openTrainingConsole: (modelId) => set({ trainingConsoleOpen: true, trainingConsoleModelId: modelId }),
   setTrainingConsoleModelId: (id) => set({ trainingConsoleModelId: id }),
+
+  // Pipeline Universe
+  pipelineUniverse: [],
+  setPipelineUniverse: (symbols) => set({ pipelineUniverse: symbols }),
+
+  // Stock Selector working draft
+  stockSelectorSelection: loadStockSelectorDraft(),
+  setStockSelectorSelection: (next) =>
+    set((state) => {
+      const nextVal = typeof next === 'function'
+        ? next(state.stockSelectorSelection)
+        : next;
+      saveStockSelectorDraft(nextVal);
+      return { stockSelectorSelection: nextVal };
+    }),
+  resetStockSelectorSelection: () => {
+    try { localStorage.removeItem(STOCK_SELECTOR_DRAFT_KEY); } catch { /* ignore */ }
+    set({ stockSelectorSelection: createEmptyStockSelectorSelection() });
+  },
 }));

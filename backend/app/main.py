@@ -61,7 +61,7 @@ app.add_middleware(
 )
 
 # ── Route registration ────────────────────────────────────────────────
-from app.api.routes import auth, config as config_routes, data, regime, models, backtest, trading, portfolio, chat  # noqa: E402
+from app.api.routes import auth, config as config_routes, data, regime, models, backtest, trading, portfolio, chat, pipeline  # noqa: E402
 
 app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
 app.include_router(config_routes.router, prefix="/api/config", tags=["config"])
@@ -72,6 +72,7 @@ app.include_router(backtest.router, prefix="/api/backtest", tags=["backtest"])
 app.include_router(trading.router, prefix="/api/trading", tags=["trading"])
 app.include_router(portfolio.router, prefix="/api/portfolio", tags=["portfolio"])
 app.include_router(chat.router, prefix="/api/chat", tags=["chat"])
+app.include_router(pipeline.router, prefix="/api/pipeline", tags=["pipeline"])
 
 
 @app.get("/api/health")

@@ -11,11 +11,13 @@ import { Brain, Cpu, Layers, ChevronDown, ChevronUp, Zap, Square, Pause, Play, T
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
 } from 'recharts';
+import AutoPilotPipeline from '../components/AutoPilotPipeline';
 
-type Tab = 'rl' | 'distill' | 'ensemble';
+type Tab = 'autopilot' | 'rl' | 'distill' | 'ensemble';
 
 export default function ModelStudio() {
-  const [tab, setTab] = useState<Tab>('rl');
+  const [tab, setTab] = useState<Tab>('autopilot');
+  const { pipelineUniverse } = useAppStore();
   const { data: algorithms } = useAlgorithms();
   const { data: device } = useDeviceInfo();
   const { data: rlModels } = useRlModels();
@@ -163,6 +165,7 @@ export default function ModelStudio() {
       <PageHeader title="Model Studio" description="Train RL agents and distill into fast inference models">
         <Tabs
           tabs={[
+            { id: 'autopilot', label: '⚡ AutoPilot' },
             { id: 'rl', label: 'RL Training' },
             { id: 'distill', label: 'Distillation' },
             { id: 'ensemble', label: 'Ensemble' },
@@ -179,6 +182,21 @@ export default function ModelStudio() {
         <StatCard label="LSTM Models" value={lstmModels?.length ?? 0} icon={<Layers size={18} />} color="var(--warning)" />
       </div>
 
+
+      {tab === 'autopilot' && (
+        <Card
+          title="One-Click Training Pipeline"
+          action={
+            <span className="text-[11px] text-[var(--text-dim)] font-mono">
+              {pipelineUniverse.length > 0
+                ? `${pipelineUniverse.length} stocks confirmed`
+                : 'No universe selected'}
+            </span>
+          }
+        >
+          <AutoPilotPipeline />
+        </Card>
+      )}
 
       {tab === 'rl' && (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">

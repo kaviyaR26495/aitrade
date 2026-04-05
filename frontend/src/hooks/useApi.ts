@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import * as api from '../services/api';
+import type { PipelineRequest, PipelineStatus } from '../services/api';
 
 const TERMINAL_RL_STATUSES = new Set(['completed', 'failed', 'stopped']);
 
@@ -388,3 +389,32 @@ export const useGoldenPatterns = (rl_model_id?: number) =>
     queryKey: ['golden_patterns', rl_model_id],
     queryFn: () => api.getGoldenPatterns(rl_model_id).then(res => res.data),
   });
+
+// ── Pipeline hooks ─────────────────────────────────────────────────────────
+
+const TERMINAL_PIPELINE_STATUSES = new Set(['completed', 'failed']);
+
+export const useStartPipeline = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (req: PipelineRequest) => api.startPipeline(req).then(r => r.data),
+    onSuccess: (data) => {
+      // Seed the status cache immediately so the poller has something to show
+      qc.setQueryData(['pipeline-status', data.job_id], null);
+    },
+  });
+};
+
+export const usePipelineStatus = (jobId: string | null) =>
+  useQuery<PipelineStatus>({
+    queryKey: ['pipeline-status', jobId],
+    queryFn: () => api.getPipelineStatus(jobId!).then(r => r.data),
+    enabled: !!jobId,
+    refetchInterval: (query) => {
+      const data = query.state.data as PipelineStatus | undefined;
+      if (!data) return 2000;
+      if (TERMINAL_PIPELINE_STATUSES.has(data.status)) return false;
+      return 2000;
+    },
+  });
+
