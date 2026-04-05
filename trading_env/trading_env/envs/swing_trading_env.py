@@ -30,6 +30,10 @@ class SwingTradingEnv(BaseTradingEnv):
         stoploss_pct: float = 5.0,
         max_holding_days: int | None = None,
         render_mode: str | None = None,
+        continuous: bool = False,
+        churn_window: int = 5,
+        churn_penalty: float = 0.002,
+        drawdown_asymmetry: float = 2.0,
     ):
         super().__init__(
             data=data,
@@ -42,6 +46,10 @@ class SwingTradingEnv(BaseTradingEnv):
             profit_horizon=profit_horizon,
             stoploss_pct=stoploss_pct,
             render_mode=render_mode,
+            continuous=continuous,
+            churn_window=churn_window,
+            churn_penalty=churn_penalty,
+            drawdown_asymmetry=drawdown_asymmetry,
         )
         self.max_holding_days = max_holding_days
         self._holding_since: int | None = None

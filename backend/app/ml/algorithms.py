@@ -105,6 +105,71 @@ ALGORITHM_CONFIGS: dict[str, dict[str, Any]] = {
             },
         },
     },
+    # ── Attention PPO ─────────────────────────────────────────────────
+    # PPO with a Transformer self-attention feature extractor + separate
+    # actor/critic network sizes.  The AttentionFeaturesExtractor is injected
+    # by rl_trainer.py at runtime (requires the actual class, not a string).
+    "AttentionPPO": {
+        "class_path": "stable_baselines3.PPO",
+        "policy": "MlpPolicy",
+        "obs_mode": "flat",
+        "defaults": {
+            "learning_rate": 2e-4,
+            "n_steps": 2048,
+            "clip_range": 0.2,
+            "ent_coef": 0.01,
+            "n_epochs": 10,
+            "batch_size": 256,
+            "policy_kwargs": {
+                # Separate actor/critic: Critic gets a larger network so the
+                # value-function can converge independently of the policy.
+                "net_arch": {"pi": [256, 128], "vf": [512, 512, 256]},
+                # features_extractor_class and features_extractor_kwargs are
+                # injected by rl_trainer.py (need the live Python class).
+            },
+        },
+    },
+    # ── QR-DQN (Distributional RL) ────────────────────────────────────
+    # Predicts the *full return distribution* via quantile regression instead
+    # of a scalar expected return.  Fat-tail events (crashes/rallies) that
+    # standard PPO averages away are explicitly represented in each quantile,
+    # so the agent can refuse a trade when the lower quantiles look dangerous.
+    "QRDQN": {
+        "class_path": "sb3_contrib.QRDQN",
+        "policy": "MlpPolicy",
+        "obs_mode": "flat",
+        "defaults": {
+            "learning_rate": 5e-4,
+            "buffer_size": 100_000,
+            "learning_starts": 1_000,
+            "batch_size": 256,
+            "policy_kwargs": {
+                "n_quantiles": 200,
+                "net_arch": [256, 256],
+            },
+        },
+    },
+    # ── Continuous PPO ────────────────────────────────────────────────
+    # Action space Box(-1, 1): sign = direction, magnitude = conviction.
+    # > 0.33 → BUY, < -0.33 → SELL, else → HOLD.  The continuous magnitude
+    # feeds directly into the confidence score during pattern extraction.
+    "ContinuousPPO": {
+        "class_path": "stable_baselines3.PPO",
+        "policy": "MlpPolicy",
+        "obs_mode": "flat",
+        "continuous": True,
+        "defaults": {
+            "learning_rate": 3e-4,
+            "n_steps": 2048,
+            "clip_range": 0.2,
+            "ent_coef": 0.005,
+            "n_epochs": 10,
+            "batch_size": 512,
+            "policy_kwargs": {
+                "net_arch": [256, 256],
+            },
+        },
+    },
 }
 
 

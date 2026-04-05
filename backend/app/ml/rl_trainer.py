@@ -142,6 +142,7 @@ def train_rl_model(
     device: str = "auto",
     stop_event=None,
     pause_event=None,
+    pretrained_model_path: str | None = None,
 ) -> dict[str, Any]:
     """
     Train an RL model on quality-filtered, regime-tagged data.
@@ -210,6 +211,7 @@ def train_rl_model(
                 seq_len=seq_len,
                 obs_mode=obs_mode,
                 reward_type=reward_function,
+                continuous=continuous,
             )
             return Monitor(env)
         return _init
@@ -241,14 +243,36 @@ def train_rl_model(
     # Extract policy_kwargs if present
     policy_kwargs = params.pop("policy_kwargs", None)
 
-    model = AlgorithmClass(
-        policy,
-        env,
-        verbose=0,
-        device=device,
-        **({"policy_kwargs": policy_kwargs} if policy_kwargs else {}),
-        **params,
-    )
+    # Inject AttentionFeaturesExtractor for AttentionPPO (requires live class)
+    if algorithm == "AttentionPPO":
+        from app.ml.attention_extractor import AttentionFeaturesExtractor
+        if policy_kwargs is None:
+            policy_kwargs = {}
+        policy_kwargs["features_extractor_class"] = AttentionFeaturesExtractor
+        policy_kwargs["features_extractor_kwargs"] = {
+            "features_dim": 256,
+            "seq_len": seq_len,
+            "num_heads": 4,
+        }
+        logger.info("AttentionPPO: injected AttentionFeaturesExtractor (seq_len=%d)", seq_len)
+
+    # Create or load SB3 model
+    if pretrained_model_path:
+        logger.info("Loading pretrained model from %s", pretrained_model_path)
+        model = AlgorithmClass.load(
+            pretrained_model_path,
+            env=env,
+            device=device,
+        )
+    else:
+        model = AlgorithmClass(
+            policy,
+            env,
+            verbose=0,
+            device=device,
+            **({"policy_kwargs": policy_kwargs} if policy_kwargs else {}),
+            **params,
+        )
 
     # Setup save directory
     if save_dir is None:
@@ -390,3 +414,127 @@ def evaluate_rl_model(
         "mean_trades": float(np.mean(total_trades)),
         "episodes": n_eval_episodes,
     }
+
+
+def train_curriculum(
+    ohlcv_df: pd.DataFrame,
+    algorithm: str = "RecurrentPPO",
+    total_timesteps: int = 300_000,
+    reward_function: str = "dense",
+    seq_len: int = 15,
+    save_dir: str | None = None,
+    model_name: str | None = None,
+    on_progress=None,
+    device: str = "auto",
+    stop_event=None,
+    pause_event=None,
+    hyperparams: dict | None = None,
+) -> dict[str, Any]:
+    """Three-phase curriculum training — progressively harder regime filters.
+
+    Phase 1 — Clean trends (30% of timesteps)
+        Regimes 0 (Bullish+LowVol) and 4 (Bearish+LowVol).
+        Trends are obvious; the agent learns that MACD crossovers and SMA
+        alignments predict direction reliably.
+
+    Phase 2 — Volatile trends (30%)
+        Adds Regimes 1 (Bullish+HighVol) and 5 (Bearish+HighVol).
+        The agent encounters drawdowns mid-trend and must learn position
+        management and wider stop-loss tolerance while retaining Phase 1 knowledge.
+
+    Phase 3 — All regimes (40%)
+        Includes sideways/choppy regimes (2, 3).
+        Full generalisation; the agent must learn to HOLD in lateral markets
+        without over-trading, combining all prior lessons.
+
+    Between phases, the final model is used as the pre-trained starting point so
+    knowledge is transferred rather than discarded.
+
+    Returns
+    -------
+    dict with keys: ``phases`` (list of per-phase result dicts) + all keys from
+    the final phase result (model_path, best_reward, etc.).
+    """
+    if save_dir is None:
+        save_dir = str(Path(settings.MODEL_DIR) / "rl")
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    base_name = model_name or f"{algorithm}_curriculum_{ts}"
+
+    phases = [
+        {
+            "name": f"{base_name}_phase1",
+            "regime_ids": [0, 4],
+            "fraction": 0.30,
+            "description": "Phase 1: clean trends (Regime 0+4)",
+        },
+        {
+            "name": f"{base_name}_phase2",
+            "regime_ids": [0, 1, 4, 5],
+            "fraction": 0.30,
+            "description": "Phase 2: volatile trends (Regime 0+1+4+5)",
+        },
+        {
+            "name": f"{base_name}_phase3",
+            "regime_ids": None,
+            "fraction": 0.40,
+            "description": "Phase 3: all regimes (full generalisation)",
+        },
+    ]
+
+    phase_results: list[dict] = []
+    prev_model_path: str | None = None
+
+    for phase in phases:
+        phase_steps = int(total_timesteps * phase["fraction"])
+        logger.info(
+            "Curriculum %s: %s — %d timesteps",
+            base_name, phase["description"], phase_steps,
+        )
+
+        try:
+            result = train_rl_model(
+                ohlcv_df=ohlcv_df,
+                algorithm=algorithm,
+                hyperparams=hyperparams,
+                total_timesteps=phase_steps,
+                min_quality=0.7,
+                regime_ids=phase["regime_ids"],
+                reward_function=reward_function,
+                seq_len=seq_len,
+                save_dir=save_dir,
+                model_name=phase["name"],
+                on_progress=on_progress,
+                device=device,
+                stop_event=stop_event,
+                pause_event=pause_event,
+                pretrained_model_path=prev_model_path,
+            )
+            result["phase"] = phase["description"]
+            phase_results.append(result)
+            prev_model_path = result["model_path"]
+            logger.info(
+                "Curriculum phase complete: best_reward=%.4f, model=%s",
+                result.get("best_reward") or 0.0,
+                result["model_path"],
+            )
+        except ValueError as exc:
+            logger.warning(
+                "Curriculum phase skipped (%s): %s — continuing with unchanged weights.",
+                phase["description"], exc,
+            )
+            phase_results.append({
+                "phase": phase["description"],
+                "skipped": True,
+                "reason": str(exc),
+                "model_path": prev_model_path,
+            })
+
+    if not phase_results:
+        raise RuntimeError("All curriculum phases failed — no training data available.")
+
+    # Return the last successful phase result, augmented with all phases log
+    final = next((r for r in reversed(phase_results) if not r.get("skipped")), phase_results[-1])
+    final["phases"] = phase_results
+    final["model_name"] = base_name
+    return final

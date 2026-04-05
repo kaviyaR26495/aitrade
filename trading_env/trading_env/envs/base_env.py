@@ -18,6 +18,7 @@ from trading_env.rewards import (
     sharpe_reward,
     sortino_reward,
     profit_reward,
+    dense_reward,
 )
 
 
@@ -36,6 +37,10 @@ class BaseTradingEnv(gym.Env):
         profit_horizon: int = 1,
         stoploss_pct: float = 5.0,
         render_mode: str | None = None,
+        continuous: bool = False,
+        churn_window: int = 5,
+        churn_penalty: float = 0.002,
+        drawdown_asymmetry: float = 2.0,
     ):
         super().__init__()
         self.data = data.astype(np.float32)
@@ -48,14 +53,27 @@ class BaseTradingEnv(gym.Env):
         self.profit_horizon = profit_horizon
         self.stoploss_pct = stoploss_pct
         self.render_mode = render_mode
+        self.continuous = continuous
+        self._churn_window = churn_window
+        self._churn_penalty = churn_penalty
+        self._drawdown_asymmetry = drawdown_asymmetry
 
         self.num_candles = len(data)
         self.num_features = data.shape[1]
         self.regime_dim = regime_features.shape[1] if regime_features is not None else 0
         self.total_features = self.num_features + self.regime_dim
 
-        # Action space: 0=HOLD, 1=BUY, 2=SELL
-        self.action_space = spaces.Discrete(3)
+        # Action space
+        if continuous:
+            # Continuous Box(-1, 1): sign+magnitude = direction + conviction
+            # > 0.33 → BUY, < -0.33 → SELL, else → HOLD
+            self.action_space = spaces.Box(
+                low=-1.0, high=1.0, shape=(1,), dtype=np.float32
+            )
+        else:
+            # Discrete: 0=HOLD, 1=BUY, 2=SELL
+            self.action_space = spaces.Discrete(3)
+        self._action_history: list[int] = []
 
         # Observation space depends on mode
         if obs_mode == "flat":
@@ -79,6 +97,7 @@ class BaseTradingEnv(gym.Env):
         self.portfolio.reset()
         self.trade_logger.reset()
         self.current_step = self._start_step
+        self._action_history = []
         obs = self._get_observation()
         return obs, self._get_info()
 
@@ -86,8 +105,9 @@ class BaseTradingEnv(gym.Env):
         price = self.prices[self.current_step]
         regime_id = self._current_regime_id()
 
-        # Map action: 0=HOLD, 1=BUY, 2=SELL
+        # Map action and record for churn detection
         mapped_action = self._map_action(action)
+        self._action_history.append(mapped_action)
 
         # Execute trade
         self._execute_action(mapped_action, price, regime_id)
@@ -125,9 +145,20 @@ class BaseTradingEnv(gym.Env):
         )
         return obs, reward, terminated, truncated, self._get_info()
 
-    def _map_action(self, action: int) -> int:
-        """Map discrete action to trade signal: 0→0(HOLD), 1→1(BUY), 2→-1(SELL)."""
-        return {0: 0, 1: 1, 2: -1}[action]
+    def _map_action(self, action) -> int:
+        """Map action to trade signal: HOLD=0, BUY=1, SELL=-1.
+
+        Handles both discrete (int) and continuous (float/ndarray) spaces.
+        Continuous: value > 0.33 → BUY, < -0.33 → SELL, else → HOLD.
+        """
+        if self.continuous:
+            val = float(action[0]) if hasattr(action, "__len__") else float(action)
+            if val > 0.33:
+                return 1
+            if val < -0.33:
+                return -1
+            return 0
+        return {0: 0, 1: 1, 2: -1}[int(action)]
 
     def _execute_action(self, action: int, price: float, regime_id: int | None):
         if action == 1:  # BUY
@@ -158,6 +189,19 @@ class BaseTradingEnv(gym.Env):
         elif self.reward_type == "profit":
             prev = history[-2] if len(history) >= 2 else self.initial_cash
             return profit_reward(nw, prev)
+        elif self.reward_type == "dense":
+            return dense_reward(
+                history,
+                nw,
+                self.initial_cash,
+                self.portfolio.holdings,
+                self.portfolio.avg_buy_price,
+                price,
+                self._action_history,
+                churn_window=self._churn_window,
+                churn_penalty=self._churn_penalty,
+                drawdown_asymmetry=self._drawdown_asymmetry,
+            )
         return 0.0
 
     def _get_observation(self) -> np.ndarray:
