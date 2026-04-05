@@ -2,7 +2,19 @@
 from __future__ import annotations
 
 import enum
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
+
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def now_ist() -> datetime:
+    """Current time in Asia/Kolkata (IST, UTC+5:30).
+
+    Use as the ``default`` for all DateTime columns so timestamps stored in
+    MySQL always represent IST wall-clock time, preventing off-by-one day
+    errors in nightly reconciliation and date-filtered queries.
+    """
+    return datetime.now(IST)
 
 from sqlalchemy import (
     JSON,
@@ -198,7 +210,7 @@ class RLModel(Base):
     sharpe_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
     model_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     status: Mapped[ModelStatus] = mapped_column(Enum(ModelStatus), default=ModelStatus.pending)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist)
 
 
 class RLTrainingRun(Base):
@@ -211,7 +223,7 @@ class RLTrainingRun(Base):
     reward: Mapped[float | None] = mapped_column(Float, nullable=True)
     loss: Mapped[float | None] = mapped_column(Float, nullable=True)
     metrics: Mapped[dict | None] = mapped_column(JSON, nullable=True)
-    timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    timestamp: Mapped[datetime] = mapped_column(DateTime, default=now_ist)
 
 
 # ── Golden Patterns ────────────────────────────────────────────────────
@@ -251,7 +263,7 @@ class KNNModel(Base):
     model_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     norm_params_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     status: Mapped[ModelStatus] = mapped_column(Enum(ModelStatus), default=ModelStatus.pending)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist)
 
 
 # ── LSTM Models ────────────────────────────────────────────────────────
@@ -274,7 +286,7 @@ class LSTMModel(Base):
     model_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     norm_params_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     status: Mapped[ModelStatus] = mapped_column(Enum(ModelStatus), default=ModelStatus.pending)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist)
 
 
 # ── Ensemble ───────────────────────────────────────────────────────────
@@ -291,7 +303,7 @@ class EnsembleConfig(Base):
     agreement_required: Mapped[bool] = mapped_column(Boolean, default=True)
     interval: Mapped[IntervalEnum] = mapped_column(Enum(IntervalEnum), nullable=False)
     backtest_accuracy: Mapped[float | None] = mapped_column(Float, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist)
 
 
 # ── Predictions (DB cached) ───────────────────────────────────────────
@@ -384,7 +396,7 @@ class StockEnsembleWeights(Base):
     knn_weight: Mapped[float] = mapped_column(Float, nullable=False)
     lstm_weight: Mapped[float] = mapped_column(Float, nullable=False)
     calibration_precision: Mapped[float | None] = mapped_column(Float, nullable=True)
-    calibrated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    calibrated_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist)
 
 
 # ── Backtest Results ───────────────────────────────────────────────────
@@ -427,7 +439,7 @@ class TradeOrder(Base):
     status: Mapped[OrderStatus] = mapped_column(Enum(OrderStatus), default=OrderStatus.pending)
     zerodha_order_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
     tag: Mapped[str | None] = mapped_column(String(20), nullable=True)
-    timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    timestamp: Mapped[datetime] = mapped_column(DateTime, default=now_ist)
 
 
 # ── App Settings ───────────────────────────────────────────────────────
@@ -460,4 +472,4 @@ class PortfolioSnapshot(Base):
     # Full broker-sourced snapshots stored as JSON for audit
     holdings_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=list)
     positions_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=list)
-    reconciled_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    reconciled_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist)

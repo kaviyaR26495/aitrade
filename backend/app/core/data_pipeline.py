@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 from datetime import date, datetime, timedelta
 
+import numpy as np
 import pandas as pd
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -275,4 +276,11 @@ def ohlcv_to_dataframe(rows: list) -> pd.DataFrame:
         df = pd.DataFrame(data)
     df["date"] = pd.to_datetime(df["date"])
     df = df.sort_values("date").reset_index(drop=True)
+    # Cast price/volume columns to float32 immediately so all downstream
+    # pandas indicator calculations and numpy feature arrays are 32-bit.
+    # Eliminates silent float64 → float32 coercion inside PyTorch/SB3.
+    _f32 = ["open", "high", "low", "close", "adj_close", "volume"]
+    for col in _f32:
+        if col in df.columns:
+            df[col] = df[col].astype(np.float32)
     return df

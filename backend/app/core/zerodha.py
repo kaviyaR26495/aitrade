@@ -13,6 +13,33 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
+
+def send_emergency_alert(message: str) -> None:
+    """Fire-and-forget Telegram alert for critical trading failures.
+
+    Sends a message via Telegram Bot API.  Silently logs and returns if
+    TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID are not configured so the caller
+    is never blocked by a misconfigured alert channel.
+    """
+    import urllib.parse
+    import urllib.request
+
+    token = settings.TELEGRAM_BOT_TOKEN
+    chat_id = settings.TELEGRAM_CHAT_ID
+    if not token or not chat_id:
+        logger.warning("Emergency alert suppressed (Telegram not configured): %s", message)
+        return
+
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = urllib.parse.urlencode({"chat_id": chat_id, "text": message}).encode()
+    try:
+        with urllib.request.urlopen(url, data=payload, timeout=5) as resp:
+            if resp.status != 200:
+                logger.error("Telegram alert HTTP %s for message: %s", resp.status, message)
+    except Exception as exc:
+        logger.error("Telegram alert failed: %s — original message: %s", exc, message)
+
+
 # Lazy import — kiteconnect may not be installed during tests
 _kite = None
 

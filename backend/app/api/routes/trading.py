@@ -194,28 +194,7 @@ async def execute_signal(
     chase_order_id: str = result["order_id"]
     fill_price: float = result["fill_price"]
 
-    # --- GTT leg: stoploss + target anchored to actual fill price ---
-    gtt_id: int | None = None
-    try:
-        gtt_id = zerodha.place_gtt_order(
-            symbol=stock.symbol,
-            exchange=req.exchange,
-            avg_price=fill_price,
-            quantity=req.quantity,
-            sell_pct=req.gtt_sell_pct,
-            stoploss_pct=req.gtt_stoploss_pct,
-        )
-    except Exception as gtt_exc:
-        # GTT failure must not silently leave the position unprotected — surface it.
-        raise HTTPException(
-            status_code=502,
-            detail=(
-                f"BUY filled (order_id={chase_order_id}, fill_price={fill_price}) "
-                f"but GTT placement failed: {gtt_exc}"
-            ),
-        )
-
-    # --- Persist both legs in DB ---
+    # --- Persist the BUY leg immediately so the position is never invisible ---
     from app.db.models import TradeOrder
     chase_record = TradeOrder(
         stock_id=req.stock_id,
@@ -228,6 +207,53 @@ async def execute_signal(
         zerodha_order_id=chase_order_id,
     )
     db.add(chase_record)
+    await db.commit()
+    await db.refresh(chase_record)
+
+    # --- GTT leg: 3-attempt retry so a transient network blip can't leave
+    #     the position naked. If all retries fail, fire an emergency alert.   ---
+    import time as _time
+    gtt_id: int | None = None
+    last_gtt_exc: Exception | None = None
+    for attempt in range(1, 4):
+        try:
+            gtt_id = zerodha.place_gtt_order(
+                symbol=stock.symbol,
+                exchange=req.exchange,
+                avg_price=fill_price,
+                quantity=req.quantity,
+                sell_pct=req.gtt_sell_pct,
+                stoploss_pct=req.gtt_stoploss_pct,
+            )
+            if gtt_id:
+                last_gtt_exc = None
+                break
+        except Exception as exc:
+            last_gtt_exc = exc
+            logger.error(
+                "GTT placement attempt %d/3 failed for %s @ %.2f: %s",
+                attempt, stock.symbol, fill_price, exc,
+            )
+            if attempt < 3:
+                _time.sleep(2)
+
+    if not gtt_id:
+        # Position held with zero stoploss protection — alert immediately.
+        alert_msg = (
+            f"URGENT: Bought {req.quantity} {stock.symbol} @ {fill_price:.2f} "
+            f"(order {chase_order_id}) but GTT stoploss failed after 3 attempts. "
+            f"Last error: {last_gtt_exc}"
+        )
+        zerodha.send_emergency_alert(alert_msg)
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"BUY filled (order_id={chase_order_id}, fill_price={fill_price}) "
+                f"but GTT placement failed after 3 attempts: {last_gtt_exc}"
+            ),
+        )
+
+    # --- Persist the GTT leg ---
     gtt_record = TradeOrder(
         stock_id=req.stock_id,
         ensemble_prediction_id=req.ensemble_prediction_id,

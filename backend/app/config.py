@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     # LLM / Chat
     GEMINI_API_KEY: str = ""
 
+    # Alerts (Telegram Bot API — optional)
+    TELEGRAM_BOT_TOKEN: str = ""
+    TELEGRAM_CHAT_ID: str = ""
+
     # Trading defaults
     DEFAULT_STOPLOSS_PCT: float = 5.0
     DEFAULT_BUY_LIMIT: float = 10000.0
