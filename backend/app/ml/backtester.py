@@ -29,7 +29,14 @@ class BacktestConfig:
     target_pct: float | None = None  # None = hold until sell signal
     min_confidence: float = 0.65
     max_positions: int = 10
-    position_size_pct: float = 10.0  # % of capital per trade
+    position_size_pct: float = 10.0  # % of capital per trade (used by 'fixed' sizing)
+    # ── Slippage simulation ────────────────────────────────────────────────
+    slippage_bps: float = 5.0        # baseline bid-ask proxy (5 bps = 0.05 %)
+    vol_slippage_scale: float = 0.5  # extra slippage per unit of realised daily vol
+    # ── Dynamic position sizing ────────────────────────────────────────────
+    position_sizing: str = "volatility_target"  # "fixed" | "kelly" | "volatility_target"
+    max_single_trade_risk_pct: float = 2.0       # max % of equity risked at stoploss
+    vol_target_annual: float = 0.15              # target annualised vol for vol-target method
 
 
 @dataclass
@@ -45,6 +52,7 @@ class Trade:
     regime_id: int | None = None
     confidence: float = 0.0
     exit_reason: str = ""
+    slippage_cost: float = 0.0   # total INR lost to slippage on this round-trip
 
 
 @dataclass
@@ -63,6 +71,31 @@ class BacktestResult:
     equity_curve: list[float] = field(default_factory=list)
     trade_log: list[dict] = field(default_factory=list)
     buy_hold_return_pct: float = 0.0
+    total_slippage_cost: float = 0.0  # total INR drained by slippage across all trades
+
+
+def _rolling_vol(close_prices: np.ndarray, idx: int, window: int = 20) -> float:
+    """Compute realised daily volatility (std of returns) over the last ``window`` bars."""
+    start = max(1, idx - window + 1)
+    if idx - start < 1:
+        return 0.0
+    px = close_prices[start : idx + 1]
+    rets = (px[1:] - px[:-1]) / np.where(px[:-1] != 0, px[:-1], 1e-8)
+    return float(np.std(rets)) if len(rets) >= 2 else 0.0
+
+
+def _slip_price(
+    price: float,
+    side: int,
+    slippage_bps: float,
+    realized_vol: float,
+    vol_slippage_scale: float,
+) -> float:
+    """Return slipped fill price.  side=+1 BUY (pay more), side=-1 SELL (receive less)."""
+    if slippage_bps <= 0 and vol_slippage_scale <= 0:
+        return price
+    slip = slippage_bps / 10_000.0 + vol_slippage_scale * realized_vol
+    return float(price * (1.0 + side * slip))
 
 
 def run_backtest(
@@ -83,10 +116,12 @@ def run_backtest(
     if config is None:
         config = BacktestConfig()
 
+    from app.ml.position_sizer import size_trade  # noqa: PLC0415 — lazy import to avoid circular deps
+
     n = min(len(predictions), len(close_prices), len(dates))
     capital = config.initial_capital
     cash = capital
-    positions: dict[str, dict] = {}  # stock_key → {entry_price, quantity, entry_date, regime_id}
+    positions: dict[str, dict] = {}  # stock_key → {entry_price, raw_entry_price, quantity, ...}
     equity_curve = []
     trades: list[Trade] = []
 
@@ -98,71 +133,81 @@ def run_backtest(
         regime_id = pred.get("regime_id")
         dt = dates[i]
 
-        # Check stop losses on existing positions
+        # Realised vol for slippage + position sizing
+        rv = _rolling_vol(close_prices, i)
+
+        # ── Stoploss / target checks on open positions ────────────────
         closed_keys = []
         for key, pos in positions.items():
-            loss_pct = ((price - pos["entry_price"]) / pos["entry_price"]) * 100
+            # Trigger check uses raw price (reflects true market level)
+            loss_pct = ((price - pos["raw_entry_price"]) / pos["raw_entry_price"]) * 100
+
             if loss_pct < -config.stoploss_pct:
-                # Stop loss hit
-                exit_value = pos["quantity"] * price * (1 - config.commission_pct)
+                # Fill at slipped price — stoploss market orders get worse fills
+                fill_exit = _slip_price(price, -1, config.slippage_bps, rv, config.vol_slippage_scale)
+                exit_value = pos["quantity"] * fill_exit * (1 - config.commission_pct)
                 pnl = exit_value - (pos["quantity"] * pos["entry_price"])
                 pnl_pct = (pnl / (pos["quantity"] * pos["entry_price"])) * 100
+                slip_cost = (
+                    (pos["entry_price"] - pos["raw_entry_price"]) * pos["quantity"]
+                    + (price - fill_exit) * pos["quantity"]
+                )
                 cash += exit_value
-
                 trades.append(Trade(
-                    entry_date=pos["entry_date"],
-                    exit_date=dt,
-                    action="BUY",
-                    entry_price=pos["entry_price"],
-                    exit_price=price,
-                    quantity=pos["quantity"],
-                    pnl=pnl,
-                    pnl_pct=pnl_pct,
-                    regime_id=pos.get("regime_id"),
-                    confidence=pos.get("confidence", 0),
-                    exit_reason="stoploss",
+                    entry_date=pos["entry_date"], exit_date=dt, action="BUY",
+                    entry_price=pos["entry_price"], exit_price=fill_exit,
+                    quantity=pos["quantity"], pnl=pnl, pnl_pct=pnl_pct,
+                    regime_id=pos.get("regime_id"), confidence=pos.get("confidence", 0),
+                    exit_reason="stoploss", slippage_cost=round(slip_cost, 4),
                 ))
                 closed_keys.append(key)
 
-            # Check target
             elif config.target_pct and loss_pct > config.target_pct:
-                exit_value = pos["quantity"] * price * (1 - config.commission_pct)
+                fill_exit = _slip_price(price, -1, config.slippage_bps, rv, config.vol_slippage_scale)
+                exit_value = pos["quantity"] * fill_exit * (1 - config.commission_pct)
                 pnl = exit_value - (pos["quantity"] * pos["entry_price"])
                 pnl_pct = (pnl / (pos["quantity"] * pos["entry_price"])) * 100
+                slip_cost = (
+                    (pos["entry_price"] - pos["raw_entry_price"]) * pos["quantity"]
+                    + (price - fill_exit) * pos["quantity"]
+                )
                 cash += exit_value
-
                 trades.append(Trade(
-                    entry_date=pos["entry_date"],
-                    exit_date=dt,
-                    action="BUY",
-                    entry_price=pos["entry_price"],
-                    exit_price=price,
-                    quantity=pos["quantity"],
-                    pnl=pnl,
-                    pnl_pct=pnl_pct,
-                    regime_id=pos.get("regime_id"),
-                    confidence=pos.get("confidence", 0),
-                    exit_reason="target",
+                    entry_date=pos["entry_date"], exit_date=dt, action="BUY",
+                    entry_price=pos["entry_price"], exit_price=fill_exit,
+                    quantity=pos["quantity"], pnl=pnl, pnl_pct=pnl_pct,
+                    regime_id=pos.get("regime_id"), confidence=pos.get("confidence", 0),
+                    exit_reason="target", slippage_cost=round(slip_cost, 4),
                 ))
                 closed_keys.append(key)
 
         for key in closed_keys:
             del positions[key]
 
-        # Process new signals
+        # ── New signals ────────────────────────────────────────────────
         if action == 1 and confidence >= config.min_confidence:
-            # BUY signal
             if len(positions) < config.max_positions and price > 0:
-                position_value = capital * config.position_size_pct / 100
-                cost = position_value * (1 + config.commission_pct)
-                if cost <= cash:
-                    qty = int(position_value / price)
-                    if qty > 0:
-                        actual_cost = qty * price * (1 + config.commission_pct)
+                # Dynamic position sizing
+                pos_frac = size_trade(
+                    method=config.position_sizing,
+                    realized_vol_daily=rv,
+                    trades=trades,
+                    max_risk_pct=config.max_single_trade_risk_pct / 100,
+                    stoploss_pct=config.stoploss_pct / 100,
+                    target_vol_annual=config.vol_target_annual,
+                    fallback_pct=config.position_size_pct / 100,
+                    max_positions=config.max_positions,
+                )
+                fill_entry = _slip_price(price, +1, config.slippage_bps, rv, config.vol_slippage_scale)
+                position_value = cash * pos_frac
+                qty = int(position_value / fill_entry)
+                if qty > 0:
+                    actual_cost = qty * fill_entry * (1 + config.commission_pct)
+                    if actual_cost <= cash:
                         cash -= actual_cost
-                        key = f"pos_{i}"
-                        positions[key] = {
-                            "entry_price": price,
+                        positions[f"pos_{i}"] = {
+                            "entry_price": fill_entry,
+                            "raw_entry_price": price,
                             "quantity": qty,
                             "entry_date": dt,
                             "regime_id": regime_id,
@@ -170,51 +215,53 @@ def run_backtest(
                         }
 
         elif action == -1 and confidence >= config.min_confidence:
-            # SELL signal — close all positions
             for key, pos in list(positions.items()):
-                exit_value = pos["quantity"] * price * (1 - config.commission_pct)
+                fill_exit = _slip_price(price, -1, config.slippage_bps, rv, config.vol_slippage_scale)
+                exit_value = pos["quantity"] * fill_exit * (1 - config.commission_pct)
                 pnl = exit_value - (pos["quantity"] * pos["entry_price"])
                 pnl_pct = (pnl / (pos["quantity"] * pos["entry_price"])) * 100
+                slip_cost = (
+                    (pos["entry_price"] - pos["raw_entry_price"]) * pos["quantity"]
+                    + (price - fill_exit) * pos["quantity"]
+                )
                 cash += exit_value
-
                 trades.append(Trade(
-                    entry_date=pos["entry_date"],
-                    exit_date=dt,
-                    action="BUY",
-                    entry_price=pos["entry_price"],
-                    exit_price=price,
-                    quantity=pos["quantity"],
-                    pnl=pnl,
-                    pnl_pct=pnl_pct,
-                    regime_id=pos.get("regime_id"),
-                    confidence=pos.get("confidence", 0),
-                    exit_reason="sell_signal",
+                    entry_date=pos["entry_date"], exit_date=dt, action="BUY",
+                    entry_price=pos["entry_price"], exit_price=fill_exit,
+                    quantity=pos["quantity"], pnl=pnl, pnl_pct=pnl_pct,
+                    regime_id=pos.get("regime_id"), confidence=pos.get("confidence", 0),
+                    exit_reason="sell_signal", slippage_cost=round(slip_cost, 4),
                 ))
             positions.clear()
 
-        # Calculate equity (cash + open positions value)
+        # Mark-to-market equity uses raw price (no slippage on unrealised P&L)
         open_value = sum(pos["quantity"] * price for pos in positions.values())
-        equity = cash + open_value
-        equity_curve.append(equity)
+        equity_curve.append(cash + open_value)
 
-    # Close remaining positions at last price
+    # ── Close remaining positions at last price ────────────────────────
     if positions and n > 0:
         last_price = float(close_prices[n - 1])
+        last_rv = _rolling_vol(close_prices, n - 1)
         for pos in positions.values():
-            exit_value = pos["quantity"] * last_price * (1 - config.commission_pct)
+            fill_exit = _slip_price(last_price, -1, config.slippage_bps, last_rv, config.vol_slippage_scale)
+            exit_value = pos["quantity"] * fill_exit * (1 - config.commission_pct)
             pnl = exit_value - (pos["quantity"] * pos["entry_price"])
             pnl_pct = (pnl / (pos["quantity"] * pos["entry_price"])) * 100
+            slip_cost = (
+                (pos["entry_price"] - pos["raw_entry_price"]) * pos["quantity"]
+                + (last_price - fill_exit) * pos["quantity"]
+            )
             cash += exit_value
             trades.append(Trade(
                 entry_date=pos["entry_date"],
                 exit_date=dates[-1] if dates else None,
                 entry_price=pos["entry_price"],
-                exit_price=last_price,
+                exit_price=fill_exit,
                 quantity=pos["quantity"],
-                pnl=pnl,
-                pnl_pct=pnl_pct,
+                pnl=pnl, pnl_pct=pnl_pct,
                 regime_id=pos.get("regime_id"),
                 exit_reason="end_of_backtest",
+                slippage_cost=round(slip_cost, 4),
             ))
 
     # Compute metrics
@@ -289,6 +336,8 @@ def _compute_metrics(
         if losses:
             result.avg_loss_pct = round(float(np.mean([t.pnl_pct for t in losses])), 4)
 
+        result.total_slippage_cost = round(sum(t.slippage_cost for t in trades), 2)
+
     # Buy and hold return
     if len(close_prices) >= 2:
         result.buy_hold_return_pct = round(
@@ -308,8 +357,229 @@ def _compute_metrics(
             "regime_id": t.regime_id,
             "confidence": t.confidence,
             "exit_reason": t.exit_reason,
+            "slippage_cost": round(t.slippage_cost, 4),
         }
         for t in trades
     ]
 
     return result
+
+
+# ─── Walk-Forward Optimisation ────────────────────────────────────────────────
+
+
+def walk_forward_backtest(
+    full_df: pd.DataFrame,
+    train_fn,
+    predict_fn,
+    train_years: int = 3,
+    test_months: int = 12,
+    min_train_rows: int = 200,
+    config: BacktestConfig | None = None,
+) -> dict:
+    """Strict Walk-Forward Optimisation (WFO) backtester.
+
+    Eliminates data leakage by ensuring the model *never sees the future*:
+    each fold trains on a fixed historical window and is evaluated on the
+    immediately following out-of-sample period.  The test windows are
+    non-overlapping — the concatenated equity curve is a pure out-of-sample
+    performance record.
+
+    Fold structure
+    --------------
+    Fold 0:  train [t0 .. t0+train_years],    test [t0+train_years .. +test_months]
+    Fold 1:  train [t0+T .. t0+T+train_years], test [t0+T+train_years .. +test_months]
+    ...
+    where T = test_months (rolling by test window, not by full train period).
+
+    Parameters
+    ----------
+    full_df : pd.DataFrame
+        Full historical OHLCV data with a DatetimeIndex or a ``date`` column.
+        Must contain a ``close`` column (or the 4th column is used as close).
+    train_fn : Callable[[pd.DataFrame], Any]
+        ``train_fn(train_df) -> model``
+        User-supplied training routine.  Receives the training slice as a
+        DataFrame with the same columns as ``full_df``.  Returns any object
+        that ``predict_fn`` can accept.
+    predict_fn : Callable[[Any, pd.DataFrame], list[dict]]
+        ``predict_fn(model, test_df) -> list[dict]``
+        User-supplied prediction routine.  Must return predictions in the
+        standard format:  [{"action": int, "confidence": float, "regime_id":
+        int | None}, ...], one entry per row of ``test_df``.
+    train_years : int
+        Length of the training window in years.
+    test_months : int
+        Length of the test (out-of-sample) window in months.  This is also
+        the roll-forward step size.
+    min_train_rows : int
+        Folds with fewer than this many training rows are skipped.
+    config : BacktestConfig | None
+        Backtest configuration used for every test fold.  All slippage and
+        position-sizing settings are applied uniformly to every fold, so the
+        comparison is apples-to-apples across time periods.
+
+    Returns
+    -------
+    dict with keys:
+        folds                  -- per-fold results (list of dicts)
+        n_folds                -- number of successfully completed folds
+        out_of_sample_equity   -- concatenated equity curve across all test folds
+        mean_sharpe            -- arithmetic mean Sharpe across folds
+        mean_annual_return_pct -- arithmetic mean annualised return across folds
+        mean_max_drawdown_pct  -- arithmetic mean max-drawdown across folds
+        mean_win_rate          -- arithmetic mean win-rate across folds
+        worst_drawdown_pct     -- worst single-fold max-drawdown (tail-risk measure)
+        best_sharpe            -- best single-fold Sharpe
+        consistency_score      -- fraction of folds with positive annual return
+
+    Example::
+
+        from app.ml.backtester import walk_forward_backtest, BacktestConfig
+
+        def my_train(train_df):
+            return retrained_model
+
+        def my_predict(model, test_df):
+            return model_predictions(model, test_df)
+
+        wfo = walk_forward_backtest(
+            full_df=full_historical_df,
+            train_fn=my_train,
+            predict_fn=my_predict,
+            train_years=3,
+            test_months=12,
+            config=BacktestConfig(position_sizing="volatility_target"),
+        )
+        print(f"OOS Sharpe: {wfo['mean_sharpe']}  Consistency: {wfo['consistency_score']:.0%}")
+    """
+    if config is None:
+        config = BacktestConfig()
+
+    # ── Normalise DatetimeIndex ───────────────────────────────────────
+    df = full_df.copy()
+    if not isinstance(df.index, pd.DatetimeIndex):
+        if "date" in df.columns:
+            df.index = pd.to_datetime(df["date"])
+        else:
+            raise ValueError(
+                "full_df must have a DatetimeIndex or a 'date' column for WFO date splitting."
+            )
+    df = df.sort_index()
+
+    close_col = "close" if "close" in df.columns else df.columns[3]
+
+    fold_results: list[dict] = []
+    all_equity: list[float] = []
+    fold_num = 0
+
+    # Roll the test-window start forward by ``test_months`` each iteration
+    test_start = df.index[0] + pd.DateOffset(years=train_years)
+
+    while test_start < df.index[-1]:
+        train_start = test_start - pd.DateOffset(years=train_years)
+        test_end = test_start + pd.DateOffset(months=test_months)
+
+        # Strict wall: training data ends strictly before the first test candle
+        train_slice = df.loc[train_start : test_start - pd.Timedelta(days=1)]
+        test_slice = df.loc[test_start : test_end - pd.Timedelta(days=1)]
+
+        if len(train_slice) < min_train_rows:
+            logger.debug("WFO fold %d skipped — only %d training rows", fold_num, len(train_slice))
+            test_start += pd.DateOffset(months=test_months)
+            fold_num += 1
+            continue
+
+        if len(test_slice) < 5:
+            break
+
+        try:
+            model = train_fn(train_slice.reset_index())
+
+            test_close = test_slice[close_col].values.astype(float)
+            test_dates = test_slice.index.tolist()
+            predictions = predict_fn(model, test_slice.reset_index())
+
+            result = run_backtest(
+                predictions=predictions,
+                close_prices=test_close,
+                dates=test_dates,
+                config=config,
+            )
+
+            fold_dict: dict = {
+                "fold": fold_num,
+                "train_start": str(train_start.date()),
+                "train_end": str((test_start - pd.Timedelta(days=1)).date()),
+                "test_start": str(test_start.date()),
+                "test_end": str((test_end - pd.Timedelta(days=1)).date()),
+                "train_rows": len(train_slice),
+                "test_rows": len(test_slice),
+                "result": {
+                    "total_return_pct": result.total_return_pct,
+                    "annual_return_pct": result.annual_return_pct,
+                    "sharpe_ratio": result.sharpe_ratio,
+                    "max_drawdown_pct": result.max_drawdown_pct,
+                    "win_rate": result.win_rate,
+                    "profit_factor": result.profit_factor,
+                    "total_trades": result.total_trades,
+                    "buy_hold_return_pct": result.buy_hold_return_pct,
+                    "total_slippage_cost": result.total_slippage_cost,
+                },
+                "equity_curve": result.equity_curve,
+            }
+            fold_results.append(fold_dict)
+            all_equity.extend(result.equity_curve)
+
+            logger.info(
+                "WFO fold %d [%s \u2192 %s]: return=%.2f%%  sharpe=%.3f  dd=%.2f%%  trades=%d",
+                fold_num,
+                fold_dict["test_start"],
+                fold_dict["test_end"],
+                result.annual_return_pct,
+                result.sharpe_ratio,
+                result.max_drawdown_pct,
+                result.total_trades,
+            )
+
+        except Exception as exc:
+            logger.warning("WFO fold %d failed: %s", fold_num, exc)
+            fold_results.append({
+                "fold": fold_num,
+                "train_start": str(train_start.date()),
+                "test_start": str(test_start.date()),
+                "error": str(exc),
+            })
+
+        fold_num += 1
+        test_start += pd.DateOffset(months=test_months)
+
+    if not fold_results:
+        raise ValueError(
+            "No WFO folds were completed.  "
+            "Check that full_df spans at least train_years + test_months."
+        )
+
+    successful = [f for f in fold_results if "result" in f]
+
+    if not successful:
+        return {"folds": fold_results, "n_folds": 0, "error": "All folds failed"}
+
+    sharpes = [f["result"]["sharpe_ratio"] for f in successful]
+    returns = [f["result"]["annual_return_pct"] for f in successful]
+    drawdowns = [f["result"]["max_drawdown_pct"] for f in successful]
+    win_rates = [f["result"]["win_rate"] for f in successful]
+
+    return {
+        "folds": fold_results,
+        "n_folds": len(successful),
+        "out_of_sample_equity": all_equity,
+        "mean_sharpe": round(float(np.mean(sharpes)), 4),
+        "mean_annual_return_pct": round(float(np.mean(returns)), 4),
+        "mean_max_drawdown_pct": round(float(np.mean(drawdowns)), 4),
+        "mean_win_rate": round(float(np.mean(win_rates)), 4),
+        "worst_drawdown_pct": round(float(np.max(drawdowns)), 4),
+        "best_sharpe": round(float(np.max(sharpes)), 4),
+        "consistency_score": round(float(np.mean([r > 0 for r in returns])), 4),
+    }
+

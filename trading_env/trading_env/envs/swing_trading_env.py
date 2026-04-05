@@ -34,6 +34,8 @@ class SwingTradingEnv(BaseTradingEnv):
         churn_window: int = 5,
         churn_penalty: float = 0.002,
         drawdown_asymmetry: float = 2.0,
+        slippage_bps: float = 5.0,
+        vol_slippage_scale: float = 0.5,
     ):
         super().__init__(
             data=data,
@@ -50,6 +52,8 @@ class SwingTradingEnv(BaseTradingEnv):
             churn_window=churn_window,
             churn_penalty=churn_penalty,
             drawdown_asymmetry=drawdown_asymmetry,
+            slippage_bps=slippage_bps,
+            vol_slippage_scale=vol_slippage_scale,
         )
         self.max_holding_days = max_holding_days
         self._holding_since: int | None = None
@@ -62,14 +66,16 @@ class SwingTradingEnv(BaseTradingEnv):
     def _execute_action(self, action: int, price: float, regime_id: int | None):
         if action == 1:  # BUY
             if self.portfolio.holdings == 0:
-                qty = max(1, int(self.portfolio.cash * 0.95 / price))
-                if self.portfolio.buy(price, qty, self.current_step, regime_id):
+                fill = self._compute_fill_price(+1, price)
+                qty = max(1, int(self.portfolio.cash * 0.95 / fill))
+                if self.portfolio.buy(fill, qty, self.current_step, regime_id):
                     self._holding_since = self.current_step
         elif action == -1:  # SELL
             if self.portfolio.holdings > 0:
                 # T+1 settlement: can only sell if held for at least 1 step
                 if self._holding_since is not None and self.current_step > self._holding_since:
-                    self.portfolio.sell(price, self.portfolio.holdings, self.current_step, regime_id)
+                    fill = self._compute_fill_price(-1, price)
+                    self.portfolio.sell(fill, self.portfolio.holdings, self.current_step, regime_id)
                     self._holding_since = None
 
         # Auto-sell if max holding period exceeded
@@ -79,5 +85,6 @@ class SwingTradingEnv(BaseTradingEnv):
             and self.portfolio.holdings > 0
             and (self.current_step - self._holding_since) >= self.max_holding_days
         ):
-            self.portfolio.sell(price, self.portfolio.holdings, self.current_step)
+            fill = self._compute_fill_price(-1, price)
+            self.portfolio.sell(fill, self.portfolio.holdings, self.current_step)
             self._holding_since = None

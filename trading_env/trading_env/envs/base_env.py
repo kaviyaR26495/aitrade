@@ -41,6 +41,8 @@ class BaseTradingEnv(gym.Env):
         churn_window: int = 5,
         churn_penalty: float = 0.002,
         drawdown_asymmetry: float = 2.0,
+        slippage_bps: float = 5.0,
+        vol_slippage_scale: float = 0.5,
     ):
         super().__init__()
         self.data = data.astype(np.float32)
@@ -57,6 +59,8 @@ class BaseTradingEnv(gym.Env):
         self._churn_window = churn_window
         self._churn_penalty = churn_penalty
         self._drawdown_asymmetry = drawdown_asymmetry
+        self._slippage_bps = slippage_bps
+        self._vol_slippage_scale = vol_slippage_scale
 
         self.num_candles = len(data)
         self.num_features = data.shape[1]
@@ -160,21 +164,51 @@ class BaseTradingEnv(gym.Env):
             return 0
         return {0: 0, 1: 1, 2: -1}[int(action)]
 
+    def _compute_fill_price(self, side: int, price: float) -> float:
+        """Bid-ask spread + volatility-adaptive market-impact slippage.
+
+        Parameters
+        ----------
+        side : +1 = BUY (pay more), -1 = SELL (receive less)
+        price : raw close price
+
+        The total slippage has two components:
+        1. Fixed baseline — proxy for the bid-ask spread (slippage_bps).
+        2. Volatility-adaptive — wider spreads and more market impact on
+           high-volatility stocks (recent 20-bar realized vol × vol_slippage_scale).
+        """
+        if self._slippage_bps <= 0 and self._vol_slippage_scale <= 0:
+            return price
+        end = self.current_step + 1
+        start = max(1, end - 20)
+        if end - start >= 2:
+            px = self.prices[start:end]
+            rets = (px[1:] - px[:-1]) / np.where(px[:-1] != 0, px[:-1], 1e-8)
+            realized_vol = float(np.std(rets))
+        else:
+            realized_vol = 0.0
+        slip = self._slippage_bps / 10_000.0 + self._vol_slippage_scale * realized_vol
+        return float(price * (1.0 + side * slip))
+
     def _execute_action(self, action: int, price: float, regime_id: int | None):
         if action == 1:  # BUY
             if self.portfolio.holdings == 0:
-                qty = max(1, int(self.portfolio.cash * 0.95 / price))
-                self.portfolio.buy(price, qty, self.current_step, regime_id)
+                fill = self._compute_fill_price(+1, price)
+                qty = max(1, int(self.portfolio.cash * 0.95 / fill))
+                self.portfolio.buy(fill, qty, self.current_step, regime_id)
         elif action == -1:  # SELL
             if self.portfolio.holdings > 0:
-                self.portfolio.sell(price, self.portfolio.holdings, self.current_step, regime_id)
+                fill = self._compute_fill_price(-1, price)
+                self.portfolio.sell(fill, self.portfolio.holdings, self.current_step, regime_id)
 
     def _check_stoploss(self, price: float):
         """Auto-sell if unrealized loss exceeds stoploss percentage."""
         if self.portfolio.holdings > 0 and self.portfolio.avg_buy_price > 0:
             loss_pct = (self.portfolio.avg_buy_price - price) / self.portfolio.avg_buy_price * 100
             if loss_pct >= self.stoploss_pct:
-                self.portfolio.sell(price, self.portfolio.holdings, self.current_step)
+                # Trigger on raw price; fill at slipped price (market order on panic sell)
+                fill = self._compute_fill_price(-1, price)
+                self.portfolio.sell(fill, self.portfolio.holdings, self.current_step)
 
     def _compute_reward(self, price: float) -> float:
         nw = self.portfolio.net_worth(price)
