@@ -37,7 +37,7 @@ def extract_patterns(
     min_profit_threshold: float = 1.2,
     profit_horizon: int = 1,
     mode: str = "behavioral_cloning",
-    max_hold_ratio: float = 3.0,
+    max_hold_ratio: float = 5.0,
 ) -> list[dict[str, Any]]:
     """
     Replay RL model on data and extract labelled training patterns.
@@ -178,12 +178,18 @@ def patterns_to_training_data(
     include_hold: bool = True,
     feature_data: np.ndarray | None = None,
     seq_len: int = 15,
+    augment_jitter: bool = False,
+    jitter_noise_std: float = 0.001,
+    jitter_copies: int = 1,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Convert golden patterns to X, y arrays for KNN/LSTM training.
 
     If include_hold is True and feature_data is provided, adds HOLD samples
     from non-pattern timesteps to balance classes.
+
+    augment_jitter: if True, call jitter_augment() on the final arrays to
+    synthetically enlarge the dataset (useful for small data regimes).
 
     Returns (X, y) where:
     - X: (n_samples, seq_len, n_features)
@@ -224,4 +230,58 @@ def patterns_to_training_data(
         mask = y != 0
         X, y = X[mask], y[mask]
 
+    # Optional jitter augmentation to synthetically enlarge the dataset
+    if augment_jitter and len(X) > 0:
+        X, y = jitter_augment(X, y, noise_std=jitter_noise_std, copies=jitter_copies)
+
     return X, y
+
+
+def jitter_augment(
+    X: np.ndarray,
+    y: np.ndarray,
+    noise_std: float = 0.001,
+    copies: int = 1,
+    rng: np.random.Generator | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Augment training data by injecting Gaussian noise into feature windows.
+
+    Each sample in X receives `copies` noisy duplicates sharing the same label.
+    Forces LSTM/KNN to learn the *shape* of patterns rather than memorising
+    exact values, improving generalisation on small datasets.
+
+    Parameters
+    ----------
+    noise_std : float
+        Standard deviation of the noise added to each feature value.
+        Default 0.001 ≈ 0.1% of a unit-normalised feature.
+    copies : int
+        Number of augmented copies produced per original sample.
+        Total dataset size becomes X.shape[0] * (1 + copies).
+    rng : np.random.Generator | None
+        Optional seeded generator for reproducibility.
+
+    Returns
+    -------
+    X_aug : (n * (1+copies), seq_len, n_features)
+    y_aug : (n * (1+copies),)
+    """
+    if rng is None:
+        rng = np.random.default_rng(42)
+
+    X_parts = [X]
+    y_parts = [y]
+
+    for _ in range(copies):
+        noise = rng.normal(0.0, noise_std, size=X.shape).astype(np.float32)
+        X_parts.append(X + noise)
+        y_parts.append(y)
+
+    X_aug = np.concatenate(X_parts, axis=0)
+    y_aug = np.concatenate(y_parts, axis=0)
+
+    logger.info(
+        "Jitter augmentation: %d original + %d synthetic = %d total samples",
+        len(X), len(X_aug) - len(X), len(X_aug),
+    )
+    return X_aug, y_aug

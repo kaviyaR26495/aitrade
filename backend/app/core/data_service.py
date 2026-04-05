@@ -185,6 +185,63 @@ async def get_model_ready_data(
     return df, feature_cols
 
 
+async def get_sector_features(
+    db: AsyncSession,
+    sector: str,
+    interval: str = "day",
+    start_date: date | None = None,
+    end_date: date | None = None,
+    normalize: bool = True,
+    min_stocks: int = 2,
+) -> pd.DataFrame:
+    """Pool feature data from all active stocks in a sector.
+
+    Returns a single concatenated DataFrame with an added ``stock_id`` column so
+    downstream training code can track which rows belong to which instrument.
+    This gives the RL / LSTM / KNN models an order-of-magnitude more training
+    data by learning universal mechanics across correlated stocks rather than
+    memorising one stock's historical quirks.
+
+    Parameters
+    ----------
+    min_stocks : int
+        Minimum number of stocks required; returns empty DataFrame when fewer
+        stocks exist so callers can fall back to single-stock training.
+    """
+    stocks = await crud.get_stocks_by_sector(db, sector)
+
+    if len(stocks) < min_stocks:
+        logger.warning(
+            "Sector '%s' has %d active stocks (need >= %d). "
+            "Returning empty DataFrame — caller should fall back to single-stock training.",
+            sector, len(stocks), min_stocks,
+        )
+        return pd.DataFrame()
+
+    dfs: list[pd.DataFrame] = []
+    for stock in stocks:
+        try:
+            df = await get_stock_features(
+                db, stock.id, interval, start_date, end_date, normalize=normalize
+            )
+            if not df.empty:
+                df["stock_id"] = stock.id
+                df["symbol"]   = stock.symbol
+                dfs.append(df)
+        except Exception as exc:
+            logger.warning("Skipping stock %s for sector pool: %s", stock.symbol, exc)
+
+    if not dfs:
+        return pd.DataFrame()
+
+    pooled = pd.concat(dfs, ignore_index=True)
+    logger.info(
+        "Pooled sector '%s': %d/%d stocks, %d rows total",
+        sector, len(dfs), len(stocks), len(pooled),
+    )
+    return pooled
+
+
 async def sync_and_compute(
     db: AsyncSession,
     stock_id: int,
