@@ -153,10 +153,10 @@ def get_holdings() -> list[dict]:
     ]
 
 
-def get_positions() -> dict:
-    """Get current day positions."""
+def get_positions() -> list[dict]:
+    """Get current net positions."""
     kite = get_kite()
-    return kite.positions()
+    return kite.positions().get("net", [])
 
 
 # ── Order Placement ────────────────────────────────────────────────────
