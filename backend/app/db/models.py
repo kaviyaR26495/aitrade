@@ -14,7 +14,6 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
-    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -225,7 +224,8 @@ class GoldenPattern(Base):
     stock_id: Mapped[int] = mapped_column(Integer, ForeignKey("stocks_list.id"), nullable=False)
     date: Mapped[date] = mapped_column(Date, nullable=False)
     interval: Mapped[IntervalEnum] = mapped_column(Enum(IntervalEnum), nullable=False)
-    feature_window: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    dataset_filepath: Mapped[str] = mapped_column(String(500), nullable=False)
+    row_index: Mapped[int] = mapped_column(Integer, nullable=False)
     label: Mapped[int] = mapped_column(Integer, nullable=False)  # 1=BUY, -1=SELL, 0=HOLD
     pnl_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
     regime_id: Mapped[int | None] = mapped_column(Integer, nullable=True)

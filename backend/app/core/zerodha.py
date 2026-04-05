@@ -390,14 +390,33 @@ def _cancel_order(order_id: str, variety: str = "regular") -> None:
 
 
 def _order_status(order_id: str) -> str:
-    """Return Kite order status string e.g. 'COMPLETE', 'OPEN', 'CANCELLED'."""
+    """Return Kite order status string e.g. 'COMPLETE', 'OPEN', 'CANCELLED'.
+
+    Uses ``order_history(order_id=...)`` which targets a single order rather
+    than ``orders()`` which downloads the full day's order book.  With 3+
+    concurrent limit-chase loops polling every 5 s the old implementation
+    would exhaust Kite's 3-req/s rate limit immediately.
+    """
     try:
-        for o in get_kite().orders():
-            if str(o.get("order_id")) == str(order_id):
-                return str(o.get("status", "UNKNOWN")).upper()
+        history = get_kite().order_history(order_id=order_id)
+        if history:
+            return str(history[-1].get("status", "UNKNOWN")).upper()
     except Exception as exc:
         logger.warning("Could not fetch order status for %s: %s", order_id, exc)
     return "UNKNOWN"
+
+
+def _get_fill_price(order_id: str, fallback: float) -> float:
+    """Return the average fill price from order_history, or *fallback* on error."""
+    try:
+        history = get_kite().order_history(order_id=order_id)
+        if history:
+            avg = float(history[-1].get("average_price", 0))
+            if avg > 0:
+                return avg
+    except Exception as exc:
+        logger.warning("Could not fetch fill price for %s: %s", order_id, exc)
+    return fallback
 
 
 def place_limit_chase_order(
@@ -410,7 +429,7 @@ def place_limit_chase_order(
     max_attempts: int = 5,
     retry_after_s: float = 120.0,   # re-price after 2 minutes of no fill
     poll_interval_s: float = 5.0,   # order-status poll frequency
-) -> str | None:
+) -> dict | None:
     """Place a LIMIT order at the current bid/ask and chase the price if unfilled.
 
     Solves the adverse-selection problem where an unfilled LIMIT order means
@@ -428,7 +447,11 @@ def place_limit_chase_order(
 
     Returns
     -------
-    str | None — Zerodha order_id of the successfully submitted order.
+    dict | None — ``{"order_id": str, "fill_price": float}`` on success, None on
+    failure.  ``fill_price`` is the actual average price reported by Zerodha
+    order_history.  Callers **must** use this value — not the original quote —
+    when placing a protective GTT stoploss so the stoploss/target prices are
+    anchored to the true fill cost.
     """
     import time
 
@@ -494,11 +517,12 @@ def place_limit_chase_order(
             elapsed += poll_interval_s
             status = _order_status(current_order_id)
             if status == "COMPLETE":
+                fill_price = _get_fill_price(current_order_id, fallback=limit_price)
                 logger.info(
                     "LimitChase FILLED: %s %s qty=%d @ %.2f (attempt %d)",
-                    transaction_type, symbol, quantity, limit_price, attempt,
+                    transaction_type, symbol, quantity, fill_price, attempt,
                 )
-                return current_order_id
+                return {"order_id": current_order_id, "fill_price": fill_price}
             if status in ("CANCELLED", "REJECTED"):
                 logger.warning("Order %s was %s externally", current_order_id, status)
                 current_order_id = None
@@ -522,7 +546,8 @@ def place_limit_chase_order(
                                 "Order %s fully filled across partial fills — done.",
                                 current_order_id,
                             )
-                            return current_order_id
+                            fill_price = _get_fill_price(current_order_id, fallback=limit_price)
+                            return {"order_id": current_order_id, "fill_price": fill_price}
             except Exception as hist_exc:
                 logger.error(
                     "Failed to fetch order history for %s: %s", current_order_id, hist_exc
@@ -552,7 +577,9 @@ def place_limit_chase_order(
             "LimitChase MARKET fallback: %s %s qty=%d → %s",
             transaction_type, symbol, quantity, market_id,
         )
-        return market_id
+        # For a MARKET order we use the last traded price as fill_price
+        fill_price = _get_fill_price(market_id, fallback=get_ltp(symbol, exchange))
+        return {"order_id": market_id, "fill_price": fill_price}
     except Exception as exc:
         logger.error("LimitChase MARKET fallback failed for %s: %s", symbol, exc)
         return None

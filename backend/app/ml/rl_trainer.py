@@ -171,8 +171,10 @@ def train_rl_model(
     # Extract feature matrix
     feature_data = df[feature_cols].values.astype(np.float32)
 
-    # Raw price data for env reward calculation
-    close_prices = df["close"].values.astype(np.float32)
+    # Raw price data for env reward calculation — use split-adjusted prices so
+    # corporate actions (splits, bonuses) don't appear as crashes in the reward signal.
+    # Live execution always uses raw LTP from Kite, so the border is enforced here.
+    close_prices = df["adj_close"].fillna(df["close"]).values.astype(np.float32)
     regime_ids_arr = df["regime_id"].values.astype(int) if "regime_id" in df.columns else None
 
     # ── CUDA optimisations ────────────────────────────────────────────
@@ -380,7 +382,7 @@ def evaluate_rl_model(
     df, _ = prepare_training_data(ohlcv_df, min_quality=0.0)
 
     feature_data = df[feature_cols].values.astype(np.float32)
-    close_prices = df["close"].values.astype(np.float32)
+    close_prices = df["adj_close"].fillna(df["close"]).values.astype(np.float32)
     regime_ids_arr = df["regime_id"].values.astype(int) if "regime_id" in df.columns else None
 
     env = SwingTradingEnv(
@@ -666,7 +668,7 @@ def hybrid_train(
 
     df, feature_cols = prepare_training_data(ohlcv_df, min_quality=min_quality)
     feature_data = df[feature_cols].values.astype(np.float32)
-    close_prices = df["close"].values.astype(np.float32)
+    close_prices = df["adj_close"].fillna(df["close"]).values.astype(np.float32)
 
     from trading_env import SwingTradingEnv
     from stable_baselines3 import PPO

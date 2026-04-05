@@ -18,6 +18,8 @@ Two extraction modes are supported:
 from __future__ import annotations
 
 import logging
+from collections import defaultdict
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -38,6 +40,7 @@ def extract_patterns(
     profit_horizon: int = 1,
     mode: str = "behavioral_cloning",
     max_hold_ratio: float = 5.0,
+    parquet_key: str | None = None,
 ) -> list[dict[str, Any]]:
     """
     Replay RL model on data and extract labelled training patterns.
@@ -142,8 +145,7 @@ def extract_patterns(
             "pnl_percent": round(float(pnl_pct), 4),
             "regime_id": rid,
             "confidence": round(float(confidence), 4),
-            "feature_window": feature_window.astype(np.float32).tobytes(),
-            "_feature_shape": list(feature_window.shape),
+            "_feature_window": feature_window.astype(np.float32),  # temp; replaced after sort
         }
         raw_patterns.append(pattern)
 
@@ -170,6 +172,30 @@ def extract_patterns(
         "Extracted %d patterns in '%s' mode (BUY: %d, SELL: %d, HOLD: %d)",
         len(patterns), mode, n_buy, n_sell, n_hold,
     )
+
+    # ── Persist feature windows to parquet (avoids LargeBinary DB bloat) ──────
+    if patterns:
+        import pandas as pd
+        from app.config import settings
+
+        parquet_dir = settings.MODEL_DIR / "patterns"
+        parquet_dir.mkdir(parents=True, exist_ok=True)
+        key = parquet_key or "unnamed"
+        fpath = str(parquet_dir / f"patterns_{key}.parquet")
+
+        # Flatten each (seq_len, n_features) window to a 1-D row
+        feature_2d = np.stack(
+            [p.pop("_feature_window").reshape(-1) for p in patterns], axis=0
+        )
+        pd.DataFrame(feature_2d).to_parquet(fpath, index=False)
+
+        for i, p in enumerate(patterns):
+            p["dataset_filepath"] = fpath
+            p["row_index"] = i
+    else:
+        for p in patterns:
+            p.pop("_feature_window", None)
+
     return patterns
 
 
@@ -199,23 +225,32 @@ def patterns_to_training_data(
     X_list = []
     y_list = []
 
-    for p in patterns:
-        raw = p["feature_window"]
-        # _feature_shape is set in-memory by extract_patterns; DB rows don't have it.
-        # Infer shape: n_features = total_floats / seq_len
-        if "_feature_shape" in p:
-            shape = p["_feature_shape"]
-        else:
-            total_floats = len(raw) // 4  # float32 = 4 bytes
-            n_features = total_floats // seq_len
-            shape = [seq_len, n_features]
-        window = np.frombuffer(raw, dtype=np.float32).reshape(shape)
-        X_list.append(window)
+    # Group by parquet file to read each file once
+    import pandas as pd
+    parquet_cache: dict[str, np.ndarray] = {}
+    groups: dict[str, list[tuple[int, int, int]]] = defaultdict(list)
+    for idx, p in enumerate(patterns):
+        groups[p["dataset_filepath"]].append((idx, int(p["row_index"]), int(p["label"])))
 
+    # Sort by original index to preserve order
+    ordered: list[tuple[int, np.ndarray, int]] = []
+    for fpath, entries in groups.items():
+        if fpath not in parquet_cache:
+            parquet_cache[fpath] = pd.read_parquet(fpath).values.astype(np.float32)
+        arr = parquet_cache[fpath]
+        n_cols = arr.shape[1]
+        n_features = n_cols // seq_len
+        for orig_idx, row_idx, label in entries:
+            window = arr[row_idx].reshape(seq_len, n_features)
+            ordered.append((orig_idx, window, label))
+
+    ordered.sort(key=lambda t: t[0])
+    for _, window, label in ordered:
+        X_list.append(window)
         # Map label: 1 (BUY) → 1, -1 (SELL) → 2, 0 (HOLD) → 0
-        if p["label"] == 1:
+        if label == 1:
             y_list.append(1)
-        elif p["label"] == -1:
+        elif label == -1:
             y_list.append(2)
         else:
             y_list.append(0)

@@ -153,6 +153,105 @@ async def place_order(
     }
 
 
+class ExecuteSignalRequest(BaseModel):
+    stock_id: int
+    ensemble_prediction_id: int | None = None
+    quantity: int
+    exchange: str = "NSE"
+    product: str = "CNC"
+    gtt_sell_pct: float = 15.0
+    gtt_stoploss_pct: float = 5.0
+    max_attempts: int = 5
+
+
+@router.post("/execute-signal")
+async def execute_signal(
+    req: ExecuteSignalRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Limit-chase a BUY then immediately place protective GTT OCO stoploss+target.
+
+    The GTT trigger prices are anchored to the *actual fill price* returned by
+    Zerodha order_history so slippage is automatically absorbed.  Returns the
+    chase order id and GTT id so the caller can track both legs.
+    """
+    stock = await crud.get_stock_by_id(db, req.stock_id)
+    if not stock:
+        raise HTTPException(status_code=404, detail="Stock not found")
+
+    # --- BUY leg: limit-chase until filled or MARKET fallback ---
+    result = zerodha.place_limit_chase_order(
+        symbol=stock.symbol,
+        transaction_type="BUY",
+        quantity=req.quantity,
+        exchange=req.exchange,
+        product=req.product,
+        max_attempts=req.max_attempts,
+    )
+    if not result:
+        raise HTTPException(status_code=502, detail="Limit-chase order failed — no fill obtained")
+
+    chase_order_id: str = result["order_id"]
+    fill_price: float = result["fill_price"]
+
+    # --- GTT leg: stoploss + target anchored to actual fill price ---
+    gtt_id: int | None = None
+    try:
+        gtt_id = zerodha.place_gtt_order(
+            symbol=stock.symbol,
+            exchange=req.exchange,
+            avg_price=fill_price,
+            quantity=req.quantity,
+            sell_pct=req.gtt_sell_pct,
+            stoploss_pct=req.gtt_stoploss_pct,
+        )
+    except Exception as gtt_exc:
+        # GTT failure must not silently leave the position unprotected — surface it.
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"BUY filled (order_id={chase_order_id}, fill_price={fill_price}) "
+                f"but GTT placement failed: {gtt_exc}"
+            ),
+        )
+
+    # --- Persist both legs in DB ---
+    from app.db.models import TradeOrder
+    chase_record = TradeOrder(
+        stock_id=req.stock_id,
+        ensemble_prediction_id=req.ensemble_prediction_id,
+        variety="regular",
+        transaction_type="BUY",
+        quantity=req.quantity,
+        price=fill_price,
+        status="complete",
+        zerodha_order_id=chase_order_id,
+    )
+    db.add(chase_record)
+    gtt_record = TradeOrder(
+        stock_id=req.stock_id,
+        ensemble_prediction_id=req.ensemble_prediction_id,
+        variety="gtt",
+        transaction_type="SELL",
+        quantity=req.quantity,
+        price=fill_price,
+        status="placed",
+        zerodha_order_id=str(gtt_id) if gtt_id else None,
+    )
+    db.add(gtt_record)
+    await db.commit()
+    await db.refresh(chase_record)
+    await db.refresh(gtt_record)
+
+    return {
+        "chase_order_id": chase_order_id,
+        "fill_price": fill_price,
+        "gtt_id": gtt_id,
+        "chase_db_id": chase_record.id,
+        "gtt_db_id": gtt_record.id,
+    }
+
+
 @router.get("/orders")
 async def list_orders(
     db: AsyncSession = Depends(get_db),

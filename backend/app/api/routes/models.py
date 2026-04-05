@@ -311,18 +311,18 @@ async def _run_distillation_background(
                     reward_function=reward_function,
                     min_profit_threshold=min_profit_threshold,
                     profit_horizon=profit_horizon,
+                    parquet_key=f"{rl_model_id}_{stock_id}_{interval}",
                 ),
             )
         except Exception as exc:
             _dlog(knn_model_id, f"ERROR  Stock #{stock_id}: pattern extraction failed: {exc}")
             continue
 
-        # Tag patterns with rl_model_id, stock_id and interval; remove internal _feature_shape key
+        # Tag patterns with rl_model_id, stock_id and interval
         for p in patterns:
             p["rl_model_id"] = rl_model_id
             p["stock_id"] = stock_id
             p["interval"] = interval
-            p.pop("_feature_shape", None)  # not a DB column
 
         _dlog(knn_model_id, f"INFO   Stock #{stock_id}: extracted {len(patterns)} golden patterns (BUY+SELL).")
         all_patterns.extend(patterns)
@@ -358,8 +358,8 @@ async def _run_distillation_background(
             db_patterns = await crud.get_patterns_by_rl_model(db, rl_model_id)
         db_patterns_list = [
             {
-                "feature_window": p.feature_window,
-                # feature_shape is not stored in DB; inferred from bytes in patterns_to_training_data
+                "dataset_filepath": p.dataset_filepath,
+                "row_index": p.row_index,
                 "label": p.label,
             }
             for p in db_patterns
