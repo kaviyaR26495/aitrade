@@ -41,8 +41,11 @@ class BacktestConfig:
     # Requires ``nifty_closes`` to be passed as a kwarg to run_backtest().
     # nifty_block_buys=False → halve size when NIFTY is below 200-DMA
     # nifty_block_buys=True  → disable all new BUYs when NIFTY below 200-DMA
-    nifty_block_buys: bool = False
-
+    nifty_block_buys: bool = False    # ── Sector concentration guard ─────────────────────────────────────────────
+    # Requires ``sectors`` to be passed as a list to run_backtest().
+    # A new BUY is blocked when the sector already accounts for ≥ sector_cap
+    # of total portfolio equity.
+    sector_cap: float = 0.25  # maximum equity fraction in any single sector
 
 @dataclass
 class Trade:
@@ -112,6 +115,7 @@ def run_backtest(
     low_prices: np.ndarray | None = None,
     open_prices: np.ndarray | None = None,
     nifty_closes: np.ndarray | None = None,
+    sectors: list[str | None] | None = None,
 ) -> BacktestResult:
     """
     Run backtest on a sequence of predictions.
@@ -132,13 +136,19 @@ def run_backtest(
         index).  When provided, the 200-DMA kill-switch is applied: if today's
         NIFTY close is below its 200-DMA, new BUY position sizes are halved
         (or fully blocked, depending on BacktestConfig.nifty_block_buys).
+    sectors : list[str | None] | None
+        Per-bar sector label aligned with ``predictions``.  Each element is the
+        sector string for the stock at that bar (constant for single-stock
+        backtests, may vary for multi-stock runs).  When provided, a new BUY
+        is blocked if the sector already occupies ≥ BacktestConfig.sector_cap
+        of total portfolio equity.
 
     Returns BacktestResult with metrics and trade log.
     """
     if config is None:
         config = BacktestConfig()
 
-    from app.ml.position_sizer import size_trade, size_trade_with_breadth  # noqa: PLC0415
+    from app.ml.position_sizer import size_trade, size_trade_with_breadth, sector_concentration_multiplier  # noqa: PLC0415
 
     n = min(len(predictions), len(close_prices), len(dates))
     capital = config.initial_capital
@@ -164,6 +174,12 @@ def run_backtest(
 
         # Realised vol for slippage + position sizing
         rv = _rolling_vol(close_prices, i)
+        # Sector label for this bar
+        sector_label = sectors[i] if sectors is not None and i < len(sectors) else None
+
+        # Update MTM price on all open positions (needed for sector cap calc)
+        for pos in positions.values():
+            pos["price"] = price
 
         # ── Stoploss / target checks on open positions ────────────────
         closed_keys = []
@@ -262,6 +278,17 @@ def run_backtest(
                 ideal_position_value = total_equity * pos_frac
                 actual_position_value = min(ideal_position_value, cash)
                 qty = int(actual_position_value / fill_entry)
+                # Sector concentration guard: block the trade if the sector
+                # already occupies ≥ sector_cap of total portfolio equity
+                if sector_label and sectors is not None:
+                    sect_mult = sector_concentration_multiplier(
+                        sector_label,
+                        open_positions=positions,
+                        total_equity=total_equity,
+                        sector_cap=config.sector_cap,
+                    )
+                    if sect_mult == 0.0:
+                        continue  # sector cap breached — skip trade
                 if qty > 0:
                     actual_cost = qty * fill_entry * (1 + config.commission_pct)
                     if actual_cost <= cash:
@@ -273,6 +300,8 @@ def run_backtest(
                             "entry_date": dt,
                             "regime_id": regime_id,
                             "confidence": confidence,
+                            "sector": sector_label,
+                            "price": price,  # current MTM price for sector calc
                         }
 
         elif action == -1 and confidence >= config.min_confidence:

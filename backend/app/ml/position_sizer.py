@@ -277,3 +277,59 @@ def size_trade_with_breadth(
     )
     return float(base_frac * multiplier)
 
+
+# ─── Sector Concentration Guard ───────────────────────────────────────────────
+
+
+def sector_concentration_multiplier(
+    candidate_sector: str | None,
+    open_positions: "dict[str, dict]",
+    total_equity: float,
+    sector_cap: float = 0.25,
+) -> float:
+    """Return 0.0 if adding a new position would breach the sector concentration cap.
+
+    The guard works entirely in terms of **mark-to-market position value** so
+    it accounts for unrealised gains/losses already in the book.
+
+    Algorithm
+    ---------
+    1. Sum the current market value of every open position whose ``sector``
+       matches ``candidate_sector``.
+    2. If that sum already equals or exceeds ``sector_cap × total_equity``,
+       return 0.0 (block the trade).
+    3. Otherwise return 1.0 (trade is allowed).
+
+    The position dict must contain at least ``{"quantity": int, "price": float,
+    "sector": str | None}`` per key.  Any position with a ``None`` or empty
+    sector is treated as belonging to a unique unknown sector and never counted
+    against any named sector.
+
+    Parameters
+    ----------
+    candidate_sector : sector of the stock being evaluated for entry.
+        Passing ``None`` or ``""`` means "unknown" — the guard always allows it.
+    open_positions : mapping of position key → position dict, matching the
+        structure used in backtester.py.
+    total_equity : current portfolio equity (cash + MTM open positions).
+        Used as the denominator for the sector weight calculation.
+    sector_cap : maximum fraction of equity allowed in any single sector.
+        Default 0.25 (25 %).
+
+    Returns
+    -------
+    float — 1.0 (trade allowed) or 0.0 (sector cap breached).
+    """
+    if not candidate_sector or total_equity <= 0:
+        return 1.0
+
+    sector_exposure = sum(
+        p["quantity"] * p.get("price", 0.0)
+        for p in open_positions.values()
+        if p.get("sector") == candidate_sector
+    )
+
+    if sector_exposure >= sector_cap * total_equity:
+        return 0.0
+    return 1.0
+

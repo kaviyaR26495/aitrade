@@ -34,8 +34,15 @@ async def run_daily_predictions(
     target_date: date | None = None,
     interval: str = "day",
     stock_ids: list[int] | None = None,
+    ensemble_config_id: int | None = None,
 ) -> dict[str, Any]:
-    """Run ensemble predictions for all active stocks and store results."""
+    """Run ensemble predictions for all active stocks and store results.
+
+    When ``ensemble_config_id`` is provided the function queries the DB for
+    per-stock calibrated KNN/LSTM weights (written by
+    ``ensemble.per_stock_optimal_weights``).  If no per-stock row exists for a
+    given stock the global ``knn_weight`` / ``lstm_weight`` defaults are used.
+    """
     model_dir = model_dir or settings.MODEL_DIR
     model_path = Path(model_dir)
     target_date = target_date or date.today()
@@ -76,12 +83,22 @@ async def run_daily_predictions(
             # Use the last window only (most recent)
             X_last = X[-1:].copy()
 
+            # Resolve per-stock calibrated weights (fall back to global defaults)
+            stock_knn_w, stock_lstm_w = knn_weight, lstm_weight
+            if ensemble_config_id is not None:
+                stock_weights = await crud.get_stock_ensemble_weight(
+                    db, ensemble_config_id=ensemble_config_id, stock_id=stock.id
+                )
+                if stock_weights is not None:
+                    stock_knn_w = stock_weights.knn_weight
+                    stock_lstm_w = stock_weights.lstm_weight
+
             knn_preds, knn_probs = predict_knn(knn_model, X_last, norm_params=knn_norm_params)
             lstm_preds, lstm_probs = predict_lstm(lstm_model, X_last)
 
             preds = ensemble_predict(
                 knn_preds, knn_probs, lstm_preds, lstm_probs,
-                knn_weight=knn_weight, lstm_weight=lstm_weight,
+                knn_weight=stock_knn_w, lstm_weight=stock_lstm_w,
                 agreement_required=agreement_required,
             )
 

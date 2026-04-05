@@ -69,6 +69,9 @@ def train_lstm(
     max_epochs: int = 100,
     patience: int = 10,
     train_ratio: float = 0.8,
+    augment_jitter: bool = False,
+    jitter_noise_std: float = 0.001,
+    jitter_copies: int = 1,
     device: str | None = None,
     log_fn: Any = None,
 ) -> tuple[TradeLSTM, dict[str, Any]]:
@@ -77,6 +80,10 @@ def train_lstm(
 
     X: (n_samples, seq_len, n_features)
     y: (n_samples,) — 0=HOLD, 1=BUY, 2=SELL
+
+    augment_jitter: if True, Gaussian jitter is applied *only* to the training
+        split after the chronological split, so the validation set remains
+        composed entirely of original (unaugmented) market data.
 
     Returns (model, metrics_dict).
     """
@@ -98,6 +105,14 @@ def train_lstm(
     _log(
         f"INFO   LSTM split: train={len(X_train)}, val={len(X_val)}.  Classes: {dict(zip(*np.unique(y_train, return_counts=True)))}"
     )
+
+    # Jitter augmentation — applied to X_train ONLY, after the split,
+    # so the validation set stays pure (no synthetic data leaks in)
+    if augment_jitter and len(X_train) > 0:
+        from app.ml.pattern_extractor import jitter_augment
+        n_before = len(X_train)
+        X_train, y_train = jitter_augment(X_train, y_train, noise_std=jitter_noise_std, copies=jitter_copies)
+        _log(f"INFO   Jitter augmentation applied to train only: {n_before} → {len(X_train)} samples.")
 
     # Class weights for imbalanced data (always size num_classes=3)
     num_classes = 3

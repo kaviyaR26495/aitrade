@@ -28,6 +28,7 @@ from app.db.models import (
     RLModel,
     RLTrainingRun,
     Stock,
+    StockEnsembleWeights,
     StockIndicator,
     StockOHLCV,
     StockRegime,
@@ -504,6 +505,51 @@ async def get_ensemble_predictions_for_date(
     q = q.order_by(EnsemblePrediction.confidence.desc())
     result = await db.execute(q)
     return result.scalars().all()
+
+
+# ── Per-Stock Ensemble Weights CRUD ──────────────────────────────────
+
+async def upsert_stock_ensemble_weight(
+    db: AsyncSession,
+    ensemble_config_id: int,
+    stock_id: int,
+    knn_weight: float,
+    lstm_weight: float,
+    calibration_precision: float | None = None,
+) -> StockEnsembleWeights:
+    """Insert or replace the calibrated weight row for a (config, stock) pair."""
+    from datetime import datetime
+    row = StockEnsembleWeights(
+        ensemble_config_id=ensemble_config_id,
+        stock_id=stock_id,
+        knn_weight=knn_weight,
+        lstm_weight=lstm_weight,
+        calibration_precision=calibration_precision,
+        calibrated_at=datetime.utcnow(),
+    )
+    db.add(row)
+    await db.commit()
+    await db.refresh(row)
+    return row
+
+
+async def get_stock_ensemble_weight(
+    db: AsyncSession,
+    ensemble_config_id: int,
+    stock_id: int,
+) -> StockEnsembleWeights | None:
+    """Return the most-recently calibrated weight row for a (config, stock) pair."""
+    q = (
+        select(StockEnsembleWeights)
+        .where(
+            StockEnsembleWeights.ensemble_config_id == ensemble_config_id,
+            StockEnsembleWeights.stock_id == stock_id,
+        )
+        .order_by(StockEnsembleWeights.calibrated_at.desc())
+        .limit(1)
+    )
+    result = await db.execute(q)
+    return result.scalar_one_or_none()
 
 
 # ── Settings CRUD ──────────────────────────────────────────────────────

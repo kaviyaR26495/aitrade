@@ -134,6 +134,9 @@ def train_knn(
     k_neighbors: int = 5,
     train_ratio: float = 0.8,
     use_smote: bool = True,
+    augment_jitter: bool = False,
+    jitter_noise_std: float = 0.001,
+    jitter_copies: int = 1,
     log_fn: Any = None,
 ) -> tuple[KNeighborsClassifier, dict[str, Any]]:
     """
@@ -141,6 +144,10 @@ def train_knn(
 
     X: (n_samples, seq_len, n_features) — will be flattened
     y: (n_samples,) — 0=HOLD, 1=BUY, 2=SELL
+
+    augment_jitter: if True, Gaussian jitter is applied *only* to the training
+        split after the chronological split, so the validation set remains
+        composed entirely of original (unaugmented) market data.
 
     Returns (model, metrics_dict).
     """
@@ -174,6 +181,19 @@ def train_knn(
         "scale": scaler.scale_.tolist(),
     }
     _log(f"INFO   StandardScaler fitted (features={X_flat.shape[1]}).")
+
+    # Jitter augmentation — applied to X_train ONLY, after the split,
+    # so the validation set stays pure (no synthetic data leaks in)
+    if augment_jitter and len(X_train) > 0:
+        from app.ml.pattern_extractor import jitter_augment
+        # Unflatten → jitter → re-flatten to preserve seq structure in noise
+        n_tr = X_train.shape[0]
+        seq_len = X.shape[1] if X.ndim == 3 else 1
+        n_feat = X_flat.shape[1] // seq_len if seq_len > 1 else X_flat.shape[1]
+        X_3d = X_train.reshape(n_tr, seq_len, n_feat)
+        X_3d_aug, y_train = jitter_augment(X_3d, y_train, noise_std=jitter_noise_std, copies=jitter_copies)
+        X_train = X_3d_aug.reshape(len(X_3d_aug), -1)
+        _log(f"INFO   Jitter augmentation applied to train only: {n_tr} → {len(X_train)} samples.")
 
     # SMOTE oversampling for class imbalance
     if use_smote and len(np.unique(y_train)) > 1:

@@ -357,6 +357,34 @@ class EnsemblePrediction(Base):
     regime_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
+# ── Per-Stock Ensemble Weight Calibration ────────────────────────────
+
+class StockEnsembleWeights(Base):
+    """Per-stock KNN/LSTM weight calibration, computed by per_stock_optimal_weights().
+
+    Rows are keyed by (ensemble_config_id, stock_id).  A new row is written
+    each time the calibration job runs; the most-recent row is used at
+    prediction time.  This lets each stock carry its own optimal ratio
+    rather than relying on the global EnsembleConfig defaults.
+    """
+    __tablename__ = "stock_ensemble_weights"
+    __table_args__ = (
+        Index("ix_sew_config_stock", "ensemble_config_id", "stock_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ensemble_config_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("ensemble_configs.id"), nullable=False
+    )
+    stock_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("stocks_list.id"), nullable=False
+    )
+    knn_weight: Mapped[float] = mapped_column(Float, nullable=False)
+    lstm_weight: Mapped[float] = mapped_column(Float, nullable=False)
+    calibration_precision: Mapped[float | None] = mapped_column(Float, nullable=True)
+    calibrated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 # ── Backtest Results ───────────────────────────────────────────────────
 
 class BacktestResult(Base):

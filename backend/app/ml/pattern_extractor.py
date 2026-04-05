@@ -178,9 +178,6 @@ def patterns_to_training_data(
     include_hold: bool = True,
     feature_data: np.ndarray | None = None,
     seq_len: int = 15,
-    augment_jitter: bool = False,
-    jitter_noise_std: float = 0.001,
-    jitter_copies: int = 1,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Convert golden patterns to X, y arrays for KNN/LSTM training.
@@ -188,8 +185,9 @@ def patterns_to_training_data(
     If include_hold is True and feature_data is provided, adds HOLD samples
     from non-pattern timesteps to balance classes.
 
-    augment_jitter: if True, call jitter_augment() on the final arrays to
-    synthetically enlarge the dataset (useful for small data regimes).
+    Jitter augmentation is intentionally NOT applied here — it must be applied
+    only to the training split *inside* train_knn / train_lstm to prevent
+    synthetic samples from leaking into the validation set.
 
     Returns (X, y) where:
     - X: (n_samples, seq_len, n_features)
@@ -229,10 +227,6 @@ def patterns_to_training_data(
     if not include_hold:
         mask = y != 0
         X, y = X[mask], y[mask]
-
-    # Optional jitter augmentation to synthetically enlarge the dataset
-    if augment_jitter and len(X) > 0:
-        X, y = jitter_augment(X, y, noise_std=jitter_noise_std, copies=jitter_copies)
 
     return X, y
 
