@@ -58,6 +58,13 @@ async def get_all_active_stocks(db: AsyncSession) -> Sequence[Stock]:
     return result.scalars().all()
 
 
+async def get_stocks_by_sector(db: AsyncSession, sector: str) -> Sequence[Stock]:
+    result = await db.execute(
+        select(Stock).where(Stock.sector == sector, Stock.is_active == True).order_by(Stock.symbol)
+    )
+    return result.scalars().all()
+
+
 async def upsert_stock(db: AsyncSession, symbol: str, **kwargs) -> Stock:
     stmt = mysql_insert(Stock).values(symbol=symbol, **kwargs)
     stmt = stmt.on_duplicate_key_update(

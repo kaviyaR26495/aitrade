@@ -28,6 +28,8 @@ EXCLUDE_COLS = {
     "regime_trend_bullish", "regime_trend_bearish", "regime_trend_neutral",
     "regime_vol_high", "regime_confidence",
     "trend", "volatility", "regime_id", "quality_score", "is_transition",
+    # Market context features — pre-normalized, pass through as-is
+    "fii_net_norm", "dii_net_norm", "sector_breadth_pct",
 }
 
 # MinMax-scaled columns (obv can be negative → cannot use log-return)

@@ -42,6 +42,10 @@ async def is_data_stale(
     if max_date is None:
         return True, None
 
+    # MySQL may return datetime instead of date for MAX(date) — normalise
+    if isinstance(max_date, datetime):
+        max_date = max_date.date()
+
     last_trading = await get_last_trading_day(db)
     return max_date < last_trading, max_date
 

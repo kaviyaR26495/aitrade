@@ -1,11 +1,19 @@
-"""Pattern Extractor — replay RL model to extract golden patterns.
+"""Pattern Extractor — replay RL model and build supervised training data.
 
-Core of the RL→KNN+LSTM distillation bridge (Step 5.1):
-1. Load best RL model → replay on full historical quality data (deterministic)
-2. TradeLogger captures: date, action, feature window, P&L
-3. Label patterns: BUY (label=1), SELL (label=-1), HOLD (label=0)
-4. Tag each pattern with regime_id from stock_regimes
-5. Store in golden_patterns table
+Two extraction modes are supported:
+
+  mode="behavioral_cloning"  (default)
+    Imitation learning — LSTM/KNN learn the RL agent's *complete* policy.
+    Every RL action (BUY, SELL, and HOLD) is recorded as a labelled training
+    sample.  HOLDs are downsampled to max_hold_ratio x (buy+sell count) so the
+    supervised models also learn which setups the RL *correctly avoided*.
+    This eliminates the survivorship bias of the golden-patterns approach where
+    only profitable trades were passed downstream.
+
+  mode="golden_patterns"
+    Legacy behavior — only BUY/SELL actions that cleared min_profit_threshold
+    are kept.  Useful as a high-precision signal source when labelled data is
+    limited.
 """
 from __future__ import annotations
 
@@ -28,12 +36,25 @@ def extract_patterns(
     reward_function: str = "risk_adjusted_pnl",
     min_profit_threshold: float = 1.2,
     profit_horizon: int = 1,
+    mode: str = "behavioral_cloning",
+    max_hold_ratio: float = 3.0,
 ) -> list[dict[str, Any]]:
     """
-    Replay RL model on data and extract golden patterns.
+    Replay RL model on data and extract labelled training patterns.
 
-    min_profit_threshold: minimum P&L % to qualify as golden pattern (default 1.2%)
-    profit_horizon: number of candles forward to measure P&L (default 1)
+    Parameters
+    ----------
+    mode : "behavioral_cloning" | "golden_patterns"
+        behavioral_cloning (default) — records every RL action as a label,
+        eliminating survivorship bias.  golden_patterns — legacy, keeps only
+        BUY/SELL that cleared min_profit_threshold.
+    max_hold_ratio : float
+        behavioral_cloning only: HOLDs are downsampled so that
+        #holds <= max_hold_ratio * (#buy + #sell).  Default 3.0.
+    min_profit_threshold : float
+        golden_patterns only: minimum forward P&L % to keep a pattern.
+    profit_horizon : int
+        Number of candles forward used to measure realised P&L.
 
     Returns list of pattern dicts ready for DB insertion.
     """
@@ -49,10 +70,9 @@ def extract_patterns(
 
     obs, info = env.reset()
     done = False
-    actions = []
+    actions: list[int] = []
     step_idx = 0
 
-    # Collect all actions
     while not done:
         action, _ = model.predict(obs, deterministic=True)
         obs, reward, terminated, truncated, info = env.step(int(action))
@@ -62,18 +82,17 @@ def extract_patterns(
 
     logger.info("Replayed %d steps, collected %d actions", step_idx, len(actions))
 
-    # Build patterns from actions + forward P&L
-    patterns = []
     n = len(close_prices)
+    raw_patterns: list[dict[str, Any]] = []
 
     for i, action in enumerate(actions):
-        # Actual data index (considering seq_len warmup)
+        # Map step index to data index (seq_len warmup shift)
         data_idx = seq_len + i
         if data_idx >= n:
             break
 
-        # Skip HOLD actions (action=0)
-        if action == 0:
+        start = data_idx - seq_len
+        if start < 0:
             continue
 
         entry_price = close_prices[data_idx]
@@ -82,32 +101,40 @@ def extract_patterns(
         exit_idx = min(data_idx + profit_horizon, n - 1)
         exit_price = close_prices[exit_idx]
 
-        if action == 1:  # BUY
+        if action == 1:    # BUY
             pnl_pct = ((exit_price - entry_price) / entry_price) * 100
         elif action == 2:  # SELL
             pnl_pct = ((entry_price - exit_price) / entry_price) * 100
-        else:
-            continue
+        else:              # HOLD
+            pnl_pct = 0.0
 
-        # Only keep patterns that meet profit threshold
-        if pnl_pct < min_profit_threshold:
-            continue
+        # ── Golden patterns mode: filter by P&L, skip HOLDs ───────────
+        if mode == "golden_patterns":
+            if action == 0:
+                continue
+            if pnl_pct < min_profit_threshold:
+                continue
+            label = 1 if action == 1 else -1
+            confidence = min(pnl_pct / 5.0, 1.0)
+        else:
+            # ── Behavioral cloning: all RL decisions become training labels
+            if action == 1:
+                label = 1
+                confidence = min(max(pnl_pct / 5.0, 0.0), 1.0)
+            elif action == 2:
+                label = -1
+                confidence = min(max(pnl_pct / 5.0, 0.0), 1.0)
+            else:
+                label = 0
+                confidence = 0.5  # HOLD: neutral confidence
 
         # Feature window: seq_len candles up to and including the action point
-        start = data_idx - seq_len
-        end = data_idx
         if start < 0:
             continue
-        feature_window = feature_data[start:end]
-
-        # Label: 1=BUY, -1=SELL
-        label = 1 if action == 1 else -1
+        feature_window = feature_data[start:data_idx]
 
         # Regime at the action point
         rid = int(regime_ids[data_idx]) if regime_ids is not None and data_idx < len(regime_ids) else None
-
-        # Confidence: normalized P&L (higher P&L = higher confidence)
-        confidence = min(pnl_pct / 5.0, 1.0)  # Cap at 5% = confidence 1.0
 
         pattern = {
             "date": dates[data_idx] if data_idx < len(dates) else None,
@@ -116,18 +143,33 @@ def extract_patterns(
             "regime_id": rid,
             "confidence": round(float(confidence), 4),
             "feature_window": feature_window.astype(np.float32).tobytes(),
-            # shape is (seq_len, n_features) — inferred from bytes when reloading
             "_feature_shape": list(feature_window.shape),
         }
-        patterns.append(pattern)
+        raw_patterns.append(pattern)
 
+    # ── Downsample HOLDs in behavioral_cloning mode ────────────────────
+    if mode == "behavioral_cloning":
+        trade_patterns = [p for p in raw_patterns if p["label"] != 0]
+        hold_patterns  = [p for p in raw_patterns if p["label"] == 0]
+        max_holds = int(len(trade_patterns) * max_hold_ratio)
+
+        if len(hold_patterns) > max_holds and max_holds > 0:
+            # Evenly-spaced subsample preserves chronological coverage
+            step = max(len(hold_patterns) // max_holds, 1)
+            hold_patterns = hold_patterns[::step][:max_holds]
+
+        patterns = trade_patterns + hold_patterns
+        patterns.sort(key=lambda p: str(p["date"]) if p["date"] is not None else "")
+    else:
+        patterns = raw_patterns
+
+    n_buy  = sum(1 for p in patterns if p["label"] == 1)
+    n_sell = sum(1 for p in patterns if p["label"] == -1)
+    n_hold = sum(1 for p in patterns if p["label"] == 0)
     logger.info(
-        "Extracted %d golden patterns (BUY: %d, SELL: %d)",
-        len(patterns),
-        sum(1 for p in patterns if p["label"] == 1),
-        sum(1 for p in patterns if p["label"] == -1),
+        "Extracted %d patterns in '%s' mode (BUY: %d, SELL: %d, HOLD: %d)",
+        len(patterns), mode, n_buy, n_sell, n_hold,
     )
-
     return patterns
 
 
@@ -176,5 +218,10 @@ def patterns_to_training_data(
 
     X = np.array(X_list, dtype=np.float32)
     y = np.array(y_list, dtype=np.int64)
+
+    # Optionally filter out HOLDs for golden-pattern style training
+    if not include_hold:
+        mask = y != 0
+        X, y = X[mask], y[mask]
 
     return X, y

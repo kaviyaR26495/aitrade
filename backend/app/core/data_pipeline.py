@@ -71,9 +71,15 @@ async def sync_stock_ohlcv(
         logger.debug("Stock %s interval=%s is fresh (max=%s)", stock.symbol, interval, max_db_date)
         return 0
 
-    # Determine start date
+    # Determine start date — always use datetime so Kite API chunking
+    # (which does `current_from < to_date`) never hits a date/datetime
+    # type mismatch, regardless of what the DB driver returned.
     if max_db_date and not force_full:
-        from_date = max_db_date + timedelta(days=1)
+        # max_db_date is guaranteed to be a date (normalised in is_data_stale)
+        next_day = max_db_date if isinstance(max_db_date, datetime) else datetime(
+            max_db_date.year, max_db_date.month, max_db_date.day
+        )
+        from_date = next_day + timedelta(days=1)
     else:
         from_date = datetime.now() - timedelta(days=365 * DEFAULT_HISTORY_YEARS)
 

@@ -17,8 +17,10 @@ from __future__ import annotations
 
 import logging
 
+import joblib
 import numpy as np
 import pandas as pd
+from sklearn.mixture import GaussianMixture
 
 logger = logging.getLogger(__name__)
 
@@ -319,11 +321,171 @@ def compute_quality_scores(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+# ── GMM-Based Regime Classifier ───────────────────────────────────────
+
+class GMMRegimeClassifier:
+    """Unsupervised GMM-based regime classifier producing 6 market regimes.
+
+    Learns the latent structure of regime features from data rather than
+    relying on hardcoded thresholds (ADX > 25, RSI > 0.60, etc.).
+    """
+
+    def __init__(
+        self,
+        n_components: int = 6,
+        covariance_type: str = "full",
+        random_state: int = 42,
+    ) -> None:
+        self.n_components = n_components
+        self._gmm = GaussianMixture(
+            n_components=n_components,
+            covariance_type=covariance_type,
+            random_state=random_state,
+            max_iter=200,
+            n_init=3,
+        )
+        self._component_to_regime: dict[int, int] = {}
+        self._fitted = False
+
+    def _extract_features(self, df: pd.DataFrame) -> np.ndarray:
+        close = df["close"].replace(0, np.nan)
+        ret_5   = df["close"].pct_change(5).fillna(0)
+        ret_20  = df["close"].pct_change(20).fillna(0)
+        rvol_20 = df["close"].pct_change().rolling(20, min_periods=5).std().fillna(0)
+        if "atr" in df.columns:
+            atr_pct = (df["atr"] / close).fillna(0)
+        else:
+            atr_pct = pd.Series(0.0, index=df.index)
+        if "sma_50" in df.columns and "sma_200" in df.columns:
+            sma_ratio = ((df["sma_50"] / df["sma_200"].replace(0, np.nan)) - 1).fillna(0)
+        else:
+            sma_ratio = pd.Series(0.0, index=df.index)
+        return np.column_stack([ret_5, ret_20, rvol_20, atr_pct, sma_ratio])
+
+    def fit(self, df: pd.DataFrame) -> "GMMRegimeClassifier":
+        features = self._extract_features(df)
+        mask = np.isfinite(features).all(axis=1)
+        features_clean = features[mask]
+        min_rows = max(self.n_components * 10, 50)
+        if len(features_clean) < min_rows:
+            raise ValueError(
+                f"Need >= {min_rows} valid rows to fit GMM, got {len(features_clean)}"
+            )
+        self._gmm.fit(features_clean)
+        self._map_components_to_regimes()
+        self._fitted = True
+        return self
+
+    def _map_components_to_regimes(self) -> None:
+        means = self._gmm.means_   # shape (n_components, 5)
+        n = self.n_components
+        # Sort by ret_20 (col 1) descending — most bullish → most bearish
+        order = np.argsort(-means[:, 1])
+        third = max(n // 3, 1)
+        bullish_comps = order[:third]
+        bearish_comps = order[n - third:]
+        neutral_comps = order[third: n - third]
+
+        def _assign(comps: np.ndarray, trend_str: str) -> None:
+            if len(comps) == 0:
+                return
+            # Sort within group by rvol_20 (col 2): lower half → LOW_VOL
+            vol_order = np.argsort(means[comps, 2])
+            half = max(len(comps) // 2, 1)
+            for idx in vol_order[:half]:
+                self._component_to_regime[int(comps[idx])] = REGIME_MAP.get(
+                    (trend_str, LOW_VOL), 2
+                )
+            for idx in vol_order[half:]:
+                self._component_to_regime[int(comps[idx])] = REGIME_MAP.get(
+                    (trend_str, HIGH_VOL), 3
+                )
+
+        _assign(bullish_comps, BULLISH)
+        _assign(neutral_comps, NEUTRAL)
+        _assign(bearish_comps, BEARISH)
+
+    def predict(self, df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+        if not self._fitted:
+            raise RuntimeError("Classifier not fitted yet — call fit() first")
+        features = self._extract_features(df)
+        features_safe = np.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0)
+        probs = self._gmm.predict_proba(features_safe)          # (n, n_components)
+        components = probs.argmax(axis=1)
+        regime_ids = np.array(
+            [self._component_to_regime.get(int(c), 2) for c in components],
+            dtype=np.int64,
+        )
+        confidence = probs.max(axis=1).clip(0.2, 1.0)
+        return regime_ids, confidence
+
+    def save(self, path: str) -> None:
+        joblib.dump(
+            {"gmm": self._gmm, "mapping": self._component_to_regime,
+             "n_components": self.n_components},
+            path,
+        )
+        logger.info("GMM classifier saved to %s", path)
+
+    @classmethod
+    def load(cls, path: str) -> "GMMRegimeClassifier":
+        data = joblib.load(path)
+        obj = cls(n_components=data["n_components"])
+        obj._gmm = data["gmm"]
+        obj._component_to_regime = data["mapping"]
+        obj._fitted = True
+        return obj
+
+
+def classify_regimes_gmm(
+    df: pd.DataFrame,
+    classifier: GMMRegimeClassifier | None = None,
+) -> pd.DataFrame:
+    """Classify regimes using a fitted GMMRegimeClassifier.
+
+    Output schema is identical to classify_regimes() so callers are
+    interchangeable.  If classifier is None a fresh one is fitted on df.
+    """
+    df = df.copy()
+    if classifier is None:
+        classifier = GMMRegimeClassifier()
+        classifier.fit(df)
+    regime_ids, confidence = classifier.predict(df)
+    df["regime_id"] = regime_ids
+    df["regime_confidence"] = confidence
+    # Derive trend/volatility strings from the regime ID
+    inverse_map = {v: k for k, v in REGIME_MAP.items()}
+    df["trend"]      = [inverse_map.get(int(r), (NEUTRAL, LOW_VOL))[0] for r in regime_ids]
+    df["volatility"] = [inverse_map.get(int(r), (NEUTRAL, LOW_VOL))[1] for r in regime_ids]
+    # Transition detection (±2 candles, same logic as classify_regimes)
+    df["is_transition"] = False
+    regime_changed = df["regime_id"] != df["regime_id"].shift(1)
+    for offset in range(-2, 3):
+        shifted = regime_changed.shift(offset)
+        if shifted is not None:
+            df["is_transition"] = df["is_transition"] | shifted.fillna(False)
+    return df
+
+
 # ── Convenience Functions ──────────────────────────────────────────────
 
-def classify_and_score(df: pd.DataFrame) -> pd.DataFrame:
-    """Full pipeline: classify regimes + compute quality scores."""
-    df = classify_regimes(df)
+def classify_and_score(df: pd.DataFrame, use_gmm: bool = True) -> pd.DataFrame:
+    """Full pipeline: classify regimes + compute quality scores.
+
+    use_gmm=True (default): fit GMMRegimeClassifier on df, falls back to
+    rule-based thresholds on error (e.g. too few rows).
+    use_gmm=False: rule-based thresholds only.
+    """
+    if use_gmm:
+        try:
+            df = classify_regimes_gmm(df)
+        except Exception as exc:
+            logger.warning(
+                "GMM regime classification failed (%s); falling back to rule-based.", exc
+            )
+            df = classify_regimes(df)
+    else:
+        df = classify_regimes(df)
     df = compute_quality_scores(df)
     return df
 

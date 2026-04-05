@@ -116,6 +116,15 @@ async def get_stock_features(
 
     df = compute_all_indicators(df)
 
+    # Enrich with market context (FII/DII flow + sector breadth)
+    try:
+        from app.core.market_context import enrich_with_market_context
+        stock_obj = await crud.get_stock_by_id(db, stock_id)
+        if stock_obj is not None:
+            df = await enrich_with_market_context(df, db, stock_obj)
+    except Exception as _mc_exc:
+        logger.warning("Market context enrichment skipped: %s", _mc_exc)
+
     # Join regime features if available
     regime_rows = await crud.get_regimes(db, stock_id, interval, start_date, end_date)
     if regime_rows:

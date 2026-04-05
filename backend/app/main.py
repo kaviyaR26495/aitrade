@@ -20,6 +20,9 @@ from app.db.database import engine
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    import logging
+    _log = logging.getLogger(__name__)
+
     # Startup — restore Zerodha access token from DB if available
     try:
         from app.db.database import async_session_factory
@@ -29,11 +32,23 @@ async def lifespan(app: FastAPI):
             token = await crud.get_setting(db, "KITE_ACCESS_TOKEN")
             if token:
                 _zerodha.set_access_token(token)
-                import logging
-                logging.getLogger(__name__).info("Zerodha access token restored from DB.")
+                _log.info("Zerodha access token restored from DB.")
     except Exception as exc:
-        import logging
-        logging.getLogger(__name__).warning("Could not restore Zerodha token on startup: %s", exc)
+        _log.warning("Could not restore Zerodha token on startup: %s", exc)
+
+    # Startup — sync stock list from Zerodha (tests connectivity too)
+    try:
+        from app.db.database import async_session_factory
+        from app.core import zerodha as _zerodha, data_pipeline
+        if _zerodha.is_authenticated():
+            async with async_session_factory() as db:
+                count = await data_pipeline.populate_stock_list(db)
+                _log.info("Startup stock list sync: %d instruments upserted.", count)
+        else:
+            _log.info("Startup stock list sync skipped — Zerodha not authenticated yet.")
+    except Exception as exc:
+        _log.warning("Startup stock list sync failed (non-fatal): %s", exc)
+
     yield
     # Shutdown
     await engine.dispose()
