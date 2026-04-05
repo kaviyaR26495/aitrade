@@ -538,3 +538,221 @@ def train_curriculum(
     final["phases"] = phase_results
     final["model_name"] = base_name
     return final
+
+
+def hybrid_train(
+    ohlcv_df: pd.DataFrame,
+    total_timesteps: int = 300_000,
+    seq_len: int = 15,
+    reward_function: str = "dense",
+    save_dir: str | None = None,
+    model_name: str | None = None,
+    min_quality: float = 0.8,
+    on_progress=None,
+    device: str = "auto",
+    stop_event=None,
+    pause_event=None,
+    # ── Phase 1: Offline CQL ───────────────────────────────────────────
+    cql_n_steps: int = 50_000,
+    cql_alpha: float = 4.0,
+    cql_n_episodes: int = 3,
+    source_model=None,
+    # ── Phase 2: BC warm-up ────────────────────────────────────────────
+    bc_warmup_steps: int = 2_000,
+    # ── Phase 3: Online AttentionPPO ───────────────────────────────────
+    online_fraction: float = 0.7,
+) -> dict[str, Any]:
+    """Hybrid Offline→Online training pipeline.
+
+    Phase 1 — Offline CQL Pre-training
+        DiscreteCQL learns a conservative baseline policy purely from a static
+        historical dataset.  No simulator interaction.  The CQL conservative
+        regularisation (``alpha``) prevents the agent from assigning high
+        Q-values to actions that never appear in the data, mitigating the
+        over-estimation that kills standard RL on financial replay data.
+
+    Phase 2 — Behavioral Cloning Warm-up
+        The AttentionPPO actor is warm-started to produce the same greedy
+        actions as the CQL policy via a short supervised pass (cross-entropy
+        loss on the PPO actor's log-probs against CQL labels).
+        No environment interaction — pure offline optimisation.
+
+    Phase 3 — Online AttentionPPO Fine-tuning
+        AttentionPPO explores the SwingTradingEnv starting from the
+        CQL-warmed weights.  Because the policy already knows which actions are
+        reasonable, it needs far fewer timesteps to converge.  The dense_reward
+        sharpens execution timing.
+
+    Parameters
+    ----------
+    total_timesteps : int
+        Total online timesteps for Phase 3.  CQL offline steps are in addition
+        to this budget — they run entirely without the simulator.
+    source_model : optional SB3 model
+        If provided, used to collect the offline dataset (higher-quality
+        transitions near the behaviour policy distribution).  Pass ``None``
+        (default) to use a uniform-random policy instead.
+    cql_alpha : float
+        CQL conservative regularisation strength.  Higher → more conservative.
+        Range 2.0–8.0; 4.0 is a good default for financial data.
+    bc_warmup_steps : int
+        Number of BC gradient steps to align the PPO actor with CQL before
+        online fine-tuning.  2 000 is usually enough.
+    online_fraction : float
+        Fraction of ``total_timesteps`` used for Phase 3 online PPO fine-tuning.
+
+    Returns
+    -------
+    dict with keys:
+        model_path   — final AttentionPPO model (.zip).
+        algorithm    — "HybridCQL+AttentionPPO".
+        cql_result   — Phase 1 CQL metadata and offline metrics.
+        bc_warmup    — Phase 2 BC loss info.
+        ppo_result   — Phase 3 train_rl_model() result dict.
+        total_timesteps — as passed in.
+    """
+    from app.ml.cql_trainer import (
+        collect_offline_transitions,
+        build_offline_dataset,
+        train_cql,
+        evaluate_offline,
+        bc_warmup_ppo,
+    )
+
+    if save_dir is None:
+        save_dir = str(Path(settings.MODEL_DIR) / "rl")
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    base_name = model_name or f"HybridCQL_AttentionPPO_{ts}"
+
+    # ── Phase 1: Offline CQL ──────────────────────────────────────────
+    logger.info("=== Hybrid Phase 1: Offline CQL Pre-training ===")
+
+    transitions = collect_offline_transitions(
+        ohlcv_df=ohlcv_df,
+        source_model=source_model,
+        seq_len=seq_len,
+        obs_mode="flat",
+        reward_function=reward_function,
+        min_quality=min_quality,
+        n_episodes=cql_n_episodes,
+    )
+
+    dataset = build_offline_dataset(transitions)
+
+    cql_save_dir = str(Path(save_dir) / "cql")
+    cql_algo, cql_path = train_cql(
+        dataset=dataset,
+        n_steps=cql_n_steps,
+        alpha=cql_alpha,
+        save_dir=cql_save_dir,
+        model_name=f"{base_name}_cql",
+        device=device,
+    )
+
+    cql_metrics = evaluate_offline(cql_algo, transitions)
+    logger.info("CQL offline metrics: %s", cql_metrics)
+
+    cql_result = {
+        "model_path": cql_path,
+        "n_steps": cql_n_steps,
+        "alpha": cql_alpha,
+        "metrics": cql_metrics,
+    }
+
+    # ── Phase 2: Build AttentionPPO + BC warm-up ──────────────────────
+    logger.info("=== Hybrid Phase 2: AttentionPPO BC Warm-up from CQL ===")
+
+    df, feature_cols = prepare_training_data(ohlcv_df, min_quality=min_quality)
+    feature_data = df[feature_cols].values.astype(np.float32)
+    close_prices = df["close"].values.astype(np.float32)
+
+    from trading_env import SwingTradingEnv
+    from stable_baselines3 import PPO
+    from stable_baselines3.common.vec_env import DummyVecEnv
+    from stable_baselines3.common.monitor import Monitor
+    from app.ml.attention_extractor import AttentionFeaturesExtractor
+
+    def _make_warmup_env():
+        env = SwingTradingEnv(
+            data=feature_data,
+            prices=close_prices,
+            seq_len=seq_len,
+            obs_mode="flat",
+            reward_type=reward_function,
+        )
+        return Monitor(env)
+
+    warmup_vec_env = DummyVecEnv([_make_warmup_env])
+
+    # Build AttentionPPO on a single env for the BC warm-up
+    attn_params = get_default_hyperparams("AttentionPPO")
+    attn_params.pop("policy_kwargs", None)  # injected manually below
+    if "n_steps" in attn_params:
+        attn_params["n_steps"] = max(attn_params["n_steps"], 512)
+
+    ppo_model = PPO(
+        "MlpPolicy",
+        warmup_vec_env,
+        verbose=0,
+        device=device,
+        policy_kwargs={
+            "net_arch": {"pi": [256, 128], "vf": [512, 512, 256]},
+            "features_extractor_class": AttentionFeaturesExtractor,
+            "features_extractor_kwargs": {
+                "features_dim": 256,
+                "seq_len": seq_len,
+                "num_heads": 4,
+            },
+        },
+        **attn_params,
+    )
+
+    bc_result = bc_warmup_ppo(
+        sb3_model=ppo_model,
+        cql_algo=cql_algo,
+        observations=transitions["observations"],
+        device=device,
+        n_steps=bc_warmup_steps,
+    )
+    logger.info("BC warm-up: %s", bc_result)
+
+    # Save warm-started weights so train_rl_model can load them
+    warmup_dir = str(Path(save_dir) / "warmup")
+    Path(warmup_dir).mkdir(parents=True, exist_ok=True)
+    warmup_path = str(Path(warmup_dir) / f"{base_name}_warmup.zip")
+    ppo_model.save(warmup_path)
+    warmup_vec_env.close()
+    _clear_gpu_memory()
+
+    # ── Phase 3: Online AttentionPPO fine-tuning ──────────────────────
+    logger.info("=== Hybrid Phase 3: Online AttentionPPO Fine-tuning ===")
+
+    online_steps = max(int(total_timesteps * online_fraction), 10_000)
+    ppo_result = train_rl_model(
+        ohlcv_df=ohlcv_df,
+        algorithm="AttentionPPO",
+        total_timesteps=online_steps,
+        min_quality=min_quality,
+        reward_function=reward_function,
+        seq_len=seq_len,
+        save_dir=save_dir,
+        model_name=f"{base_name}_final",
+        on_progress=on_progress,
+        device=device,
+        stop_event=stop_event,
+        pause_event=pause_event,
+        pretrained_model_path=warmup_path,
+    )
+
+    logger.info("Hybrid training complete — final model: %s", ppo_result["model_path"])
+
+    return {
+        "model_name": base_name,
+        "model_path": ppo_result["model_path"],
+        "algorithm": "HybridCQL+AttentionPPO",
+        "cql_result": cql_result,
+        "bc_warmup": bc_result,
+        "ppo_result": ppo_result,
+        "total_timesteps": total_timesteps,
+    }

@@ -1,6 +1,8 @@
 """RL algorithm registry — maps algorithm names to SB3 classes and default hyperparams.
 
-Supports: PPO, RecurrentPPO, A2C, DDPG, TD3, SAC.
+Supports: PPO, RecurrentPPO, AttentionPPO, QRDQN, ContinuousPPO.
+A2C, DDPG, TD3, and SAC have been removed — they do not fit the sequential
+observation / offline-hybrid architecture used by this project.
 """
 from __future__ import annotations
 
@@ -41,66 +43,6 @@ ALGORITHM_CONFIGS: dict[str, dict[str, Any]] = {
                 "lstm_hidden_size": 256,
                 "n_lstm_layers": 1,
                 "enable_critic_lstm": True,
-                "net_arch": [256, 256],
-            },
-        },
-    },
-    "A2C": {
-        "class_path": "stable_baselines3.A2C",
-        "policy": "MlpPolicy",
-        "obs_mode": "flat",
-        "defaults": {
-            "learning_rate": 7e-4,
-            "n_steps": 1024,
-            "ent_coef": 0.01,
-            "policy_kwargs": {
-                "net_arch": [256, 256],
-            },
-        },
-    },
-    "DDPG": {
-        "class_path": "stable_baselines3.DDPG",
-        "policy": "MlpPolicy",
-        "obs_mode": "flat",
-        "continuous": True,
-        "defaults": {
-            "learning_rate": 1e-3,
-            "buffer_size": 1_000_000,
-            "tau": 0.005,
-            "batch_size": 1024,
-            "policy_kwargs": {
-                "net_arch": [256, 256],
-            },
-        },
-    },
-    "TD3": {
-        "class_path": "stable_baselines3.TD3",
-        "policy": "MlpPolicy",
-        "obs_mode": "flat",
-        "continuous": True,
-        "defaults": {
-            "learning_rate": 1e-3,
-            "buffer_size": 1_000_000,
-            "tau": 0.005,
-            "batch_size": 1024,
-            "policy_delay": 2,
-            "target_policy_noise": 0.2,
-            "policy_kwargs": {
-                "net_arch": [256, 256],
-            },
-        },
-    },
-    "SAC": {
-        "class_path": "stable_baselines3.SAC",
-        "policy": "MlpPolicy",
-        "obs_mode": "flat",
-        "continuous": True,
-        "defaults": {
-            "learning_rate": 3e-4,
-            "buffer_size": 1_000_000,
-            "ent_coef": "auto",
-            "batch_size": 1024,
-            "policy_kwargs": {
                 "net_arch": [256, 256],
             },
         },
