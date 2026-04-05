@@ -175,7 +175,7 @@ async def _resolve_stock_ids(symbols: list[str]) -> list[int]:
 
 async def _stage_data_sync(job: dict, stock_ids: list[int], symbols: list[str]) -> None:
     from app.db.database import async_session_factory
-    from app.core import data_pipeline, zerodha
+    from app.core import data_pipeline, zerodha, data_service
 
     _update_stage(job, 0, status="running", progress=0, message="Starting OHLCV sync…")
 
@@ -196,33 +196,17 @@ async def _stage_data_sync(job: dict, stock_ids: list[int], symbols: list[str]) 
             pct = int(i / total * 80)
             _update_stage(job, 0, status="running", progress=pct, message=f"Syncing {sym}…")
             try:
-                stock = await crud.get_stock_by_id(db, stock_id)
-                if stock:
-                    await data_pipeline.sync_stock_ohlcv(db, stock, interval="day")
+                # Use sync_and_compute to ensure indicators are calculated immediately
+                # so RL training in Stage 3 doesn't crash or fall back to slow compute.
+                res = await data_service.sync_and_compute(db, stock_id, interval="day")
+                if res.get("ohlcv_synced", 0) >= 0:
                     synced += 1
             except Exception as exc:
                 logger.warning("Pipeline data sync: %s failed: %s", sym, exc)
 
     _update_stage(
-        job, 0, status="running", progress=85,
-        message=f"Synced {synced}/{total} stocks. Computing indicators…",
-    )
-
-    # Compute indicators for all synced stocks
-    try:
-        from app.core.indicators import compute_indicators_for_stocks
-
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(
-            _PIPELINE_EXECUTOR,
-            lambda: None,  # placeholder if bulk indicator function isn't available
-        )
-    except Exception:
-        pass  # indicators may already be computed by sync_stock_ohlcv
-
-    _update_stage(
         job, 0, status="completed", progress=100,
-        message=f"Data sync complete. {synced}/{total} stocks ready.",
+        message=f"Data sync + indicators complete. {synced}/{total} stocks ready.",
     )
 
 
@@ -250,7 +234,7 @@ async def _stage_cql_pretrain(job: dict, stock_ids: list[int]) -> int | None:
         from app.db.database import async_session_factory
         from app.ml.cql_trainer import collect_offline_transitions, build_offline_dataset, train_cql
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         # Collect transitions for the first stock as the primary training stock
         primary_stock_id = stock_ids[0]
@@ -396,7 +380,7 @@ async def _stage_ppo_finetune(job: dict, stock_ids: list[int], _prior_rl_model_i
                 msg = f"Step {step:,} | Reward {info['ep_rew_mean']:.4f}"
             _update_stage(job, 3, status="running", progress=pct, message=msg)
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
     from app.ml.rl_trainer import train_rl_model
 
@@ -491,15 +475,22 @@ async def _stage_ensemble_distill(job: dict, rl_model_id: int, stock_ids: list[i
     from app.api.routes.models import _run_distillation_background  # noqa: PLC0415
 
     async def _watch_distillation() -> None:
-        """Poll the distillation_active flag and update pipeline stage progress."""
-        from app.api.routes.models import _distillation_active
+        """Poll the DB status and update pipeline stage progress."""
+        from app.db.database import async_session_factory
+        from app.db import crud as _crud
 
         ticks = 0
-        while _distillation_active.get(knn_model_id):
-            await asyncio.sleep(3)
+        while True:
+            await asyncio.sleep(5)
+            async with async_session_factory() as db:
+                knn_m = await _crud.get_knn_model(db, knn_model_id)
+            
+            if not knn_m or knn_m.status != "training":
+                break
+                
             ticks += 1
-            pct = min(90, 5 + ticks * 3)
-            _update_stage(job, 4, status="running", progress=pct, message="Distillation running…")
+            pct = min(95, 5 + ticks * 2)
+            _update_stage(job, 4, status="running", progress=pct, message="Distillation in progress…")
 
     distill_task = asyncio.create_task(
         _run_distillation_background(

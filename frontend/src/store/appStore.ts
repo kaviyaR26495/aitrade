@@ -126,6 +126,8 @@ interface AppState {
   // Pipeline Universe — stock symbols confirmed for One-Click Training Pipeline
   pipelineUniverse: string[];
   setPipelineUniverse: (symbols: string[]) => void;
+  activePipelineJobId: string | null;
+  setActivePipelineJobId: (id: string | null) => void;
 }
 
 function getStoredTheme(): ThemeId {
@@ -193,6 +195,8 @@ export const useAppStore = create<AppState>((set) => ({
   // Pipeline Universe
   pipelineUniverse: [],
   setPipelineUniverse: (symbols) => set({ pipelineUniverse: symbols }),
+  activePipelineJobId: null,
+  setActivePipelineJobId: (id) => set({ activePipelineJobId: id }),
 
   // Stock Selector working draft
   stockSelectorSelection: loadStockSelectorDraft(),

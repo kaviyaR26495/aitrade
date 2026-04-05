@@ -234,9 +234,14 @@ function ChipList({ symbols, onRemove }: { symbols: string[]; onRemove?: (s: str
 
 export default function AutoPilotPipeline() {
   const navigate = useNavigate();
-  const { pipelineUniverse, setPipelineUniverse, addNotification } = useAppStore();
+  const {
+    pipelineUniverse,
+    setPipelineUniverse,
+    addNotification,
+    activePipelineJobId: jobId,
+    setActivePipelineJobId: setJobId,
+  } = useAppStore();
 
-  const [jobId, setJobId] = useState<string | null>(null);
   const [startError, setStartError] = useState<string | null>(null);
 
   const startMutation = useStartPipeline();
