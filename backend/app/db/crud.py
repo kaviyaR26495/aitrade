@@ -140,6 +140,42 @@ async def get_ohlcv(
     return result.scalars().all()
 
 
+async def get_ohlcv_as_dicts(
+    db: AsyncSession,
+    stock_id: int,
+    interval: str,
+    start_date: date | None = None,
+    end_date: date | None = None,
+) -> list[dict]:
+    """Return OHLCV rows as plain dicts via ``mappings()``.
+
+    Skips ORM object instantiation entirely, which cuts memory usage
+    significantly when fetching large multi-year histories that will be
+    immediately converted to a Pandas DataFrame.  Use this variant
+    wherever you only need ``pd.DataFrame(rows)`` and don't need
+    attribute-access on SQLAlchemy model instances.
+    """
+    q = select(
+        StockOHLCV.date,
+        StockOHLCV.open,
+        StockOHLCV.high,
+        StockOHLCV.low,
+        StockOHLCV.close,
+        StockOHLCV.adj_close,
+        StockOHLCV.volume,
+    ).where(
+        StockOHLCV.stock_id == stock_id,
+        StockOHLCV.interval == interval,
+    )
+    if start_date:
+        q = q.where(StockOHLCV.date >= start_date)
+    if end_date:
+        q = q.where(StockOHLCV.date <= end_date)
+    q = q.order_by(StockOHLCV.date)
+    result = await db.execute(q)
+    return [dict(row) for row in result.mappings().all()]
+
+
 async def get_ohlcv_max_date(db: AsyncSession, stock_id: int, interval: str) -> date | None:
     result = await db.execute(
         select(func.max(StockOHLCV.date)).where(
@@ -232,6 +268,106 @@ async def get_regimes(
     q = q.order_by(StockRegime.date)
     result = await db.execute(q)
     return result.scalars().all()
+
+
+async def get_full_stock_features(
+    db: AsyncSession,
+    stock_id: int,
+    interval: str,
+    start_date: date | None = None,
+    end_date: date | None = None,
+) -> list[dict]:
+    """Fetch OHLCV + Indicators + Regimes in a single fast JOIN query.
+
+    Replaces the old pattern of calling get_ohlcv → compute_all_indicators →
+    get_regimes separately during RL training, backtesting, and live prediction.
+    All indicator and regime data is retrieved from the DB cache, eliminating
+    redundant CPU-side recomputation of MACD, RSI, Bollinger Bands, etc.
+
+    The JOIN uses LEFT OUTER JOINs so that OHLCV rows without pre-computed
+    indicators or regimes are still returned (indicator columns will be None).
+
+    Parameters
+    ----------
+    stock_id   : primary key in stocks_list
+    interval   : 'day' or 'week'
+    start_date : inclusive lower bound on the date column
+    end_date   : inclusive upper bound on the date column
+
+    Returns
+    -------
+    list[dict] — each dict is one trading-date row with all OHLCV, indicator,
+    and regime columns merged.  _sa_instance_state keys are stripped.
+    Ready for ``pd.DataFrame(rows)``.
+    """
+    stmt = (
+        select(StockOHLCV, StockIndicator, StockRegime)
+        .outerjoin(
+            StockIndicator,
+            (StockOHLCV.stock_id == StockIndicator.stock_id)
+            & (StockOHLCV.date == StockIndicator.date)
+            & (StockOHLCV.interval == StockIndicator.interval),
+        )
+        .outerjoin(
+            StockRegime,
+            (StockOHLCV.stock_id == StockRegime.stock_id)
+            & (StockOHLCV.date == StockRegime.date)
+            & (StockOHLCV.interval == StockRegime.interval),
+        )
+        .where(
+            StockOHLCV.stock_id == stock_id,
+            StockOHLCV.interval == interval,
+        )
+    )
+    if start_date:
+        stmt = stmt.where(StockOHLCV.date >= start_date)
+    if end_date:
+        stmt = stmt.where(StockOHLCV.date <= end_date)
+    stmt = stmt.order_by(StockOHLCV.date)
+
+    result = await db.execute(stmt)
+
+    rows: list[dict] = []
+    for ohlcv, ind, reg in result:
+        row: dict = {
+            "date": ohlcv.date,
+            "open": ohlcv.open,
+            "high": ohlcv.high,
+            "low": ohlcv.low,
+            "close": ohlcv.close,
+            "adj_close": ohlcv.adj_close,
+            "volume": ohlcv.volume,
+        }
+        if ind is not None:
+            row.update({
+                "sma_5": ind.sma_5, "sma_12": ind.sma_12, "sma_24": ind.sma_24,
+                "sma_50": ind.sma_50, "sma_100": ind.sma_100, "sma_200": ind.sma_200,
+                "ema_20": ind.ema_20,
+                "rsi": ind.rsi, "srsi": ind.srsi,
+                "macd": ind.macd, "macd_signal": ind.macd_signal, "macd_hist": ind.macd_hist,
+                "adx": ind.adx, "adx_pos": ind.adx_pos, "adx_neg": ind.adx_neg,
+                "kama": ind.kama, "vwkama": ind.vwkama,
+                "obv": ind.obv,
+                "bb_upper": ind.bb_upper, "bb_lower": ind.bb_lower, "bb_mid": ind.bb_mid,
+                "tgrb_top": ind.tgrb_top, "tgrb_green": ind.tgrb_green,
+                "tgrb_red": ind.tgrb_red, "tgrb_bottom": ind.tgrb_bottom,
+                "atr": ind.atr,
+            })
+        if reg is not None:
+            trend_val = reg.trend.value if hasattr(reg.trend, "value") else str(reg.trend)
+            vol_val = reg.volatility.value if hasattr(reg.volatility, "value") else str(reg.volatility)
+            row.update({
+                "regime_id": reg.regime_id,
+                "regime_confidence": reg.regime_confidence,
+                "quality_score": reg.quality_score,
+                "is_transition": float(reg.is_transition) if reg.is_transition is not None else 0.0,
+                "regime_trend_bullish": 1.0 if trend_val == "bullish" else 0.0,
+                "regime_trend_bearish": 1.0 if trend_val == "bearish" else 0.0,
+                "regime_trend_neutral": 1.0 if trend_val == "neutral" else 0.0,
+                "regime_vol_high": 1.0 if vol_val == "high" else 0.0,
+            })
+        rows.append(row)
+    return rows
 
 
 # ── Holiday CRUD ───────────────────────────────────────────────────────

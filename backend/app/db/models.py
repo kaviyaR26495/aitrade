@@ -321,6 +321,7 @@ class LSTMPrediction(Base):
     __tablename__ = "lstm_predictions"
     __table_args__ = (
         UniqueConstraint("lstm_model_id", "stock_id", "date", "interval", name="uq_lstm_pred"),
+        Index("ix_lstm_pred_date_conf", "date", "interval", "confidence"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -340,6 +341,7 @@ class EnsemblePrediction(Base):
     __tablename__ = "ensemble_predictions"
     __table_args__ = (
         UniqueConstraint("ensemble_config_id", "stock_id", "date", "interval", name="uq_ensemble_pred"),
+        Index("ix_ensemble_pred_date_conf", "date", "interval", "confidence"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)

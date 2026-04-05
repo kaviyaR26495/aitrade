@@ -127,28 +127,40 @@ async def sync_all_stocks(
     db: AsyncSession,
     interval: str = "day",
     stock_ids: list[int] | None = None,
+    concurrency: int = 8,
 ) -> dict[str, int]:
-    """Sync OHLCV for all active stocks (or specified subset)."""
+    """Sync OHLCV for all active stocks (or specified subset).
+
+    Uses ``asyncio.Semaphore(concurrency)`` to run up to *concurrency* syncs
+    concurrently (default 8), keeping well within Zerodha API rate limits and
+    the SQLAlchemy connection pool (pool_size=20).  Sequential execution for
+    500 stocks at ~0.5 s/stock takes > 4 minutes; parallel at 8 takes ~30 s.
+    """
+    import asyncio
+
     if stock_ids:
-        from sqlalchemy import select
+        from sqlalchemy import select as _select
         from app.db.models import Stock as StockModel
         result = await db.execute(
-            select(StockModel).where(StockModel.id.in_(stock_ids))
+            _select(StockModel).where(StockModel.id.in_(stock_ids))
         )
         stocks = result.scalars().all()
     else:
         stocks = await crud.get_all_active_stocks(db)
 
-    results = {}
-    for stock in stocks:
-        try:
-            count = await sync_stock_ohlcv(db, stock, interval)
-            results[stock.symbol] = count
-        except Exception as e:
-            logger.error("Failed to sync %s: %s", stock.symbol, e)
-            results[stock.symbol] = -1
+    sem = asyncio.Semaphore(concurrency)
 
-    return results
+    async def _sync_one(stock: Stock) -> tuple[str, int]:
+        async with sem:
+            try:
+                count = await sync_stock_ohlcv(db, stock, interval)
+                return stock.symbol, count
+            except Exception as e:
+                logger.error("Failed to sync %s: %s", stock.symbol, e)
+                return stock.symbol, -1
+
+    completed = await asyncio.gather(*[_sync_one(s) for s in stocks])
+    return dict(completed)
 
 
 async def _resolve_kite_id(db: AsyncSession, symbol: str) -> int | None:
@@ -240,23 +252,27 @@ async def sync_holidays(db: AsyncSession) -> int:
 
 
 def ohlcv_to_dataframe(rows: list) -> pd.DataFrame:
-    """Convert StockOHLCV ORM objects to a pandas DataFrame."""
+    """Convert StockOHLCV ORM objects (or plain dicts) to a pandas DataFrame."""
     if not rows:
         return pd.DataFrame()
 
-    data = []
-    for r in rows:
-        data.append({
-            "date": r.date,
-            "open": r.open,
-            "high": r.high,
-            "low": r.low,
-            "close": r.close,
-            "adj_close": r.adj_close,
-            "volume": r.volume,
-        })
-
-    df = pd.DataFrame(data)
+    # Accept both ORM objects (attribute access) and dicts (mapping access)
+    if isinstance(rows[0], dict):
+        df = pd.DataFrame(rows)
+    else:
+        data = [
+            {
+                "date": r.date,
+                "open": r.open,
+                "high": r.high,
+                "low": r.low,
+                "close": r.close,
+                "adj_close": r.adj_close,
+                "volume": r.volume,
+            }
+            for r in rows
+        ]
+        df = pd.DataFrame(data)
     df["date"] = pd.to_datetime(df["date"])
     df = df.sort_values("date").reset_index(drop=True)
     return df

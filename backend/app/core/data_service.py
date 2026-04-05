@@ -61,12 +61,12 @@ async def compute_and_store_indicators(
     4. Map columns to DB schema
     5. Bulk upsert to stock_indicators
     """
-    ohlcv_rows = await crud.get_ohlcv(db, stock_id, interval)
+    ohlcv_rows = await crud.get_ohlcv_as_dicts(db, stock_id, interval)
     if not ohlcv_rows:
         logger.warning("No OHLCV data for stock_id=%d interval=%s", stock_id, interval)
         return 0
 
-    df = ohlcv_to_dataframe(list(ohlcv_rows))
+    df = ohlcv_to_dataframe(ohlcv_rows)
     if len(df) < 50:
         logger.warning("Insufficient data for indicators (got %d rows)", len(df))
         return 0
@@ -104,17 +104,52 @@ async def get_stock_features(
     """
     Get full feature matrix for a stock (OHLCV + indicators + regimes).
 
+    Uses a single SQL JOIN via ``crud.get_full_stock_features()`` to fetch
+    OHLCV, pre-computed indicator values, and regime labels from the DB cache
+    in one round-trip.  This replaces the old pattern of fetching OHLCV and
+    then re-computing MACD, RSI, Bollinger Bands etc. on the fly, which wasted
+    CPU on every training and prediction call.
+
+    Falls back to live indicator computation (``compute_all_indicators``) only
+    when the indicators table has no rows for this stock (e.g. just after a
+    fresh sync before the nightly indicator job has run).
+
     Returns a DataFrame with all features, optionally normalized.
     """
-    ohlcv_rows = await crud.get_ohlcv(db, stock_id, interval, start_date, end_date)
-    if not ohlcv_rows:
+    rows = await crud.get_full_stock_features(db, stock_id, interval, start_date, end_date)
+    if not rows:
         return pd.DataFrame()
 
-    df = ohlcv_to_dataframe(list(ohlcv_rows))
+    df = pd.DataFrame(rows)
+    df["date"] = pd.to_datetime(df["date"])
+    df = df.sort_values("date").reset_index(drop=True)
+
     if len(df) < 50:
         return pd.DataFrame()
 
-    df = compute_all_indicators(df)
+    # If the DB has no pre-computed indicator values yet (indicator columns all
+    # None), fall back to live computation so training isn't silently broken.
+    indicator_sentinel = "rsi"  # lightweight column present for all synced stocks
+    if indicator_sentinel not in df.columns or df[indicator_sentinel].isna().all():
+        logger.warning(
+            "stock_id=%d has no pre-computed indicators — "
+            "running compute_all_indicators() as fallback",
+            stock_id,
+        )
+        df = compute_all_indicators(df)
+
+    # Default-fill regime columns if the regime table was empty / partially filled
+    regime_fill = {
+        "regime_id": 0, "regime_confidence": 0.5, "quality_score": 0.5,
+        "regime_trend_bullish": 0.0, "regime_trend_bearish": 0.0,
+        "regime_trend_neutral": 1.0,
+        "regime_vol_high": 0.0, "is_transition": 0.0,
+    }
+    for col, default in regime_fill.items():
+        if col not in df.columns:
+            df[col] = default
+        else:
+            df[col] = df[col].fillna(default)
 
     # Enrich with market context (FII/DII flow + sector breadth)
     try:
@@ -124,39 +159,6 @@ async def get_stock_features(
             df = await enrich_with_market_context(df, db, stock_obj)
     except Exception as _mc_exc:
         logger.warning("Market context enrichment skipped: %s", _mc_exc)
-
-    # Join regime features if available
-    regime_rows = await crud.get_regimes(db, stock_id, interval, start_date, end_date)
-    if regime_rows:
-        regime_data = []
-        for r in regime_rows:
-            trend_val = r.trend.value if hasattr(r.trend, 'value') else str(r.trend)
-            vol_val = r.volatility.value if hasattr(r.volatility, 'value') else str(r.volatility)
-            regime_data.append({
-                "date": r.date,
-                "regime_id": r.regime_id or 0,
-                "regime_confidence": r.regime_confidence or 0.5,
-                "quality_score": r.quality_score or 0.5,
-                "regime_trend_bullish": 1.0 if trend_val == "bullish" else 0.0,
-                "regime_trend_bearish": 1.0 if trend_val == "bearish" else 0.0,
-                "regime_trend_neutral": 1.0 if trend_val == "neutral" else 0.0,
-                "regime_vol_high": 1.0 if vol_val == "high" else 0.0,
-                "is_transition": float(r.is_transition) if r.is_transition is not None else 0.0,
-            })
-        regime_df = pd.DataFrame(regime_data)
-        if "date" in df.columns:
-            regime_df["date"] = pd.to_datetime(regime_df["date"])
-            df = df.merge(regime_df, on="date", how="left")
-        # Fill NaN regime columns with defaults
-        regime_fill = {
-            "regime_id": 0, "regime_confidence": 0.5, "quality_score": 0.5,
-            "regime_trend_bullish": 0.0, "regime_trend_bearish": 0.0,
-            "regime_trend_neutral": 1.0,
-            "regime_vol_high": 0.0, "is_transition": 0.0,
-        }
-        for col, default in regime_fill.items():
-            if col in df.columns:
-                df[col] = df[col].fillna(default)
 
     if normalize:
         df = normalize_dataframe(df)
