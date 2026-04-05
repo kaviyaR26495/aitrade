@@ -1,14 +1,5 @@
 from __future__ import annotations
 
-import sys
-import os
-from pathlib import Path
-
-# Ensure trading_env is importable regardless of editable-install quirks
-_trading_env_src = Path(__file__).resolve().parents[2] / "trading_env"
-if str(_trading_env_src) not in sys.path:
-    sys.path.insert(0, str(_trading_env_src))
-
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI

@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from sklearn.preprocessing import MinMaxScaler
 
 
 # Columns excluded from normalization (already scaled or categorical)
@@ -76,29 +75,32 @@ def normalize_dataframe(
     if df.empty:
         return df
 
-    # --- Step 3: Log-return z-score normalization ---
+    # --- Step 3: Log-return z-score normalization (causal rolling window) ---
+    # Each row is normalised using only the preceding `zscore_window` rows,
+    # so no future statistics leak into earlier observations.
     for col in log_return_cols:
         log_ret = np.log(df[col]).diff()
-
-        # Use last N rows as reference for mean/std
-        tail = log_ret.tail(zscore_window)
-        ref_mean = tail.mean()
-        ref_std = tail.std()
-
-        if ref_std == 0 or np.isnan(ref_std):
-            ref_std = 1.0  # avoid division by zero
-
-        df[col] = (log_ret - ref_mean) / ref_std
+        rolling_mean = log_ret.rolling(zscore_window, min_periods=2).mean()
+        rolling_std = (
+            log_ret.rolling(zscore_window, min_periods=2).std()
+            .fillna(1.0)
+            .replace(0, 1.0)
+        )
+        df[col] = (log_ret - rolling_mean) / rolling_std
 
     # Drop first row (NaN from diff)
     df = df.iloc[1:].reset_index(drop=True)
 
-    # --- Step 4: MinMax scale volume and obv ---
-    scaler = MinMaxScaler()
+    # --- Step 4: Rolling min-max scale volume and obv (causal, no lookahead) ---
+    # Using a rolling window avoids fitting on the full dataset which would
+    # expose future max/min values to earlier timesteps.
     for col in MINMAX_COLS:
         if col in df.columns and len(df) > 0:
-            vals = df[[col]].fillna(0)
-            df[col] = scaler.fit_transform(vals)
+            vals = df[col].fillna(0)
+            rolling_min = vals.rolling(zscore_window, min_periods=1).min()
+            rolling_max = vals.rolling(zscore_window, min_periods=1).max()
+            denom = (rolling_max - rolling_min).replace(0, 1.0)
+            df[col] = ((vals - rolling_min) / denom).clip(0.0, 1.0).astype(np.float32)
 
     # --- Step 5: Pct-change from close ---
     if "close" in df.columns:

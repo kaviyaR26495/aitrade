@@ -180,13 +180,11 @@ def train_rl_model(
     # ── CUDA optimisations ────────────────────────────────────────────
     if device == "cuda":
         import torch
-        # Clear any leftover allocations from previous runs before starting
-        _clear_gpu_memory()
         # cudnn autotuner finds the fastest conv kernels for the fixed input size
         torch.backends.cudnn.benchmark = True
         # Keep CPU threads lean — GPU handles the heavy lifting
         torch.set_num_threads(2)
-        logger.info("GPU memory cleared. cudnn.benchmark enabled.")
+        logger.info("cudnn.benchmark enabled.")
 
     # ── Number of parallel envs ───────────────────────────────────────
     # More envs → more rollout data per step → GPU stays busy during policy updates.

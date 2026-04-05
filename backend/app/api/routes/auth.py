@@ -25,7 +25,7 @@ async def get_login_url():
 async def zerodha_callback(request_token: str, db: AsyncSession = Depends(get_db)):
     """Handle Zerodha OAuth callback — exchange request_token for access_token."""
     try:
-        data = zerodha.generate_session(request_token)
+        data = await zerodha.async_generate_session(request_token)
         # Persist token so it survives server restarts
         await crud.set_setting(db, KITE_TOKEN_KEY, data["access_token"])
         return {

@@ -14,7 +14,7 @@ router = APIRouter()
 async def get_holdings():
     """Get current holdings from Zerodha."""
     try:
-        holdings = zerodha.get_holdings()
+        holdings = await zerodha.async_get_holdings()
         return {"holdings": holdings}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch holdings: {e}")
@@ -24,7 +24,7 @@ async def get_holdings():
 async def get_positions():
     """Get current positions from Zerodha."""
     try:
-        positions = zerodha.get_positions()
+        positions = await zerodha.async_get_positions()
         return {"positions": positions}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch positions: {e}")
@@ -34,7 +34,7 @@ async def get_positions():
 async def get_ltp(symbol: str):
     """Get last traded price for a symbol."""
     try:
-        ltp = zerodha.get_ltp(symbol)
+        ltp = await zerodha.async_get_ltp(symbol)
         return {"symbol": symbol, "ltp": ltp}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch LTP: {e}")
@@ -44,22 +44,8 @@ async def get_ltp(symbol: str):
 async def exit_all():
     """Emergency kill switch — sell all holdings at market."""
     try:
-        holdings = zerodha.get_holdings()
-        orders = []
-        for h in holdings:
-            if h.get("quantity", 0) > 0:
-                order_id = zerodha.place_cnc_order(
-                    symbol=h["tradingsymbol"],
-                    transaction_type="SELL",
-                    quantity=h["quantity"],
-                    price=None,  # market order
-                )
-                orders.append({
-                    "symbol": h["tradingsymbol"],
-                    "quantity": h["quantity"],
-                    "order_id": order_id,
-                })
-        return {"orders_placed": len(orders), "orders": orders}
+        order_ids = await zerodha.async_exit_all_positions()
+        return {"orders_placed": len(order_ids), "order_ids": order_ids}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Exit all failed: {e}")
 
@@ -80,7 +66,7 @@ async def reconcile_portfolio(db: AsyncSession = Depends(get_db)):
     manually from the Frontend when you suspect ledger drift.
     """
     try:
-        snapshot = zerodha.build_portfolio_snapshot()
+        snapshot = await zerodha.async_build_portfolio_snapshot()
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Zerodha API error: {e}")
 

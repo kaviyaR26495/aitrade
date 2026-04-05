@@ -5,6 +5,7 @@ NSE only, CNC orders only (no MIS/intraday).
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timedelta
 from typing import Any
@@ -12,6 +13,20 @@ from typing import Any
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+class CorporateActionGapError(Exception):
+    """Raised when a corporate action price gap is detected for a symbol.
+
+    Callers running inside an async route should catch this and write a
+    CorporateActionBlock to the DB via crud.create_ca_block so the 48-hour
+    cooldown survives server restarts.
+    """
+
+    def __init__(self, symbol: str, gap_pct: float) -> None:
+        self.symbol = symbol
+        self.gap_pct = gap_pct
+        super().__init__(f"Corporate action gap {gap_pct:.1f}% detected for {symbol}")
 
 
 def send_emergency_alert(message: str) -> None:
@@ -547,15 +562,11 @@ def place_limit_chase_order(
 
     # Last-resort ex-date guard: if the execute-signal route was bypassed
     # (e.g. called directly in a script), still refuse to BUY on gap days.
+    # Raises CorporateActionGapError so async callers can write a 48-h DB block.
     if transaction_type == "BUY":
         gap_hit, gap_pct = detect_corporate_action_gap(symbol, exchange)
         if gap_hit:
-            logger.error(
-                "place_limit_chase_order aborted for %s: corporate action gap %.1f%% detected."
-                " Use execute_signal route which creates a 48-h DB block.",
-                symbol, gap_pct,
-            )
-            return None
+            raise CorporateActionGapError(symbol, gap_pct)
 
     kite = get_kite()
     tags = get_tag()
@@ -681,4 +692,86 @@ def place_limit_chase_order(
     except Exception as exc:
         logger.error("LimitChase MARKET fallback failed for %s: %s", symbol, exc)
         return None
+
+
+# ── Async Wrappers ─────────────────────────────────────────────────────────────
+# All KiteConnect network calls are synchronous (requests-based).  These wrappers
+# run each blocking function in a thread-pool via asyncio.to_thread so that the
+# FastAPI event loop is never blocked.
+
+async def async_get_ltp(symbol: str, exchange: str = "NSE") -> float:
+    return await asyncio.to_thread(get_ltp, symbol, exchange)
+
+
+async def async_get_holdings() -> list[dict]:
+    return await asyncio.to_thread(get_holdings)
+
+
+async def async_get_positions() -> list[dict]:
+    return await asyncio.to_thread(get_positions)
+
+
+async def async_build_portfolio_snapshot() -> dict:
+    return await asyncio.to_thread(build_portfolio_snapshot)
+
+
+async def async_generate_session(request_token: str) -> dict:
+    return await asyncio.to_thread(generate_session, request_token)
+
+
+async def async_detect_corporate_action_gap(
+    symbol: str,
+    exchange: str = "NSE",
+    threshold_pct: float | None = None,
+) -> tuple[bool, float]:
+    return await asyncio.to_thread(detect_corporate_action_gap, symbol, exchange, threshold_pct)
+
+
+async def async_place_order(
+    symbol: str,
+    transaction_type: str,
+    quantity: int,
+    price: float | None = None,
+    exchange: str = "NSE",
+    product: str = "CNC",
+    order_type: str = "LIMIT",
+    variety: str = "regular",
+) -> str | None:
+    return await asyncio.to_thread(
+        place_order, symbol, transaction_type, quantity,
+        price, exchange, product, order_type, variety,
+    )
+
+
+async def async_place_gtt_order(
+    symbol: str,
+    exchange: str,
+    avg_price: float,
+    quantity: int,
+    sell_pct: float,
+    stoploss_pct: float,
+    tick_size: float = 0.05,
+) -> int | None:
+    return await asyncio.to_thread(
+        place_gtt_order, symbol, exchange, avg_price, quantity,
+        sell_pct, stoploss_pct, tick_size,
+    )
+
+
+async def async_place_limit_chase_order(
+    symbol: str,
+    transaction_type: str,
+    quantity: int,
+    exchange: str = "NSE",
+    product: str = "CNC",
+    max_attempts: int = 5,
+) -> dict | None:
+    return await asyncio.to_thread(
+        place_limit_chase_order, symbol, transaction_type,
+        quantity, exchange, product, max_attempts,
+    )
+
+
+async def async_exit_all_positions() -> list[str]:
+    return await asyncio.to_thread(exit_all_positions)
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -197,7 +198,7 @@ async def execute_signal(
             ),
         )
 
-    gap_detected, gap_pct = zerodha.detect_corporate_action_gap(
+    gap_detected, gap_pct = await zerodha.async_detect_corporate_action_gap(
         stock.symbol, req.exchange
     )
     if gap_detected:
@@ -220,14 +221,30 @@ async def execute_signal(
         )
 
     # --- BUY leg: limit-chase until filled or MARKET fallback ---
-    result = zerodha.place_limit_chase_order(
-        symbol=stock.symbol,
-        transaction_type="BUY",
-        quantity=req.quantity,
-        exchange=req.exchange,
-        product=req.product,
-        max_attempts=req.max_attempts,
-    )
+    try:
+        result = await zerodha.async_place_limit_chase_order(
+            symbol=stock.symbol,
+            transaction_type="BUY",
+            quantity=req.quantity,
+            exchange=req.exchange,
+            product=req.product,
+            max_attempts=req.max_attempts,
+        )
+    except zerodha.CorporateActionGapError as exc:
+        # Last-resort guard fired inside the chase loop (race condition).
+        # Write a 48-h DB block so restarts honour the cooldown too.
+        from datetime import timedelta
+        from app.db.models import now_ist
+        blocked_until = now_ist() + timedelta(hours=48)
+        await crud.create_ca_block(
+            db,
+            symbol=stock.symbol,
+            exchange=req.exchange,
+            gap_pct=exc.gap_pct,
+            blocked_until=blocked_until,
+            reason=f"CA gap {exc.gap_pct:.1f}% detected during limit-chase (last-resort guard)",
+        )
+        raise HTTPException(status_code=423, detail=str(exc))
     if not result:
         raise HTTPException(status_code=502, detail="Limit-chase order failed — no fill obtained")
 
@@ -252,12 +269,11 @@ async def execute_signal(
 
     # --- GTT leg: 3-attempt retry so a transient network blip can't leave
     #     the position naked. If all retries fail, fire an emergency alert.   ---
-    import time as _time
     gtt_id: int | None = None
     last_gtt_exc: Exception | None = None
     for attempt in range(1, 4):
         try:
-            gtt_id = zerodha.place_gtt_order(
+            gtt_id = await zerodha.async_place_gtt_order(
                 symbol=stock.symbol,
                 exchange=req.exchange,
                 avg_price=fill_price,
@@ -275,7 +291,7 @@ async def execute_signal(
                 attempt, stock.symbol, fill_price, exc,
             )
             if attempt < 3:
-                _time.sleep(2)
+                await asyncio.sleep(2)
 
     if not gtt_id:
         # Position held with zero stoploss protection — alert immediately.

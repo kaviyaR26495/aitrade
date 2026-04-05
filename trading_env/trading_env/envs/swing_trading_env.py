@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+from collections import deque
 from typing import Literal
 
 import numpy as np
@@ -56,11 +57,16 @@ class SwingTradingEnv(BaseTradingEnv):
             vol_slippage_scale=vol_slippage_scale,
         )
         self.max_holding_days = max_holding_days
-        self._holding_since: int | None = None
+        # FIFO queue of (quantity, buy_step) tuples.
+        # One entry per buy lot; the oldest lot (index 0) governs T+1 eligibility.
+        # Pyramiding is blocked at the _execute_action level (holdings == 0 guard),
+        # so only one entry is ever present, but deque semantics make the T+1
+        # logic correct even if that constraint is relaxed in the future.
+        self._holding_lots: deque[tuple[int, int]] = deque()
 
     def reset(self, *, seed=None, options=None):
         obs, info = super().reset(seed=seed, options=options)
-        self._holding_since = None
+        self._holding_lots = deque()
         return obs, info
 
     def _execute_action(self, action: int, price: float, regime_id: int | None):
@@ -69,22 +75,22 @@ class SwingTradingEnv(BaseTradingEnv):
                 fill = self._compute_fill_price(+1, price)
                 qty = max(1, int(self.portfolio.cash * 0.95 / fill))
                 if self.portfolio.buy(fill, qty, self.current_step, regime_id):
-                    self._holding_since = self.current_step
+                    self._holding_lots.append((qty, self.current_step))
         elif action == -1:  # SELL
             if self.portfolio.holdings > 0:
-                # T+1 settlement: can only sell if held for at least 1 step
-                if self._holding_since is not None and self.current_step > self._holding_since:
+                # T+1 settlement: can only sell if the oldest lot was bought before this step
+                if self._holding_lots and self._holding_lots[0][1] < self.current_step:
                     fill = self._compute_fill_price(-1, price)
                     self.portfolio.sell(fill, self.portfolio.holdings, self.current_step, regime_id)
-                    self._holding_since = None
+                    self._holding_lots.clear()
 
-        # Auto-sell if max holding period exceeded
+        # Auto-sell if max holding period exceeded (measured from the oldest lot)
         if (
             self.max_holding_days is not None
-            and self._holding_since is not None
+            and self._holding_lots
             and self.portfolio.holdings > 0
-            and (self.current_step - self._holding_since) >= self.max_holding_days
+            and (self.current_step - self._holding_lots[0][1]) >= self.max_holding_days
         ):
             fill = self._compute_fill_price(-1, price)
             self.portfolio.sell(fill, self.portfolio.holdings, self.current_step)
-            self._holding_since = None
+            self._holding_lots.clear()

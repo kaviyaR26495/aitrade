@@ -16,6 +16,9 @@ import { useEffect, useRef } from 'react';
 import {
   createChart,
   ColorType,
+  AreaSeries,
+  HistogramSeries,
+  createSeriesMarkers,
   type IChartApi,
   type ISeriesApi,
   type SeriesMarker,
@@ -64,6 +67,8 @@ export default function LightweightRegimeChart({ data, height = 340, className }
   const chartRef = useRef<IChartApi | null>(null);
   const priceSeriesRef = useRef<ISeriesApi<'Area'> | null>(null);
   const regimeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null);
+  // markersPlugin lives for the lifetime of the chart instance
+  const markersPluginRef = useRef<ReturnType<typeof createSeriesMarkers> | null>(null);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -102,7 +107,7 @@ export default function LightweightRegimeChart({ data, height = 340, className }
     });
 
     // ── Main price series ────────────────────────────────────────────
-    const priceSeries = chart.addAreaSeries({
+    const priceSeries = chart.addSeries(AreaSeries, {
       lineColor: text,
       topColor: `${muted}18`,
       bottomColor: `${muted}00`,
@@ -112,8 +117,12 @@ export default function LightweightRegimeChart({ data, height = 340, className }
     });
     priceSeriesRef.current = priceSeries;
 
-    // ── Regime histogram — thin coloured band at the bottom ──────────
-    const regimeSeries = chart.addHistogramSeries({
+    // Markers plugin — created once per chart instance; .setMarkers() used for updates
+    const markersPlugin = createSeriesMarkers(priceSeries, []);
+    markersPluginRef.current = markersPlugin;
+
+    // ── Regime histogram — thin coloured band at the bottom ─────────
+    const regimeSeries = chart.addSeries(HistogramSeries, {
       priceFormat: { type: 'volume' },
       priceScaleId: 'regime',
     });
@@ -122,7 +131,7 @@ export default function LightweightRegimeChart({ data, height = 340, className }
     });
     regimeSeriesRef.current = regimeSeries;
 
-    _applyData(priceSeries, regimeSeries, data);
+    _applyData(priceSeries, regimeSeries, markersPlugin, data);
     chart.timeScale().fitContent();
     chartRef.current = chart;
 
@@ -137,13 +146,14 @@ export default function LightweightRegimeChart({ data, height = 340, className }
       chartRef.current = null;
       priceSeriesRef.current = null;
       regimeSeriesRef.current = null;
+      markersPluginRef.current = null;
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
     if (priceSeriesRef.current && regimeSeriesRef.current && data.length > 0) {
-      _applyData(priceSeriesRef.current, regimeSeriesRef.current, data);
+      _applyData(priceSeriesRef.current, regimeSeriesRef.current, markersPluginRef.current, data);
       chartRef.current?.timeScale().fitContent();
     }
   }, [data]);
@@ -160,6 +170,7 @@ export default function LightweightRegimeChart({ data, height = 340, className }
 function _applyData(
   priceSeries: ISeriesApi<'Area'>,
   regimeSeries: ISeriesApi<'Histogram'>,
+  markersPlugin: ReturnType<typeof createSeriesMarkers> | null,
   data: RegimePoint[],
 ) {
   if (data.length === 0) return;
@@ -189,5 +200,5 @@ function _applyData(
       });
     }
   }
-  priceSeries.setMarkers(markers);
+  markersPlugin?.setMarkers(markers);
 }

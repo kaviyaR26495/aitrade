@@ -19,10 +19,9 @@ import { useEffect, useRef } from 'react';
 import {
   createChart,
   ColorType,
+  AreaSeries,
   type IChartApi,
   type ISeriesApi,
-  type AreaSeriesOptions,
-  type DeepPartial,
 } from 'lightweight-charts';
 
 export interface ChartPoint {
@@ -110,20 +109,19 @@ export default function LightweightAreaChart({
       });
     }
 
-    const areaOpts: DeepPartial<AreaSeriesOptions> = {
+    const mainSeries = chart.addSeries(AreaSeries, {
       lineColor: main,
       topColor: `${main}26`,   // 15% opacity
       bottomColor: `${main}00`,
       lineWidth: 2,
       priceLineVisible: false,
       lastValueVisible: true,
-    };
-    const mainSeries = chart.addAreaSeries(areaOpts);
+    });
     mainSeries.setData(data as any);
     mainSeriesRef.current = mainSeries;
 
     if (secondSeries && secondSeries.length > 0) {
-      const secondOpts: DeepPartial<AreaSeriesOptions> = {
+      const s2 = chart.addSeries(AreaSeries, {
         lineColor: second,
         topColor: `${second}00`,
         bottomColor: `${second}00`,
@@ -132,8 +130,7 @@ export default function LightweightAreaChart({
         priceLineVisible: false,
         lastValueVisible: false,
         title: secondLabel,
-      };
-      const s2 = chart.addAreaSeries(secondOpts);
+      });
       s2.setData(secondSeries as any);
       secondSeriesRef.current = s2;
     }
