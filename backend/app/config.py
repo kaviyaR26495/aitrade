@@ -39,6 +39,12 @@ class Settings(BaseSettings):
     TELEGRAM_BOT_TOKEN: str = ""
     TELEGRAM_CHAT_ID: str = ""
 
+    # Corporate action gap detection
+    # If today's open price deviates from yesterday's close by more than this
+    # percentage, the symbol is blocked for 48 h to let adj_close normalise.
+    # Splits/bonuses cause ~50% gaps; large dividends cause 8-15% gaps.
+    CORPORATE_ACTION_GAP_PCT: float = 8.0
+
     # Trading defaults
     DEFAULT_STOPLOSS_PCT: float = 5.0
     DEFAULT_BUY_LIMIT: float = 10000.0

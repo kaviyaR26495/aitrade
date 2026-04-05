@@ -473,3 +473,24 @@ class PortfolioSnapshot(Base):
     holdings_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=list)
     positions_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=list)
     reconciled_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist)
+
+
+# ── Corporate Action Block ──────────────────────────────────────────────
+# Persists a 48-hour trading block when an ex-date gap is detected for a
+# symbol.  Checked at every BUY entry-point; written the first time the
+# gap is detected so subsequent restarts still honour the cooldown.
+
+class CorporateActionBlock(Base):
+    __tablename__ = "corporate_action_blocks"
+    __table_args__ = (
+        Index("ix_ca_block_symbol_expiry", "symbol", "blocked_until"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(50), nullable=False)
+    exchange: Mapped[str] = mapped_column(String(10), nullable=False, default="NSE")
+    # Detected open-vs-prev-close gap that triggered the block
+    gap_pct: Mapped[float] = mapped_column(Float, nullable=False)
+    blocked_until: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    reason: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist)

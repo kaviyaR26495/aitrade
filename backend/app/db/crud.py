@@ -7,7 +7,7 @@ Ported from pytrade's db_common.py patterns:
 """
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from typing import Any, Sequence
 
 import pandas as pd
@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import (
     AppSetting,
+    CorporateActionBlock,
     EnsembleConfig,
     EnsemblePrediction,
     GoldenPattern,
@@ -779,3 +780,46 @@ async def get_portfolio_snapshot_by_date(
         select(PortfolioSnapshot).where(PortfolioSnapshot.snapshot_date == snapshot_date)
     )
     return result.scalars().first()
+
+
+# ── Corporate Action Block CRUD ────────────────────────────────────────
+
+async def get_active_ca_block(
+    db: AsyncSession, symbol: str, exchange: str = "NSE"
+) -> CorporateActionBlock | None:
+    """Return an active (unexpired) corporate-action block for *symbol*, if any."""
+    from app.db.models import now_ist
+
+    result = await db.execute(
+        select(CorporateActionBlock)
+        .where(
+            CorporateActionBlock.symbol == symbol,
+            CorporateActionBlock.exchange == exchange,
+            CorporateActionBlock.blocked_until > now_ist(),
+        )
+        .order_by(CorporateActionBlock.blocked_until.desc())
+        .limit(1)
+    )
+    return result.scalars().first()
+
+
+async def create_ca_block(
+    db: AsyncSession,
+    symbol: str,
+    exchange: str,
+    gap_pct: float,
+    blocked_until: datetime,
+    reason: str | None = None,
+) -> CorporateActionBlock:
+    """Persist a new corporate-action block so restarts honour the 48-h cooldown."""
+    block = CorporateActionBlock(
+        symbol=symbol,
+        exchange=exchange,
+        gap_pct=gap_pct,
+        blocked_until=blocked_until,
+        reason=reason,
+    )
+    db.add(block)
+    await db.commit()
+    await db.refresh(block)
+    return block

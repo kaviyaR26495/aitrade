@@ -40,6 +40,65 @@ def send_emergency_alert(message: str) -> None:
         logger.error("Telegram alert failed: %s — original message: %s", exc, message)
 
 
+def detect_corporate_action_gap(
+    symbol: str,
+    exchange: str = "NSE",
+    threshold_pct: float | None = None,
+) -> tuple[bool, float]:
+    """Detect an abnormal open-vs-prev-close price gap suggesting a corporate action.
+
+    Uses Kite OHLC quote which returns today's open and the previous day's close
+    in a single call.  No external API is needed.
+
+    Corporate action price impacts:
+      - Stock split 1:2   → ~50% price drop
+      - Bonus shares 1:1  → ~50% price drop
+      - Large dividend     → 8–15% drop
+      - Small dividend     → < 5% (ignored, below default threshold)
+
+    Parameters
+    ----------
+    threshold_pct : Override ``settings.CORPORATE_ACTION_GAP_PCT`` for testing.
+
+    Returns
+    -------
+    (is_gap_detected: bool, gap_pct: float)
+        ``is_gap_detected`` is True when ``|open/prev_close − 1| ≥ threshold``.
+        ``gap_pct`` is the raw percentage magnitude (always ≥ 0).
+    """
+    if threshold_pct is None:
+        threshold_pct = settings.CORPORATE_ACTION_GAP_PCT
+
+    try:
+        key = f"{exchange}:{symbol}"
+        data = get_kite().ohlc(key)
+        if not data or key not in data:
+            logger.warning("No OHLC data for %s — skipping gap check", key)
+            return False, 0.0
+
+        ohlc = data[key]["ohlc"]
+        prev_close = float(ohlc["close"])   # Kite OHLC "close" = previous day's close
+        today_open = float(ohlc["open"])
+
+        if prev_close <= 0:
+            return False, 0.0
+
+        gap_pct = abs(today_open - prev_close) / prev_close * 100.0
+        if gap_pct >= threshold_pct:
+            logger.warning(
+                "Corporate action gap detected for %s: open=%.2f, prev_close=%.2f, gap=%.2f%%"
+                " (threshold=%.1f%%) — blocking for 48 h",
+                symbol, today_open, prev_close, gap_pct, threshold_pct,
+            )
+            return True, gap_pct
+
+    except Exception as exc:
+        # Never block a trade due to a failed gap check — return clean
+        logger.warning("Gap detection failed for %s: %s", symbol, exc)
+
+    return False, 0.0
+
+
 # Lazy import — kiteconnect may not be installed during tests
 _kite = None
 
@@ -485,6 +544,18 @@ def place_limit_chase_order(
     if symbol in EXCLUDED_SYMBOLS:
         logger.warning("Skipping excluded symbol: %s", symbol)
         return None
+
+    # Last-resort ex-date guard: if the execute-signal route was bypassed
+    # (e.g. called directly in a script), still refuse to BUY on gap days.
+    if transaction_type == "BUY":
+        gap_hit, gap_pct = detect_corporate_action_gap(symbol, exchange)
+        if gap_hit:
+            logger.error(
+                "place_limit_chase_order aborted for %s: corporate action gap %.1f%% detected."
+                " Use execute_signal route which creates a 48-h DB block.",
+                symbol, gap_pct,
+            )
+            return None
 
     kite = get_kite()
     tags = get_tag()

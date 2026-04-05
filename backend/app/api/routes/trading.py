@@ -179,6 +179,46 @@ async def execute_signal(
     if not stock:
         raise HTTPException(status_code=404, detail="Stock not found")
 
+    # --- Ex-date / corporate action guard ---
+    # Check DB for an existing active block first (persists across restarts).
+    # If none exists, run a live OHLC gap check; if a gap is detected, create a
+    # 48-hour block in the DB and refuse the trade.
+    from datetime import timedelta
+    from app.db.models import now_ist
+
+    active_block = await crud.get_active_ca_block(db, stock.symbol, req.exchange)
+    if active_block:
+        raise HTTPException(
+            status_code=423,
+            detail=(
+                f"{stock.symbol} is blocked until {active_block.blocked_until.isoformat()} "
+                f"due to a suspected corporate action (gap={active_block.gap_pct:.1f}%). "
+                "Trading resumes automatically after the 48-hour cooldown."
+            ),
+        )
+
+    gap_detected, gap_pct = zerodha.detect_corporate_action_gap(
+        stock.symbol, req.exchange
+    )
+    if gap_detected:
+        blocked_until = now_ist() + timedelta(hours=48)
+        await crud.create_ca_block(
+            db,
+            symbol=stock.symbol,
+            exchange=req.exchange,
+            gap_pct=gap_pct,
+            blocked_until=blocked_until,
+            reason=f"Open/prev-close gap {gap_pct:.1f}% ≥ threshold on ex-date",
+        )
+        raise HTTPException(
+            status_code=423,
+            detail=(
+                f"{stock.symbol} open/prev-close gap is {gap_pct:.1f}% — suspected ex-date "
+                f"(dividend / split / bonus). Trading blocked for 48 hours until "
+                f"{blocked_until.isoformat()} to allow adj_close to normalise."
+            ),
+        )
+
     # --- BUY leg: limit-chase until filled or MARKET fallback ---
     result = zerodha.place_limit_chase_order(
         symbol=stock.symbol,
