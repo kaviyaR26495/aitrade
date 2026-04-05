@@ -255,8 +255,13 @@ def run_backtest(
                         max_positions=config.max_positions,
                     )
                 fill_entry = _slip_price(price, +1, config.slippage_bps, rv, config.vol_slippage_scale)
-                position_value = cash * pos_frac
-                qty = int(position_value / fill_entry)
+                # Size on total equity (cash + mark-to-market open positions),
+                # then cap at available cash so we never spend margin
+                current_open_value = sum(p["quantity"] * price for p in positions.values())
+                total_equity = cash + current_open_value
+                ideal_position_value = total_equity * pos_frac
+                actual_position_value = min(ideal_position_value, cash)
+                qty = int(actual_position_value / fill_entry)
                 if qty > 0:
                     actual_cost = qty * fill_entry * (1 + config.commission_pct)
                     if actual_cost <= cash:
