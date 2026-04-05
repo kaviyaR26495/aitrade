@@ -4,8 +4,9 @@ import { Card, Button, Select, SearchableSelect, Badge, StatCard, EmptyState, Pa
 import { useUniverseStocks, useRegimeSummary, useRegime } from '../hooks/useApi';
 import { classifyRegime } from '../services/api';
 import { useAppStore } from '../store/appStore';
-import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, AreaChart, Area, ReferenceArea } from 'recharts';
+import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 import { CHART_TOOLTIP_STYLE, CHART_AXIS_PROPS } from '../components/ChartTheme';
+import LightweightRegimeChart from '../components/LightweightRegimeChart';
 import { Layers } from 'lucide-react';
 
 const REGIME_COLORS: Record<number, string> = {
@@ -24,29 +25,6 @@ const REGIME_LABELS: Record<number, string> = {
   3: 'Bear+HighVol',
   4: 'Neutral+LowVol',
   5: 'Neutral+HighVol',
-};
-
-const CustomTimelineTooltip = ({ active, payload, label }: any) => {
-  if (active && payload && payload.length) {
-    const data = payload[0].payload;
-    return (
-      <div style={CHART_TOOLTIP_STYLE as React.CSSProperties} className="p-3 rounded-md shadow-md text-sm min-w-48 border border-[var(--border)]">
-        <p className="font-bold mb-3 border-b border-[var(--border)] pb-1">{label}</p>
-        <div className="flex justify-between items-center mb-1">
-          <span className="text-[var(--text-muted)] mr-8">Close Price</span>
-          <span className="font-bold">{data.close?.toFixed(2) ?? '—'}</span>
-        </div>
-        <div className="flex justify-between items-center mb-2">
-          <span className="text-[var(--text-muted)] mr-8">Market Regime</span>
-          <span className="font-bold" style={{ color: REGIME_COLORS[data.regime_id] }}>{data.regime_label}</span>
-        </div>
-        <div className="text-xs text-[var(--text-muted)] pt-2 border-t border-[var(--border)] mt-1 opacity-80">
-          Range: {data.block_range}
-        </div>
-      </div>
-    );
-  }
-  return null;
 };
 
 export default function RegimeAnalysis() {
@@ -118,32 +96,6 @@ export default function RegimeAnalysis() {
     regime_id: r.regime_id,
     quality: r.quality_score,
   })) ?? [];
-
-  const regimeBlocks: { id: number; start: string; end: string }[] = [];
-  if (timelineData.length > 0) {
-    let currentBlock = { id: timelineData[0].regime_id, start: timelineData[0].date, end: timelineData[0].date };
-    let blockStartIndex = 0;
-
-    for (let i = 1; i <= timelineData.length; i++) {
-        const d = timelineData[i];
-        if (!d || d.regime_id !== currentBlock.id) {
-            const actualEnd = timelineData[i - 1].date;
-            currentBlock.end = d ? d.date : actualEnd; // Stretch to the boundary visually
-            regimeBlocks.push(currentBlock);
-            
-            // Enrich the actual points with block metadata for the tooltip
-            for (let j = blockStartIndex; j < i; j++) {
-                timelineData[j].block_range = `${currentBlock.start} to ${actualEnd}`;
-                timelineData[j].regime_label = REGIME_LABELS[currentBlock.id] || `Regime ${currentBlock.id}`;
-            }
-
-            if (d) {
-                currentBlock = { id: d.regime_id, start: d.date, end: d.date };
-                blockStartIndex = i;
-            }
-        }
-    }
-  }
 
   return (
     <div className="space-y-8">
@@ -228,30 +180,14 @@ export default function RegimeAnalysis() {
           <Card title="Regime Timeline" data-guide-id="regime-timeline">
             {timelineData.length > 0 ? (
               <div className="-mx-2 mt-2">
-                <ResponsiveContainer width="100%" height={340}>
-                  <AreaChart data={timelineData}>
-                    <defs>
-                      <linearGradient id="timelineGradient" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stopColor="var(--text)" stopOpacity={0.1} />
-                        <stop offset="100%" stopColor="var(--text)" stopOpacity={0} />
-                      </linearGradient>
-                    </defs>
-                    <XAxis dataKey="date" {...CHART_AXIS_PROPS} tickFormatter={(v) => v?.slice(5)} />
-                    <YAxis {...CHART_AXIS_PROPS} />
-                    {regimeBlocks.map((b, i) => (
-                      <ReferenceArea
-                        key={i}
-                        x1={b.start}
-                        x2={b.end}
-                        fill={REGIME_COLORS[b.id] || 'var(--text-muted)'}
-                        fillOpacity={0.15}
-                        ifOverflow="hidden"
-                      />
-                    ))}
-                    <Tooltip content={<CustomTimelineTooltip />} cursor={{ stroke: 'var(--text-muted)', strokeWidth: 1, strokeDasharray: '4 4' }} />
-                    <Area type="monotone" dataKey="close" stroke="var(--text-muted)" strokeWidth={1.5} fill="url(#timelineGradient)" />
-                  </AreaChart>
-                </ResponsiveContainer>
+                <LightweightRegimeChart
+                  data={timelineData.map((d: any) => ({
+                    time: d.date,
+                    value: d.close ?? 0,
+                    regime_id: d.regime_id,
+                  }))}
+                  height={340}
+                />
               </div>
             ) : (
               <EmptyState icon={<Layers size={24} />} title="No timeline data" description="Run classification to see regime timeline." />

@@ -312,8 +312,9 @@ def train_rl_model(
         _clear_gpu_memory()
         logger.info("VecEnv closed and GPU memory cleared after training.")
 
-    # Save final model
-    final_path = save_path / model_name / "final_model"
+    # Save final model — timestamped so old artifacts are preserved on disk
+    _ts = datetime.now().strftime("%Y%m%d_%H%M")
+    final_path = save_path / model_name / f"final_model_{_ts}"
     final_path.parent.mkdir(parents=True, exist_ok=True)
     model.save(str(final_path))
 

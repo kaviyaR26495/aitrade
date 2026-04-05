@@ -23,6 +23,25 @@ logger = logging.getLogger(__name__)
 ACTION_MAP = {0: "HOLD", 1: "BUY", 2: "SELL"}
 
 
+def _latest_artifact(directory: Path, glob_pattern: str, legacy_name: str) -> str:
+    """Return the path of the most-recent versioned artifact in *directory*.
+
+    Versioned files follow the ``{base}_{YYYYMMDD_HHMM}.{ext}`` naming
+    convention produced by the save functions and are lexicographically
+    sortable by date.  Falls back to *legacy_name* for models saved before
+    the versioning scheme was introduced.
+    """
+    candidates = sorted(directory.glob(glob_pattern))
+    if candidates:
+        return str(candidates[-1])
+    legacy = directory / legacy_name
+    if legacy.exists():
+        return str(legacy)
+    raise FileNotFoundError(
+        f"No artifact found in {directory} matching '{glob_pattern}' or '{legacy_name}'"
+    )
+
+
 async def run_daily_predictions(
     db: AsyncSession,
     model_dir: str | None = None,
@@ -35,6 +54,8 @@ async def run_daily_predictions(
     interval: str = "day",
     stock_ids: list[int] | None = None,
     ensemble_config_id: int | None = None,
+    knn_model_id: int | None = None,
+    lstm_model_id: int | None = None,
 ) -> dict[str, Any]:
     """Run ensemble predictions for all active stocks and store results.
 
@@ -42,16 +63,42 @@ async def run_daily_predictions(
     per-stock calibrated KNN/LSTM weights (written by
     ``ensemble.per_stock_optimal_weights``).  If no per-stock row exists for a
     given stock the global ``knn_weight`` / ``lstm_weight`` defaults are used.
+
+    When ``knn_model_id`` or ``lstm_model_id`` are provided the function loads
+    the model from the exact filesystem path stored in the DB
+    ``KNNModel.model_path`` / ``LSTMModel.model_path`` columns.  This enables
+    instant rollback: point the DB row at an older timestamped artifact via the
+    API and the next prediction run automatically uses the older weights.
     """
     model_dir = model_dir or settings.MODEL_DIR
     model_path = Path(model_dir)
     target_date = target_date or date.today()
 
-    # Load models
-    knn_model_dir = model_path / "knn" / knn_name
-    knn_model = load_knn_model(str(knn_model_dir / "knn_model.joblib"))
-    knn_norm_params = load_knn_norm_params(knn_model_dir)
-    lstm_model = load_lstm_model(str(model_path / "lstm" / lstm_name / "lstm_model.pt"))
+    # ── Load KNN model ────────────────────────────────────────────────
+    if knn_model_id is not None:
+        knn_db = await crud.get_knn_model(db, knn_model_id)
+        if knn_db is None or not knn_db.model_path:
+            raise ValueError(f"KNN model id={knn_model_id} has no saved artifact in DB")
+        knn_model = load_knn_model(knn_db.model_path)
+        knn_norm_params = load_knn_norm_params(Path(knn_db.model_path).parent)
+    else:
+        knn_model_dir = model_path / "knn" / knn_name
+        knn_model = load_knn_model(
+            _latest_artifact(knn_model_dir, "knn_model_*.joblib", "knn_model.joblib")
+        )
+        knn_norm_params = load_knn_norm_params(knn_model_dir)
+
+    # ── Load LSTM model ───────────────────────────────────────────────
+    if lstm_model_id is not None:
+        lstm_db = await crud.get_lstm_model(db, lstm_model_id)
+        if lstm_db is None or not lstm_db.model_path:
+            raise ValueError(f"LSTM model id={lstm_model_id} has no saved artifact in DB")
+        lstm_model = load_lstm_model(lstm_db.model_path)
+    else:
+        lstm_model_dir = model_path / "lstm" / lstm_name
+        lstm_model = load_lstm_model(
+            _latest_artifact(lstm_model_dir, "lstm_model_*.pt", "lstm_model.pt")
+        )
 
     # Get stocks to predict
     if stock_ids:

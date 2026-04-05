@@ -447,12 +447,22 @@ def save_lstm_model(
     model_name: str,
     feature_cols: list[str] | None = None,
 ) -> dict[str, str]:
-    """Save LSTM model and artifacts."""
+    """Save LSTM model and artifacts.
+
+    Files are saved with a UTC timestamp suffix so that each training run
+    produces a *new* artifact rather than overwriting the previous one.
+    The returned ``model_path`` should be persisted to the DB
+    ``LSTMModel.model_path`` column, enabling instant rollback by updating
+    that column to point at an older versioned file via the API.
+    """
+    from datetime import datetime as _dt
+
+    timestamp = _dt.now().strftime("%Y%m%d_%H%M")
     save_path = Path(save_dir) / model_name
     save_path.mkdir(parents=True, exist_ok=True)
 
-    # Save model weights
-    model_file = save_path / "lstm_model.pt"
+    # Save model weights — versioned so old artifacts are preserved on disk
+    model_file = save_path / f"lstm_model_{timestamp}.pt"
     torch.save({
         "state_dict": model.state_dict(),
         "input_size": model.lstm.input_size,

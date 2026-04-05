@@ -25,6 +25,7 @@ from app.db.models import (
     LSTMModel,
     LSTMPrediction,
     NSEHoliday,
+    PortfolioSnapshot,
     RLModel,
     RLTrainingRun,
     Stock,
@@ -508,6 +509,11 @@ async def create_knn_model(db: AsyncSession, **kwargs) -> KNNModel:
     return m
 
 
+async def get_knn_model(db: AsyncSession, model_id: int) -> KNNModel | None:
+    result = await db.execute(select(KNNModel).where(KNNModel.id == model_id))
+    return result.scalars().first()
+
+
 async def update_knn_model_status(db: AsyncSession, model_id: int, status: str) -> None:
     await db.execute(update(KNNModel).where(KNNModel.id == model_id).values(status=status))
     await db.commit()
@@ -541,6 +547,11 @@ async def create_lstm_model(db: AsyncSession, **kwargs) -> LSTMModel:
     await db.commit()
     await db.refresh(m)
     return m
+
+
+async def get_lstm_model(db: AsyncSession, model_id: int) -> LSTMModel | None:
+    result = await db.execute(select(LSTMModel).where(LSTMModel.id == model_id))
+    return result.scalars().first()
 
 
 async def update_lstm_model_status(db: AsyncSession, model_id: int, status: str) -> None:
@@ -702,3 +713,69 @@ async def set_setting(db: AsyncSession, key: str, value: str) -> None:
     stmt = stmt.on_duplicate_key_update(value=stmt.inserted.value)
     await db.execute(stmt)
     await db.commit()
+
+
+# ── Portfolio Snapshot CRUD ────────────────────────────────────────────
+
+async def upsert_portfolio_snapshot(
+    db: AsyncSession,
+    snapshot_date: date,
+    cash_available: float,
+    opening_balance: float,
+    holdings_value: float,
+    unrealized_pnl: float,
+    holdings_json: list,
+    positions_json: list,
+) -> PortfolioSnapshot:
+    """Upsert a daily portfolio reconciliation snapshot.
+
+    Overwrites the row for *snapshot_date* (one row per calendar day) so that
+    repeated reconciliation calls on the same day converge to the latest
+    broker-sourced values.  The Kelly / Vol-Target sizing algorithms should
+    read cash exclusively from this table rather than from any in-memory ledger.
+    """
+    from datetime import datetime as _dt
+
+    stmt = mysql_insert(PortfolioSnapshot).values(
+        snapshot_date=snapshot_date,
+        cash_available=cash_available,
+        opening_balance=opening_balance,
+        holdings_value=holdings_value,
+        unrealized_pnl=unrealized_pnl,
+        holdings_json=holdings_json,
+        positions_json=positions_json,
+        reconciled_at=_dt.utcnow(),
+    )
+    stmt = stmt.on_duplicate_key_update(
+        cash_available=stmt.inserted.cash_available,
+        opening_balance=stmt.inserted.opening_balance,
+        holdings_value=stmt.inserted.holdings_value,
+        unrealized_pnl=stmt.inserted.unrealized_pnl,
+        holdings_json=stmt.inserted.holdings_json,
+        positions_json=stmt.inserted.positions_json,
+        reconciled_at=stmt.inserted.reconciled_at,
+    )
+    await db.execute(stmt)
+    await db.commit()
+
+    result = await db.execute(
+        select(PortfolioSnapshot).where(PortfolioSnapshot.snapshot_date == snapshot_date)
+    )
+    return result.scalars().first()
+
+
+async def get_latest_portfolio_snapshot(db: AsyncSession) -> PortfolioSnapshot | None:
+    """Return the most recent reconciliation snapshot (by snapshot_date)."""
+    result = await db.execute(
+        select(PortfolioSnapshot).order_by(PortfolioSnapshot.snapshot_date.desc()).limit(1)
+    )
+    return result.scalars().first()
+
+
+async def get_portfolio_snapshot_by_date(
+    db: AsyncSession, snapshot_date: date
+) -> PortfolioSnapshot | None:
+    result = await db.execute(
+        select(PortfolioSnapshot).where(PortfolioSnapshot.snapshot_date == snapshot_date)
+    )
+    return result.scalars().first()

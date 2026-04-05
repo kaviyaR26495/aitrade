@@ -159,6 +159,63 @@ def get_positions() -> list[dict]:
     return kite.positions().get("net", [])
 
 
+def build_portfolio_snapshot() -> dict:
+    """Fetch live broker state and return a reconciliation snapshot dict.
+
+    This is the *single source of truth* for cash and holdings that the
+    sizing algorithms must use.  It should be called every morning at
+    08:30 IST *before* any orders are placed.  Calling it overwrites the
+    local DB ledger with the absolute truth from Zerodha so Kelly /
+    Vol-Target sizing never operates on stale or hallucinated cash values.
+
+    Returns
+    -------
+    dict with fields:
+        cash_available    — free margin (equity segment)
+        opening_balance   — total opening balance (equity)
+        holdings_value    — sum(quantity × last_price) across all CNC holdings
+        unrealized_pnl    — sum of Kite-reported P&L across all holdings
+        holdings          — raw list from kite.holdings() (filtered)
+        positions         — raw list from kite.positions()[\"net\"]
+    """
+    kite = get_kite()
+
+    # ── Cash from margins API ───────────────────────────────────────
+    try:
+        margins = kite.margins("equity")
+        cash_available = float(margins.get("available", {}).get("live_balance", 0))
+        opening_balance = float(margins.get("available", {}).get("opening_balance", 0))
+    except Exception as exc:
+        logger.error("Failed to fetch margins: %s", exc)
+        raise
+
+    # ── Holdings ────────────────────────────────────────────────────
+    holdings = get_holdings()
+    holdings_value = sum(
+        h.get("quantity", 0) * h.get("last_price", h.get("average_price", 0))
+        for h in holdings
+    )
+    unrealized_pnl = sum(h.get("pnl", 0) for h in holdings)
+
+    # ── Positions ───────────────────────────────────────────────────
+    positions = get_positions()
+
+    logger.info(
+        "Portfolio snapshot: cash=%.2f holdings_value=%.2f unrealized_pnl=%.2f "
+        "(%d holdings, %d positions)",
+        cash_available, holdings_value, unrealized_pnl, len(holdings), len(positions),
+    )
+
+    return {
+        "cash_available": cash_available,
+        "opening_balance": opening_balance,
+        "holdings_value": holdings_value,
+        "unrealized_pnl": unrealized_pnl,
+        "holdings": holdings,
+        "positions": positions,
+    }
+
+
 # ── Order Placement ────────────────────────────────────────────────────
 
 def get_tag() -> list[str]:
@@ -447,15 +504,37 @@ def place_limit_chase_order(
                 current_order_id = None
                 break
 
-        # Still open — cancel and re-price on next loop iteration
+        # Before cancelling, check for partial fills so the re-submit uses
+        # only the *remaining* (unfilled) quantity — prevents over-leveraging.
         if current_order_id:
+            try:
+                history = kite.order_history(order_id=current_order_id)
+                if history:
+                    filled = int(history[-1].get("filled_quantity", 0))
+                    if filled > 0:
+                        logger.info(
+                            "LimitChase partial fill: %d/%d shares already filled for %s",
+                            filled, quantity, current_order_id,
+                        )
+                        quantity -= filled
+                        if quantity <= 0:
+                            logger.info(
+                                "Order %s fully filled across partial fills — done.",
+                                current_order_id,
+                            )
+                            return current_order_id
+            except Exception as hist_exc:
+                logger.error(
+                    "Failed to fetch order history for %s: %s", current_order_id, hist_exc
+                )
+
             _cancel_order(current_order_id)
             current_order_id = None
 
     # ── MARKET fallback ───────────────────────────────────────────────
     logger.warning(
-        "LimitChase exhausted %d attempts for %s %s — falling back to MARKET",
-        max_attempts, transaction_type, symbol,
+        "LimitChase exhausted %d attempts for %s %s — falling back to MARKET (remaining qty=%d)",
+        max_attempts, transaction_type, symbol, quantity,
     )
     try:
         market_id = str(kite.place_order(

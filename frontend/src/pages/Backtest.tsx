@@ -2,8 +2,7 @@ import { useState } from 'react';
 import { Card, Button, Select, SearchableSelect, Input, Badge, StatCard, EmptyState, PageHeader, ListItem } from '../components/ui';
 import { useUniverseStocks, useBacktestResults, useRunBacktest } from '../hooks/useApi';
 import { useAppStore } from '../store/appStore';
-import { XAxis, YAxis, Tooltip, ResponsiveContainer, Legend, Area, AreaChart } from 'recharts';
-import { CHART_TOOLTIP_STYLE, CHART_AXIS_PROPS } from '../components/ChartTheme';
+import LightweightAreaChart, { type ChartPoint } from '../components/LightweightAreaChart';
 import { BarChart3 } from 'lucide-react';
 
 export default function Backtest() {
@@ -97,24 +96,17 @@ export default function Backtest() {
               <Card title="Equity Curve">
                 {equityCurve.length > 0 ? (
                   <div className="-mx-2 mt-2">
-                    <ResponsiveContainer width="100%" height={340}>
-                      <AreaChart data={equityCurve}>
-                        <defs>
-                          <linearGradient id="btEquityGrad" x1="0" y1="0" x2="0" y2="1">
-                            <stop offset="0%" stopColor="var(--primary)" stopOpacity={0.15} />
-                            <stop offset="100%" stopColor="var(--primary)" stopOpacity={0} />
-                          </linearGradient>
-                        </defs>
-                        <XAxis dataKey="date" {...CHART_AXIS_PROPS} />
-                        <YAxis {...CHART_AXIS_PROPS} tickFormatter={(v) => `₹${(v/1000).toFixed(0)}K`} />
-                        <Tooltip contentStyle={CHART_TOOLTIP_STYLE} />
-                        <Legend />
-                        <Area type="monotone" dataKey="equity" stroke="var(--primary)" strokeWidth={2} fill="url(#btEquityGrad)" name="Strategy" />
-                        {equityCurve[0]?.benchmark && (
-                          <Area type="monotone" dataKey="benchmark" stroke="var(--text-muted)" strokeWidth={1} fill="none" strokeDasharray="5 5" name="Buy & Hold" />
-                        )}
-                      </AreaChart>
-                    </ResponsiveContainer>
+                    <LightweightAreaChart
+                      data={equityCurve.map((p: any) => ({ time: p.date, value: p.equity }))}
+                      secondSeries={
+                        equityCurve[0]?.benchmark
+                          ? equityCurve.map((p: any) => ({ time: p.date, value: p.benchmark }))
+                          : undefined
+                      }
+                      secondLabel="Buy & Hold"
+                      height={340}
+                      valueFormatter={(v: number) => `₹${(v / 1000).toFixed(0)}K`}
+                    />
                   </div>
                 ) : (
                   <EmptyState icon={<BarChart3 size={24} />} title="No equity curve data" description="Equity curve will appear after backtest completes." />

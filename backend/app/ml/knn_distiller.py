@@ -247,12 +247,23 @@ def save_knn_model(
     feature_cols: list[str] | None = None,
     norm_params: dict | None = None,
 ) -> dict[str, str]:
-    """Save KNN model and associated artifacts."""
+    """Save KNN model and associated artifacts.
+
+    Files are saved with a UTC timestamp suffix so that each training run
+    produces a *new* artifact rather than overwriting the previous one.
+    The returned ``model_path`` should be persisted to the DB
+    ``KNNModel.model_path`` column so the predictor can load the exact
+    version that is currently marked active — enabling instant rollback by
+    pointing the DB row at an older versioned file.
+    """
+    from datetime import datetime as _dt
+
+    timestamp = _dt.now().strftime("%Y%m%d_%H%M")
     save_path = Path(save_dir) / model_name
     save_path.mkdir(parents=True, exist_ok=True)
 
-    # Save model
-    model_file = save_path / "knn_model.joblib"
+    # Save model — versioned so old artifacts are preserved on disk
+    model_file = save_path / f"knn_model_{timestamp}.joblib"
     joblib.dump(model, model_file)
 
     # Save metadata

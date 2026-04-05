@@ -438,3 +438,26 @@ class AppSetting(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     property: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
     value: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+# ── Daily Portfolio Reconciliation Snapshot ────────────────────────────
+# Written by the 08:30 IST reconciliation job.  The live position-sizing
+# algorithms (Kelly, Vol-Target) must read cash and holdings exclusively
+# from the most recent row here \u2014 never from a local in-memory ledger.
+
+class PortfolioSnapshot(Base):
+    __tablename__ = "portfolio_snapshots"
+    __table_args__ = (Index("ix_portfolio_snapshot_date", "snapshot_date"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    snapshot_date: Mapped[date] = mapped_column(Date, nullable=False, unique=True)
+    # Cash figures fetched directly from Kite margins API
+    cash_available: Mapped[float] = mapped_column(Float, nullable=False)
+    opening_balance: Mapped[float] = mapped_column(Float, nullable=False)
+    # MTM value of all CNC holdings at the time of reconciliation
+    holdings_value: Mapped[float] = mapped_column(Float, nullable=False)
+    unrealized_pnl: Mapped[float] = mapped_column(Float, nullable=False)
+    # Full broker-sourced snapshots stored as JSON for audit
+    holdings_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=list)
+    positions_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=list)
+    reconciled_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
