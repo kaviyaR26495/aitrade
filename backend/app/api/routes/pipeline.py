@@ -112,6 +112,8 @@ async def _update_stage(job_id: str, stage_idx: int, *, status: str, progress: i
 
 class PipelineStartRequest(BaseModel):
     symbols: list[str]
+    skip_sync: bool = False
+    use_regime_pooling: bool = True
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -131,7 +133,7 @@ async def start_pipeline(req: PipelineStartRequest, background_tasks: Background
             status="queued"
         )
 
-    background_tasks.add_task(_run_pipeline, job_id, req.symbols)
+    background_tasks.add_task(_run_pipeline, job_id, req.symbols, req.skip_sync, req.use_regime_pooling)
     return {"job_id": job_id}
 
 
@@ -323,7 +325,7 @@ async def _purge_pipeline_data(job_id: str) -> dict:
 
 # ── Background pipeline runner ─────────────────────────────────────────────────
 
-async def _run_pipeline(job_id: str, symbols: list[str]) -> None:
+async def _run_pipeline(job_id: str, symbols: list[str], skip_sync: bool = False, use_regime_pooling: bool = True) -> None:
     async with async_session_factory() as db:
         await crud.update_pipeline_job(db, job_id, status="running")
 
@@ -337,19 +339,22 @@ async def _run_pipeline(job_id: str, symbols: list[str]) -> None:
             )
 
         # Stage 0 — Data Sync
-        if await _is_cancelled(job_id):
-            raise asyncio.CancelledError()
-        await _stage_data_sync(job_id, stock_ids, symbols)
+        if skip_sync:
+            await _update_stage(job_id, 0, status="completed", progress=100, message="Data sync skipped per user request.")
+        else:
+            if await _is_cancelled(job_id):
+                raise asyncio.CancelledError()
+            await _stage_data_sync(job_id, stock_ids, symbols)
 
         # Stage 1 — CQL Pre-training
         if await _is_cancelled(job_id):
             raise asyncio.CancelledError()
-        cql_path = await _stage_cql_pretrain(job_id, stock_ids)
+        cql_path = await _stage_cql_pretrain(job_id, stock_ids, use_regime_pooling)
 
         # Stage 2 — BC Warmup
         if await _is_cancelled(job_id):
             raise asyncio.CancelledError()
-        warmup_path = await _stage_bc_warmup(job_id, cql_path, stock_ids)
+        warmup_path = await _stage_bc_warmup(job_id, cql_path, stock_ids, use_regime_pooling)
 
         # Stage 3 — PPO Fine-tuning
         if await _is_cancelled(job_id):
@@ -462,7 +467,7 @@ async def _stage_data_sync(job_id: str, stock_ids: list[int], symbols: list[str]
     )
 
 
-async def _stage_cql_pretrain(job_id: str, stock_ids: list[int]) -> str | None:
+async def _stage_cql_pretrain(job_id: str, stock_ids: list[int], use_regime_pooling: bool = True) -> str | None:
     """Run offline CQL pre-training. Returns cql_path if successful."""
     await _update_stage(job_id, 1, status="running", progress=0, message="Checking for d3rlpy…")
 
@@ -488,18 +493,33 @@ async def _stage_cql_pretrain(job_id: str, stock_ids: list[int]) -> str | None:
 
         loop = asyncio.get_running_loop()
 
-        # Find the first stock with sufficient data (skip IPOs / stocks without history)
-        await _update_stage(job_id, 1, status="running", progress=20, message="Finding first valid stock for offline pre-training…")
         from app.core import data_service
         import pandas as _pd
         df = _pd.DataFrame()
-        primary_stock_id = stock_ids[0]  # fallback
-        for _sid in stock_ids:
-            async with async_session_factory() as db:
-                df = await data_service.get_stock_features(db, _sid, "day", normalize=False)
-            if not df.empty and len(df) > 100:
-                primary_stock_id = _sid
-                break
+        
+        if use_regime_pooling:
+            await _update_stage(job_id, 1, status="running", progress=20, message=f"Regime pooling: fetching data from {len(stock_ids)} stocks…")
+            all_dfs = []
+            for _sid in stock_ids:
+                async with async_session_factory() as db:
+                    _df = await data_service.get_stock_features(db, _sid, "day", normalize=False)
+                if not _df.empty and len(_df) > 100:
+                    all_dfs.append(_df)
+            if not all_dfs:
+                raise RuntimeError("No stocks have sufficient data for regime pooling.")
+            df = _pd.concat(all_dfs, ignore_index=True)
+            await _update_stage(job_id, 1, status="running", progress=25, message=f"Regime pooling: {len(df):,} rows from {len(all_dfs)} stocks.")
+        else:
+            # Find the first stock with sufficient data
+            await _update_stage(job_id, 1, status="running", progress=20, message="Finding first valid stock for offline pre-training…")
+            primary_stock_id = stock_ids[0]  # fallback
+            for _sid in stock_ids:
+                async with async_session_factory() as db:
+                    df = await data_service.get_stock_features(db, _sid, "day", normalize=False)
+                if not df.empty and len(df) > 100:
+                    primary_stock_id = _sid
+                    break
+        
         if df.empty:
             raise RuntimeError("No stocks have sufficient data for offline pre-training.")
 
@@ -528,7 +548,7 @@ async def _stage_cql_pretrain(job_id: str, stock_ids: list[int]) -> str | None:
         return None
 
 
-async def _stage_bc_warmup(job_id: str, cql_path: str | None, stock_ids: list[int]) -> str | None:
+async def _stage_bc_warmup(job_id: str, cql_path: str | None, stock_ids: list[int], use_regime_pooling: bool = True) -> str | None:
     await _update_stage(job_id, 2, status="running", progress=0, message="Checking for BC warmup dependencies…")
 
     try:
@@ -552,17 +572,32 @@ async def _stage_bc_warmup(job_id: str, cql_path: str | None, stock_ids: list[in
         from app.ml.rl_trainer import run_bc_warmup
         import pandas as pd
 
-        # Find the first stock with sufficient data (same logic as CQL stage)
         from app.core import data_service
         import pandas as _pd
         df = _pd.DataFrame()
-        primary_stock_id = stock_ids[0]
-        for _sid in stock_ids:
-            async with async_session_factory() as db:
-                df = await data_service.get_stock_features(db, _sid, "day", normalize=False)
-            if not df.empty and len(df) > 100:
-                primary_stock_id = _sid
-                break
+
+        if use_regime_pooling:
+            await _update_stage(job_id, 2, status="running", progress=15, message=f"Collective BC: pooling data from {len(stock_ids)} stocks…")
+            all_dfs = []
+            for _sid in stock_ids:
+                async with async_session_factory() as db:
+                    _df = await data_service.get_stock_features(db, _sid, "day", normalize=False)
+                if not _df.empty and len(_df) > 100:
+                    all_dfs.append(_df)
+            if not all_dfs:
+                raise RuntimeError("No stocks have sufficient data for collective BC.")
+            df = _pd.concat(all_dfs, ignore_index=True)
+            await _update_stage(job_id, 2, status="running", progress=25, message=f"Collective BC: {len(df):,} rows ready.")
+        else:
+            # Find the first stock with sufficient data (same logic as CQL stage)
+            primary_stock_id = stock_ids[0]
+            for _sid in stock_ids:
+                async with async_session_factory() as db:
+                    df = await data_service.get_stock_features(db, _sid, "day", normalize=False)
+                if not df.empty and len(df) > 100:
+                    primary_stock_id = _sid
+                    break
+
         if df.empty:
             raise RuntimeError("No stocks have sufficient data for BC warmup.")
             

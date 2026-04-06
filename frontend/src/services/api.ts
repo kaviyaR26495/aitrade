@@ -181,6 +181,8 @@ export const getGoldenPatterns = (rl_model_id?: number) =>
 
 export interface PipelineRequest {
   symbols: string[];
+  skip_sync?: boolean;
+  use_regime_pooling?: boolean;
 }
 
 export interface PipelineStageStatus {

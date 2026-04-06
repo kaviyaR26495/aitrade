@@ -68,46 +68,56 @@ def prepare_training_data(
     Full data preparation pipeline for RL training.
 
     Returns (normalized_df, feature_column_names).
+
+    Order-of-operations rationale
+    ──────────────────────────────
+    1. Compute indicators if absent or all-NaN (LEFT JOIN from DB may return NaN columns).
+    2. Classify regimes if absent or all-NaN (same LEFT JOIN issue).
+    3. Normalize BEFORE filtering — preserves the unbroken daily time-series needed
+       for accurate .diff() log-returns and rolling(100) Z-scores.  Removing rows
+       first would create artificial "gaps" that corrupt the rolling statistics.
+    4. Filter low-quality / transition rows AFTER normalization.
+    5. Append one-hot regime feature columns (must stay as 0/1, not log-normalized).
     """
     df = ohlcv_df.copy()
-    
-    # 1. Compute indicators ONLY if missing (prevents double NaN drops)
-    if "sma_50" not in df.columns:
+
+    # 1. Compute indicators only if missing or completely empty (NaN from LEFT JOIN)
+    if "sma_50" not in df.columns or df["sma_50"].isna().all():
         from app.core.indicators import compute_all_indicators
         df = compute_all_indicators(df)
 
-    # 2. Classify regimes + quality score ONLY if missing
-    if "quality_score" not in df.columns:
+    # 2. Classify regimes + quality score only if missing or completely empty (NaN)
+    if "quality_score" not in df.columns or df["quality_score"].isna().all():
         from app.core.regime_classifier import classify_and_score
         df = classify_and_score(df)
 
-    # 3. Filter by quality + regime
-    mask = df["quality_score"] >= min_quality
-    if exclude_transitions:
-        mask &= ~df["is_transition"]
-    if regime_ids is not None:
-        mask &= df["regime_id"].isin(regime_ids)
-    df = df[mask].reset_index(drop=True)
-
-    if len(df) < 100:
-        raise ValueError(f"Insufficient quality data after filtering: {len(df)} rows (need >= 100)")
-
-    # 4. Normalize first (before appending regime features)
-    # Regime features are binary/pre-scaled and must NOT go through the log-return path
+    # 3. Normalize FIRST to preserve temporal sequence integrity
     df = normalize_dataframe(df)
 
     if len(df) < 100:
+        raise ValueError(f"Insufficient data after normalization: {len(df)} rows (need >= 100)")
+
+    # 4. Filter by quality + regime AFTER normalization
+    if "quality_score" in df.columns:
+        mask = df["quality_score"] >= min_quality
+        if exclude_transitions and "is_transition" in df.columns:
+            # fillna(False) guards against NaNs from the LEFT JOIN
+            mask &= ~df["is_transition"].fillna(False).astype(bool)
+        if regime_ids is not None and "regime_id" in df.columns:
+            mask &= df["regime_id"].isin(regime_ids)
+        df = df[mask].reset_index(drop=True)
+
+    if len(df) < 100:
         raise ValueError(
-            f"Insufficient data after normalization: {len(df)} rows (need >= 100). "
+            f"Insufficient quality data after filtering: {len(df)} rows (need >= 100). "
             "Try relaxing min_quality or regime filters."
         )
 
-    # 5. Append regime features after normalization so they stay as-is (0/1 scaled)
+    # 5. Append regime one-hot features (0/1 floats — must not be log-normalized)
     df = _append_regime_features(df)
 
-    # 6. Get feature columns (includes both indicator + regime features)
+    # 6. Build feature column list (indicator columns + regime columns)
     feature_cols = get_feature_columns(df)
-    # Add regime features
     regime_feat_cols = [
         "regime_trend_bullish", "regime_trend_bearish", "regime_trend_neutral",
         "regime_vol_high", "regime_confidence",
@@ -130,6 +140,34 @@ def _clear_gpu_memory() -> None:
             torch.cuda.synchronize()
     except Exception:
         pass
+
+
+def _resolve_device(requested: str) -> str:
+    """Probe CUDA before committing to it.
+
+    ``torch.cuda.is_available()`` returns True even when the GPU is busy or in
+    an error state left by a prior cancelled/crashed run.  We allocate a tiny
+    tensor to verify the device actually accepts work before training starts.
+    Falls back to 'cpu' on any failure.
+    """
+    if requested == "cpu":
+        return "cpu"
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            if requested == "cuda":
+                logger.warning("CUDA requested but not available — falling back to CPU")
+            return "cpu"
+        _clear_gpu_memory()
+        _probe = torch.zeros(1, device="cuda")
+        del _probe
+        _clear_gpu_memory()
+        logger.info("CUDA probe successful — training on GPU")
+        return "cuda"
+    except Exception as exc:
+        logger.warning("CUDA probe failed (%s) — falling back to CPU", exc)
+        _clear_gpu_memory()
+        return "cpu"
 
 
 def train_rl_model(
@@ -165,7 +203,8 @@ def train_rl_model(
 
     obs_mode = get_obs_mode(algorithm)
     continuous = is_continuous(algorithm)
-
+    # ── Resolve & probe device before doing any heavy work ──────────────
+    device = _resolve_device(device)
     # ── CUDA optimisations ────────────────────────────────────────────
     if device == "cuda":
         import torch
@@ -323,12 +362,56 @@ def train_rl_model(
     )
 
     # Train
-    logger.info("Starting %s training for %d timesteps on %d envs", algorithm, total_timesteps, n_envs)
+    logger.info("Starting %s training for %d timesteps on %d envs on %s", algorithm, total_timesteps, n_envs, device)
+    _cuda_retry_done = False
     try:
         model.learn(
             total_timesteps=total_timesteps,
             callback=[progress_cb, best_model_cb],
         )
+    except (RuntimeError, Exception) as _train_exc:
+        _err_str = str(_train_exc)
+        _is_cuda_err = any(k in _err_str for k in ("CUDA", "cuda", "device-side", "NCCL", "cublas", "cudnn"))
+        if _is_cuda_err and device == "cuda" and not _cuda_retry_done:
+            logger.warning("CUDA error during training (%s) — retrying on CPU", _train_exc)
+            try:
+                env.close()
+            except Exception:
+                pass
+            _clear_gpu_memory()
+            # Rebuild env and model on CPU with reduced parallelism
+            device = "cpu"
+            _cpu_n_envs = 2
+            env = DummyVecEnv([_make_env(i) for i in range(_cpu_n_envs)])
+            _cpu_params = {k: v for k, v in params.items()}
+            _cpu_params["n_steps"] = max(_cpu_params.get("n_steps", 2048) // _cpu_n_envs, 512)
+            _cpu_params["batch_size"] = min(
+                _cpu_params.get("batch_size", 256),
+                _cpu_params["n_steps"] * _cpu_n_envs,
+            )
+            model = AlgorithmClass(
+                policy, env, verbose=0, device="cpu",
+                **({"policy_kwargs": policy_kwargs} if policy_kwargs else {}),
+                **_cpu_params,
+            )
+            _cuda_retry_done = True
+            logger.info("CPU fallback: restarting training for %d timesteps", total_timesteps)
+            try:
+                model.learn(
+                    total_timesteps=total_timesteps,
+                    callback=[progress_cb, best_model_cb],
+                )
+            except InterruptedError:
+                raise
+            finally:
+                try:
+                    env.close()
+                except Exception:
+                    pass
+                _clear_gpu_memory()
+                logger.info("VecEnv closed after CPU fallback training.")
+        else:
+            raise
     finally:
         # Always close VecEnv workers and free GPU memory, even if training was stopped/failed
         try:

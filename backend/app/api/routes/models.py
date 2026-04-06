@@ -223,8 +223,13 @@ async def _run_distillation_background(
     reward_function = training_config.get("reward_function", "risk_adjusted_pnl")
     algorithm = rl_model.algorithm
 
-    # Load obs_mode from metadata.json if available
+    # Load obs_mode AND the original feature columns from metadata.json.
+    # prepare_training_data() may now produce more/fewer features than when the
+    # RL model was trained (e.g. 40 now vs 37 at training time).  Using the
+    # saved feature_cols aligns the env observation shape with the model's
+    # observation_space, preventing "Unexpected observation shape" errors.
     obs_mode = "flat"
+    feature_cols_from_meta: list[str] | None = None
     try:
         meta_path = Path(rl_model.model_path).parent / "metadata.json"
         if meta_path.exists():
@@ -232,6 +237,7 @@ async def _run_distillation_background(
             with open(meta_path) as f:
                 meta = _json.load(f)
             obs_mode = meta.get("obs_mode", "flat")
+            feature_cols_from_meta = meta.get("feature_cols") or None
     except Exception:
         pass
 
@@ -293,7 +299,14 @@ async def _run_distillation_background(
         # Extract patterns
         try:
             from app.ml.pattern_extractor import extract_patterns
-            feature_data = df_prep[feature_cols].values.astype("float32")
+            # Use the exact feature columns the RL model was trained on so that
+            # the env observation shape matches the model's observation_space.
+            cols_for_env = feature_cols_from_meta if feature_cols_from_meta else feature_cols
+            missing_cols = [c for c in cols_for_env if c not in df_prep.columns]
+            if missing_cols:
+                _dlog(knn_model_id, f"WARN   Stock #{stock_id}: {len(missing_cols)} RL training feature(s) missing from current data — skipping. Missing: {missing_cols[:5]}")
+                continue
+            feature_data = df_prep[cols_for_env].values.astype("float32")
             close_prices = df_prep["close"].values.astype("float32")
             dates = df_prep["date"].values if "date" in df_prep.columns else list(range(len(df_prep)))
             regime_ids_arr = df_prep["regime_id"].values.astype(int) if "regime_id" in df_prep.columns else None

@@ -263,6 +263,9 @@ export default function AutoPilotPipeline() {
 
   const [startError, setStartError] = useState<string | null>(null);
   const [confirmAction, setConfirmAction] = useState<'terminate' | 'purge' | null>(null);
+  
+  // Pipeline configuration options
+  const [shouldSync, setShouldSync] = useState(true);
 
   const startMutation = useStartPipeline();
   const terminateMutation = useTerminatePipeline();
@@ -313,7 +316,11 @@ export default function AutoPilotPipeline() {
     if (pipelineUniverse.length === 0) return;
     setStartError(null);
     startMutation.mutate(
-      { symbols: pipelineUniverse },
+      { 
+        symbols: pipelineUniverse,
+        skip_sync: !shouldSync,
+        use_regime_pooling: true // Always use pooling for better generalization
+      },
       {
         onSuccess: (data) => {
           setJobId(data.job_id);
@@ -453,6 +460,43 @@ export default function AutoPilotPipeline() {
           />
         )}
       </div>
+      
+      {/* ── Pipeline Settings ── */}
+      {!hasStarted && (
+        <div className="rounded-[var(--radius-lg)] border border-indigo-500/20 bg-indigo-500/5 px-5 py-4 space-y-3">
+          <div className="flex items-center gap-2 mb-1">
+            <RefreshCw size={13} className="text-indigo-400" />
+            <span className="text-[11px] font-bold uppercase tracking-widest text-indigo-400">
+              Pipeline Settings
+            </span>
+          </div>
+          
+          <div className="flex items-center gap-4">
+            <label className="flex items-start gap-3 cursor-pointer group">
+              <div className="pt-0.5">
+                <input
+                  type="checkbox"
+                  checked={shouldSync}
+                  onChange={(e) => setShouldSync(e.target.checked)}
+                  className="w-4 h-4 rounded border-[var(--border)] bg-[var(--bg-card)] text-indigo-600 focus:ring-indigo-500 focus:ring-offset-0"
+                />
+              </div>
+              <div className="flex-1">
+                <span className="text-xs font-semibold text-[var(--text)] group-hover:text-indigo-400 transition-colors">
+                  Sync & Classify New Data
+                </span>
+                <p className="text-[10px] text-[var(--text-dim)] leading-tight mt-0.5">
+                  Fetch latest OHLCV and compute indicators before training (requires Zerodha login).
+                </p>
+              </div>
+            </label>
+            <div className="hidden sm:block h-8 w-px bg-indigo-500/10" />
+            <div className="flex-1 text-[10px] text-indigo-400/60 italic leading-tight">
+              Regime Pooling is enabled by default to optimize model generalization across the universe.
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── Start / Reset button ──────────────────────────────────── */}
       {!hasStarted ? (
