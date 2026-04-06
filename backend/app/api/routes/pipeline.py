@@ -33,13 +33,13 @@ from app.db.database import async_session_factory
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-# ── Cancellation registry ─────────────────────────────────────────────────────
-# Jobs whose job_ids are present here will abort at the next stage checkpoint.
-_CANCELLED_JOBS: set[str] = set()
-
-
-def _is_cancelled(job_id: str) -> bool:
-    return job_id in _CANCELLED_JOBS
+# ── Cancellation check (DB-backed) ───────────────────────────────────────────
+# Previously used an in-process set which broke under multi-worker deployments.
+# Now queries the DB so any worker can reliably detect a cancel/purge.
+async def _is_cancelled(job_id: str) -> bool:
+    async with async_session_factory() as db:
+        job = await crud.get_pipeline_job(db, job_id)
+        return job is not None and job.status in ("cancelled", "purged")
 
 
 # ── Thread pool shared with models router (limit concurrent heavy jobs)
@@ -172,9 +172,10 @@ async def terminate_pipeline(job_id: str, purge: bool = False):
     if not job:
         raise HTTPException(status_code=404, detail="Pipeline job not found")
 
-    # Signal the background coroutine to stop at the next stage checkpoint
+    # Signal cancellation by writing the status to DB (works across workers)
     if job.status in ("running", "queued"):
-        _CANCELLED_JOBS.add(job_id)
+        async with async_session_factory() as db:
+            await crud.update_pipeline_job(db, job_id, status="cancelled")
 
     if purge:
         deleted = await _purge_pipeline_data(job_id)
@@ -328,32 +329,32 @@ async def _run_pipeline(job_id: str, symbols: list[str]) -> None:
             )
 
         # Stage 0 — Data Sync
-        if _is_cancelled(job_id):
+        if await _is_cancelled(job_id):
             raise asyncio.CancelledError()
         await _stage_data_sync(job_id, stock_ids, symbols)
 
         # Stage 1 — CQL Pre-training
-        if _is_cancelled(job_id):
+        if await _is_cancelled(job_id):
             raise asyncio.CancelledError()
         cql_path = await _stage_cql_pretrain(job_id, stock_ids)
 
         # Stage 2 — BC Warmup
-        if _is_cancelled(job_id):
+        if await _is_cancelled(job_id):
             raise asyncio.CancelledError()
         warmup_path = await _stage_bc_warmup(job_id, cql_path, stock_ids)
 
         # Stage 3 — PPO Fine-tuning
-        if _is_cancelled(job_id):
+        if await _is_cancelled(job_id):
             raise asyncio.CancelledError()
         rl_model_id = await _stage_ppo_finetune(job_id, stock_ids, warmup_path)
 
         # Stage 4 — Ensemble Distillation
-        if _is_cancelled(job_id):
+        if await _is_cancelled(job_id):
             raise asyncio.CancelledError()
         knn_model_id, lstm_model_id = await _stage_ensemble_distill(job_id, rl_model_id, stock_ids)
 
         # Stage 5 — Backtest
-        if _is_cancelled(job_id):
+        if await _is_cancelled(job_id):
             raise asyncio.CancelledError()
         await _stage_backtest(job_id, rl_model_id, knn_model_id, lstm_model_id, stock_ids)
 
@@ -364,7 +365,6 @@ async def _run_pipeline(job_id: str, symbols: list[str]) -> None:
 
     except asyncio.CancelledError:
         logger.info("Pipeline %s was cancelled", job_id)
-        _CANCELLED_JOBS.discard(job_id)
         async with async_session_factory() as db:
             job_rec = await crud.get_pipeline_job(db, job_id)
             if job_rec:
@@ -480,15 +480,22 @@ async def _stage_cql_pretrain(job_id: str, stock_ids: list[int]) -> str | None:
 
         loop = asyncio.get_running_loop()
 
-        # Collect transitions for the first stock as the primary training stock
-        primary_stock_id = stock_ids[0]
+        # Find the first stock with sufficient data (skip IPOs / stocks without history)
+        await _update_stage(job_id, 1, status="running", progress=20, message="Finding first valid stock for offline pre-training…")
+        from app.core import data_service
+        import pandas as _pd
+        df = _pd.DataFrame()
+        primary_stock_id = stock_ids[0]  # fallback
+        for _sid in stock_ids:
+            async with async_session_factory() as db:
+                df = await data_service.get_stock_features(db, _sid, "day", normalize=False)
+            if not df.empty and len(df) > 100:
+                primary_stock_id = _sid
+                break
+        if df.empty:
+            raise RuntimeError("No stocks have sufficient data for offline pre-training.")
 
         await _update_stage(job_id, 1, status="running", progress=30, message="Collecting offline RL transitions…")
- 
-        # FIX: Fetch full features (including regimes) instead of raw OHLCV
-        from app.core import data_service
-        async with async_session_factory() as db:
-            df = await data_service.get_stock_features(db, primary_stock_id, "day", normalize=False)
 
         def _run_cql():
             transitions = collect_offline_transitions(df)
@@ -537,13 +544,19 @@ async def _stage_bc_warmup(job_id: str, cql_path: str | None, stock_ids: list[in
         from app.ml.rl_trainer import run_bc_warmup
         import pandas as pd
 
-        # Fetch data for the primary stock used in CQL
-        primary_stock_id = stock_ids[0]
-        
-        # FIX: Fetch full features (including regimes) instead of raw OHLCV
+        # Find the first stock with sufficient data (same logic as CQL stage)
         from app.core import data_service
-        async with async_session_factory() as db:
-            df = await data_service.get_stock_features(db, primary_stock_id, "day", normalize=False)
+        import pandas as _pd
+        df = _pd.DataFrame()
+        primary_stock_id = stock_ids[0]
+        for _sid in stock_ids:
+            async with async_session_factory() as db:
+                df = await data_service.get_stock_features(db, _sid, "day", normalize=False)
+            if not df.empty and len(df) > 100:
+                primary_stock_id = _sid
+                break
+        if df.empty:
+            raise RuntimeError("No stocks have sufficient data for BC warmup.")
             
         loop = asyncio.get_running_loop()
 
@@ -655,8 +668,13 @@ async def _stage_ppo_finetune(job_id: str, stock_ids: list[int], pretrained_path
             msg = ""
             if info.get("ep_rew_mean") is not None:
                 msg = f"Step {step:,} | Reward {info['ep_rew_mean']:.4f}"
-            # Call async _update_stage thread-safely
-            asyncio.run_coroutine_threadsafe(_update_stage(job_id, 3, status="running", progress=pct, message=msg), loop)
+            # Call async _update_stage thread-safely; log failures rather than silently dropping
+            future = asyncio.run_coroutine_threadsafe(
+                _update_stage(job_id, 3, status="running", progress=pct, message=msg), loop
+            )
+            future.add_done_callback(
+                lambda f: f.exception() and logger.error("Progress update failed: %s", f.exception())
+            )
 
     from app.ml.rl_trainer import train_rl_model
 
@@ -761,7 +779,7 @@ async def _stage_ensemble_distill(job_id: str, rl_model_id: int, stock_ids: list
             async with async_session_factory() as db:
                 knn_m = await _crud.get_knn_model(db, knn_model_id)
             
-            if not knn_m or knn_m.status != "training":
+            if not knn_m or knn_m.status not in ("pending", "training"):
                 break
                 
             ticks += 1
@@ -931,9 +949,12 @@ async def _stage_backtest(job_id: str, rl_model_id: int, knn_model_id: int | Non
                 if d not in target_date_set:
                     continue
                 raw_action = p["action"]
+                price = ohlcv_map.get(d)
+                if price is None or price <= 0:
+                    continue  # Skip: missing/zero price would corrupt backtest math
                 predictions.append({"action": -1 if raw_action == 2 else raw_action,
                                      "confidence": p["confidence"], "regime_id": None})
-                close_arr.append(ohlcv_map.get(d, 0.0))
+                close_arr.append(price)
 
             if len(predictions) < 10:
                 continue
