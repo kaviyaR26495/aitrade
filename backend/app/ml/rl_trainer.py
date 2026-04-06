@@ -70,11 +70,17 @@ def prepare_training_data(
 
     Returns (normalized_df, feature_column_names).
     """
-    # 1. Compute indicators
-    df = compute_all_indicators(ohlcv_df)
+    df = ohlcv_df.copy()
+    
+    # 1. Compute indicators ONLY if missing (prevents double NaN drops)
+    if "sma_50" not in df.columns:
+        from app.core.indicators import compute_all_indicators
+        df = compute_all_indicators(df)
 
-    # 2. Classify regimes + quality score
-    df = classify_and_score(df)
+    # 2. Classify regimes + quality score ONLY if missing
+    if "quality_score" not in df.columns:
+        from app.core.regime_classifier import classify_and_score
+        df = classify_and_score(df)
 
     # 3. Filter by quality + regime
     mask = df["quality_score"] >= min_quality

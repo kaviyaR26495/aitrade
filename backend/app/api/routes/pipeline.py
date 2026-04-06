@@ -597,7 +597,7 @@ async def _stage_ppo_finetune(job_id: str, stock_ids: list[int], pretrained_path
             training_config={
                 "total_timesteps": total_timesteps,
                 "stock_ids": stock_ids,
-                "min_quality": 0.7,
+                "min_quality": 0.0,
                 "regime_ids": None,
                 "reward_function": "risk_adjusted_pnl",
                 "seq_len": 15,
@@ -673,7 +673,7 @@ async def _stage_ppo_finetune(job_id: str, stock_ids: list[int], pretrained_path
             algorithm=algorithm,
             hyperparams=hyperparams,
             total_timesteps=total_timesteps,
-            min_quality=0.7,
+            min_quality=0.0,
             regime_ids=None,
             reward_function="risk_adjusted_pnl",
             seq_len=15,

@@ -94,6 +94,11 @@ def train_lstm(
         logger.info(msg)
         if log_fn:
             log_fn(msg)
+    if len(X) < 15:
+        raise ValueError(
+            f"Insufficient patterns extracted for LSTM: found only {len(X)} samples. "
+            "The RL model needs more training to discover profitable trades."
+        )
 
     n_samples, seq_len, n_features = X.shape
 

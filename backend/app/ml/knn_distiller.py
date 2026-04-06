@@ -156,8 +156,11 @@ def train_knn(
         if log_fn:
             log_fn(msg)
 
-    if len(X) == 0:
-        raise ValueError("No training data provided")
+    if len(X) < 15:
+        raise ValueError(
+            f"Insufficient patterns extracted for KNN: found only {len(X)} samples. "
+            "The RL model likely learned to only HOLD. Needs more RL training timesteps."
+        )
 
     # Flatten: (n, seq_len, features) → (n, seq_len * features)
     n_samples = X.shape[0]
