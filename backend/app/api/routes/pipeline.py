@@ -641,7 +641,14 @@ async def _stage_ppo_finetune(job_id: str, stock_ids: list[int], pretrained_path
         algorithm = "PPO"  # fallback if AttentionPPO not registered
 
     hyperparams = dict(ALGORITHM_CONFIGS[algorithm]["defaults"])
-    total_timesteps = 100_000  # conservative default for pipeline runs
+    # Scale timesteps by universe size — 150k minimum, +15k per stock.
+    # 100k was fine for 1 stock but starves the agent when 50+ stocks are used.
+    total_timesteps = max(150_000, len(stock_ids) * 15_000)
+    # Prevent policy collapse (all-HOLD): inject entropy coef so PPO is penalised
+    # for not exploring BUY/SELL.  SB3 default is ent_coef=0.0 which gives the
+    # agent zero mathematical incentive to try non-HOLD actions.
+    hyperparams["ent_coef"] = 0.05
+    hyperparams["learning_rate"] = 0.0003  # nudge up from SB3 default 0.0001
     interval = "day"
 
     async with async_session_factory() as db:
