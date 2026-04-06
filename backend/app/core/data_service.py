@@ -177,14 +177,31 @@ async def get_model_ready_data(
 ) -> tuple[pd.DataFrame, list[str]]:
     """
     Get normalized feature DataFrame and feature column list for model input.
-
-    Returns (df, feature_cols) — ready for prepare_model_input().
     """
     df = await get_stock_features(db, stock_id, interval, start_date, end_date, normalize=True)
     if df.empty:
         return df, []
 
+    # FIX: Ensure inference features strictly match RL training features!
+    trend = df.get("trend", pd.Series(["neutral"] * len(df), index=df.index))
+    vol = df.get("volatility", pd.Series(["low"] * len(df), index=df.index))
+    
+    df["regime_trend_bullish"] = (trend == "bullish").astype(float)
+    df["regime_trend_bearish"] = (trend == "bearish").astype(float)
+    df["regime_trend_neutral"] = (trend == "neutral").astype(float)
+    df["regime_vol_high"] = (vol == "high").astype(float)
+
     feature_cols = get_feature_columns(df)
+    
+    # Ensure regime columns are explicitly included in feature_cols
+    regime_feats = [
+        "regime_trend_bullish", "regime_trend_bearish", 
+        "regime_trend_neutral", "regime_vol_high", "regime_confidence"
+    ]
+    for col in regime_feats:
+        if col in df.columns and col not in feature_cols:
+            feature_cols.append(col)
+
     return df, feature_cols
 
 

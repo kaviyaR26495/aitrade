@@ -37,24 +37,23 @@ logger = logging.getLogger(__name__)
 
 def _append_regime_features(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Append regime features to observation:
+    Append regime features to observation safely.
     - Trend one-hot (3): bullish, bearish, neutral
     - Volatility binary (1): high=1, low=0
-    - Regime confidence (1)
-    Total: 5 extra features per candle.
     """
     df = df.copy()
 
+    # Safely get string columns, defaulting to neutral/low if missing
+    trend = df.get("trend", pd.Series(["neutral"] * len(df), index=df.index))
+    volatility = df.get("volatility", pd.Series(["low"] * len(df), index=df.index))
+
     # Trend one-hot
-    df["regime_trend_bullish"] = (df["trend"] == "bullish").astype(float)
-    df["regime_trend_bearish"] = (df["trend"] == "bearish").astype(float)
-    df["regime_trend_neutral"] = (df["trend"] == "neutral").astype(float)
+    df["regime_trend_bullish"] = (trend == "bullish").astype(float)
+    df["regime_trend_bearish"] = (trend == "bearish").astype(float)
+    df["regime_trend_neutral"] = (trend == "neutral").astype(float)
 
     # Volatility binary
-    df["regime_vol_high"] = (df["volatility"] == "high").astype(float)
-
-    # Confidence (already 0-1)
-    # regime_confidence is already present
+    df["regime_vol_high"] = (volatility == "high").astype(float)
 
     return df
 
