@@ -96,6 +96,8 @@ class ProgressCallback(BaseCallback):
         if self.on_progress is not None:
             try:
                 self.on_progress(info)
+            except InterruptedError:
+                raise  # pipeline cancellation signal — must not be swallowed
             except Exception:
                 pass
         logger.debug(
@@ -149,7 +151,11 @@ class ProgressCallback(BaseCallback):
             nw = self._get_net_worth()
             if nw:
                 info.update(nw)
-            self._emit(info)
+            try:
+                self._emit(info)
+            except InterruptedError:
+                logger.info("Pipeline cancelled — stopping SB3 training at step %d", self.num_timesteps)
+                return False  # tells SB3 to cleanly abort the learn() loop
 
         return True
 
@@ -161,7 +167,14 @@ class ProgressCallback(BaseCallback):
         nw = self._get_net_worth()
         if nw:
             info.update(nw)
-        self._emit(info)
+        try:
+            self._emit(info)
+        except InterruptedError:
+            logger.info("Pipeline cancelled during rollout end — stopping SB3 training at step %d", self.num_timesteps)
+            # SB3 doesn't honour a False return from _on_rollout_end, so we
+            # set the internal flag that tells learn() to stop after this rollout.
+            self.model._episode_storage = None  # type: ignore[attr-defined]
+            raise  # re-raise so the executor thread exits with InterruptedError
 
     def _on_training_end(self) -> None:
         """Emit a final completion event when training finishes naturally (all timesteps done)."""

@@ -68,12 +68,21 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-async def _update_stage(job_id: str, stage_idx: int, *, status: str, progress: int = 0, message: str = "") -> None:
-    """Update a specific stage and the job's overall status/stage in the DB."""
+async def _update_stage(job_id: str, stage_idx: int, *, status: str, progress: int = 0, message: str = "") -> bool:
+    """Update a specific stage and the job's overall status/stage in the DB.
+
+    Returns True when the pipeline has been cancelled/purged/failed (circuit
+    breaker). Callers should abort when True is returned.
+    """
     async with async_session_factory() as db:
         job_record = await crud.get_pipeline_job(db, job_id)
         if not job_record:
-            return
+            return True  # job gone — abort
+
+        # CIRCUIT BREAKER: never overwrite a terminal state; signalling
+        # is_cancelled=True lets the caller stop the running trainer thread.
+        if job_record.status in ("cancelled", "purged", "failed"):
+            return True
 
         stages = list(job_record.stages or [])
         if stage_idx < len(stages):
@@ -81,15 +90,13 @@ async def _update_stage(job_id: str, stage_idx: int, *, status: str, progress: i
             stages[stage_idx]["progress"] = progress
             stages[stage_idx]["message"] = message
 
-        # Optimization: only update the DB once with all changes
         await crud.update_pipeline_job(
             db,
             job_id,
-            status="running" if status in ["running", "pending"] else None, # status usually managed by runner
+            status="running" if status in ["running", "pending"] else None,
             current_stage=stages[stage_idx]["name"] if stage_idx < len(stages) else str(stage_idx),
         )
-        
-        # We need a separate direct update for the JSON 'stages' field since crude.update_pipeline_job doesn't take it
+
         from sqlalchemy import update as sqla_update
         from app.db.models import PipelineJob
         await db.execute(
@@ -98,6 +105,7 @@ async def _update_stage(job_id: str, stage_idx: int, *, status: str, progress: i
             .values(stages=stages, updated_at=datetime.now(timezone.utc))
         )
         await db.commit()
+        return False
 
 
 # ── Schemas ───────────────────────────────────────────────────────────────────
@@ -668,33 +676,46 @@ async def _stage_ppo_finetune(job_id: str, stock_ids: list[int], pretrained_path
             msg = ""
             if info.get("ep_rew_mean") is not None:
                 msg = f"Step {step:,} | Reward {info['ep_rew_mean']:.4f}"
-            # Call async _update_stage thread-safely; log failures rather than silently dropping
+            # Block briefly so we can act on the circuit-breaker return value.
             future = asyncio.run_coroutine_threadsafe(
                 _update_stage(job_id, 3, status="running", progress=pct, message=msg), loop
             )
-            future.add_done_callback(
-                lambda f: f.exception() and logger.error("Progress update failed: %s", f.exception())
-            )
+            try:
+                is_cancelled = future.result(timeout=5.0)
+                if is_cancelled:
+                    # Raise so Stable-Baselines3 callback machinery propagates
+                    # the exception and terminates the training thread immediately.
+                    raise InterruptedError("Pipeline cancelled by user.")
+            except InterruptedError:
+                raise
+            except Exception as exc:
+                logger.error("Progress update failed: %s", exc)
 
     from app.ml.rl_trainer import train_rl_model
 
-    result: dict = await loop.run_in_executor(
-        _PIPELINE_EXECUTOR,
-        lambda: train_rl_model(
-            multi_ohlcv_dfs=multi_dfs,
-            algorithm=algorithm,
-            hyperparams=hyperparams,
-            total_timesteps=total_timesteps,
-            min_quality=0.0,
-            regime_ids=None,
-            reward_function="risk_adjusted_pnl",
-            seq_len=15,
-            model_name=f"Pipeline_{algorithm}_{job_id[:8]}",
-            on_progress=_on_progress,
-            device="auto",
-            pretrained_model_path=pretrained_path,
-        ),
-    )
+    try:
+        result: dict = await loop.run_in_executor(
+            _PIPELINE_EXECUTOR,
+            lambda: train_rl_model(
+                multi_ohlcv_dfs=multi_dfs,
+                algorithm=algorithm,
+                hyperparams=hyperparams,
+                total_timesteps=total_timesteps,
+                min_quality=0.0,
+                regime_ids=None,
+                reward_function="risk_adjusted_pnl",
+                seq_len=15,
+                model_name=f"Pipeline_{algorithm}_{job_id[:8]}",
+                on_progress=_on_progress,
+                device="auto",
+                pretrained_model_path=pretrained_path,
+            ),
+        )
+    except (InterruptedError, asyncio.CancelledError):
+        # Circuit breaker fired from _on_progress — the job was cancelled while
+        # PPO was training. Propagate as CancelledError so _run_pipeline's cancel
+        # handler cleans up properly instead of marking the job as "failed".
+        raise asyncio.CancelledError()
 
     # Persist training result to DB
     async with async_session_factory() as db:
@@ -931,21 +952,25 @@ async def _stage_backtest(job_id: str, rl_model_id: int, knn_model_id: int | Non
 
             date_col = "date" if "date" in df.columns else None
             all_dates = list(df[date_col]) if date_col else list(df.index)
-            target_date_set = set(d for d in all_dates if start_d <= (d.date() if hasattr(d, "date") else d) <= end_d)
+            # Force strict date objects — DB may return strings or Timestamps
+            target_date_set = set(
+                pd.to_datetime(d).date() for d in all_dates
+                if start_d <= pd.to_datetime(d).date() <= end_d
+            )
 
             predictions: list[dict] = []
             close_arr: list[float] = []
             async with async_session_factory() as db:
                 ohlcv_rows = await _crud.get_ohlcv(db, sid, "day", start_d, end_d)
 
-            ohlcv_map = {r.date: float(r.close) for r in ohlcv_rows}
+            # Force strict date objects on the map keys as well
+            ohlcv_map = {pd.to_datetime(r.date).date(): float(r.close) for r in ohlcv_rows}
 
             for p_idx, p in enumerate(preds_list):
                 date_idx = p_idx + seq_len - 1
                 if date_idx >= len(all_dates):
                     break
-                raw_d = all_dates[date_idx]
-                d = raw_d.date() if hasattr(raw_d, "date") else raw_d
+                d = pd.to_datetime(all_dates[date_idx]).date()
                 if d not in target_date_set:
                     continue
                 raw_action = p["action"]
