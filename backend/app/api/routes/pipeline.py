@@ -229,14 +229,15 @@ async def _stage_data_sync(job_id: str, stock_ids: list[int], symbols: list[str]
     total = len(stock_ids)
     synced = 0
 
-    async with async_session_factory() as db:
-        for i, stock_id in enumerate(stock_ids):
-            sym = symbols[i] if i < len(symbols) else f"#{stock_id}"
-            pct = int(i / total * 90)
-            await _update_stage(job_id, 0, status="running", progress=pct, message=f"Syncing & Classifying {sym}…")
+    # FIX: Moved db session INSIDE the loop to isolate transactions
+    for i, stock_id in enumerate(stock_ids):
+        sym = symbols[i] if i < len(symbols) else f"#{stock_id}"
+        pct = int(i / total * 90)
+        await _update_stage(job_id, 0, status="running", progress=pct, message=f"Syncing & Classifying {sym}…")
+        
+        async with async_session_factory() as db:
             try:
-                # Use sync_and_compute to ensure indicators are calculated immediately
-                # so RL training in Stage 3 doesn't crash or fall back to slow compute.
+                # Compute and commit immediately per stock
                 res = await data_service.sync_and_compute(db, stock_id, interval="day")
                 if res.get("ohlcv_synced", 0) >= 0:
                     synced += 1
@@ -278,20 +279,12 @@ async def _stage_cql_pretrain(job_id: str, stock_ids: list[int]) -> str | None:
         # Collect transitions for the first stock as the primary training stock
         primary_stock_id = stock_ids[0]
 
-        async with async_session_factory() as db:
-            from app.db import crud as _crud
-            ohlcv_rows = await _crud.get_ohlcv(db, primary_stock_id, "day")
-
-        import pandas as pd
-        df = pd.DataFrame([
-            {"date": r.date, "open": float(r.open), "high": float(r.high),
-             "low": float(r.low), "close": float(r.close),
-             "adj_close": float(r.adj_close if r.adj_close else r.close),
-             "volume": float(r.volume)}
-            for r in ohlcv_rows
-        ])
-
         await _update_stage(job_id, 1, status="running", progress=30, message="Collecting offline RL transitions…")
+ 
+        # FIX: Fetch full features (including regimes) instead of raw OHLCV
+        from app.core import data_service
+        async with async_session_factory() as db:
+            df = await data_service.get_stock_features(db, primary_stock_id, "day", normalize=False)
 
         def _run_cql():
             transitions = collect_offline_transitions(df)
@@ -342,10 +335,12 @@ async def _stage_bc_warmup(job_id: str, cql_path: str | None, stock_ids: list[in
 
         # Fetch data for the primary stock used in CQL
         primary_stock_id = stock_ids[0]
-        async with async_session_factory() as db:
-            ohlcv_rows = await _crud.get_ohlcv_as_dicts(db, primary_stock_id, "day")
         
-        df = pd.DataFrame(ohlcv_rows)
+        # FIX: Fetch full features (including regimes) instead of raw OHLCV
+        from app.core import data_service
+        async with async_session_factory() as db:
+            df = await data_service.get_stock_features(db, primary_stock_id, "day", normalize=False)
+            
         loop = asyncio.get_running_loop()
 
         await _update_stage(job_id, 2, status="running", progress=30, message="Running behavioral cloning pass…")
@@ -417,7 +412,8 @@ async def _stage_ppo_finetune(job_id: str, stock_ids: list[int], pretrained_path
 
     await _update_stage(job_id, 3, status="running", progress=5, message=f"RL model #{rl_model_id} created. Fetching data for {len(stock_ids)} stocks…")
 
-    # Fetch OHLCV for all stocks and build multi-stock dataset
+    # Fetch Features (OHLCV + Indicators + Regimes) for all stocks
+    from app.core import data_service
     import pandas as pd
     multi_dfs: list[pd.DataFrame] = []
     total_stocks = len(stock_ids)
@@ -426,16 +422,13 @@ async def _stage_ppo_finetune(job_id: str, stock_ids: list[int], pretrained_path
         sym = symbols[idx] if idx < len(symbols) else f"#{sid}"
         await _update_stage(job_id, 3, status="running", progress=int(5 + idx / total_stocks * 5),
                       message=f"Loading data for {sym} ({idx+1}/{total_stocks})…")
+        
+        # FIX: Use full features so PPO knows about the regimes!
         async with async_session_factory() as db:
-            rows = await _crud.get_ohlcv(db, sid, interval)
-        if rows:
-            multi_dfs.append(pd.DataFrame([
-                {"date": r.date, "open": float(r.open), "high": float(r.high),
-                 "low": float(r.low), "close": float(r.close),
-                 "adj_close": float(r.adj_close if r.adj_close else r.close),
-                 "volume": float(r.volume)}
-                for r in rows
-            ]))
+            df = await data_service.get_stock_features(db, sid, interval, normalize=False)
+            
+        if not df.empty:
+            multi_dfs.append(df)
         else:
             logger.warning("Pipeline PPO: no OHLCV data for stock #%d — skipping", sid)
 
