@@ -192,7 +192,7 @@ def train_rl_model(
                     sdf, min_quality=min_quality, regime_ids=regime_ids,
                 )
                 fd = prep_df[feat_cols].values.astype(np.float32)
-                cp = prep_df["adj_close"].fillna(prep_df["close"]).values.astype(np.float32)
+                cp = prep_df.get("adj_close", prep_df["close"]).fillna(prep_df["close"]).values.astype(np.float32)
                 stock_datasets.append((fd, cp))
             except Exception as exc:
                 logger.warning("Multi-stock prep: skipping a stock — %s", exc)
@@ -692,7 +692,7 @@ def hybrid_train(
 
     df, feature_cols = prepare_training_data(ohlcv_df, min_quality=min_quality)
     feature_data = df[feature_cols].values.astype(np.float32)
-    close_prices = df["adj_close"].fillna(df["close"]).values.astype(np.float32)
+    close_prices = df.get("adj_close", df["close"]).fillna(df["close"]).values.astype(np.float32)
 
     from trading_env import SwingTradingEnv
     from stable_baselines3 import PPO
