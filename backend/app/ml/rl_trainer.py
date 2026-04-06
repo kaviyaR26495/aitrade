@@ -216,7 +216,7 @@ def train_rl_model(
             ohlcv_df, min_quality=min_quality, regime_ids=regime_ids,
         )
         feature_data = prep_df[feature_cols].values.astype(np.float32)
-        close_prices = prep_df["adj_close"].fillna(prep_df["close"]).values.astype(np.float32)
+        close_prices = prep_df.get("adj_close", prep_df["close"]).fillna(prep_df["close"]).values.astype(np.float32)
         stock_datasets = [(feature_data, close_prices)]
         logger.info("Prepared %d rows with %d features for %s training", len(prep_df), len(feature_cols), algorithm)
 
@@ -407,7 +407,7 @@ def evaluate_rl_model(
     df, _ = prepare_training_data(ohlcv_df, min_quality=0.0)
 
     feature_data = df[feature_cols].values.astype(np.float32)
-    close_prices = df["adj_close"].fillna(df["close"]).values.astype(np.float32)
+    close_prices = df.get("adj_close", df["close"]).fillna(df["close"]).values.astype(np.float32)
     regime_ids_arr = df["regime_id"].values.astype(int) if "regime_id" in df.columns else None
 
     env = SwingTradingEnv(
@@ -823,7 +823,7 @@ def run_bc_warmup(
     # 3. Create dummy env for PPO init
     df, feature_cols = prepare_training_data(ohlcv_df, min_quality=min_quality)
     fd = df[feature_cols].values.astype(np.float32)
-    cp = df["adj_close"].fillna(df["close"]).values.astype(np.float32)
+    cp = df.get("adj_close", df["close"]).fillna(df["close"]).values.astype(np.float32)
     
     def _make_env():
         return Monitor(SwingTradingEnv(fd, cp, seq_len=seq_len, obs_mode="flat", reward_type=reward_function))

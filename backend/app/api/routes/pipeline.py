@@ -617,8 +617,8 @@ async def _stage_ppo_finetune(job_id: str, stock_ids: list[int], pretrained_path
     await _update_stage(job_id, 3, status="running", progress=5, message=f"RL model #{rl_model_id} created. Fetching data for {len(stock_ids)} stocks…")
 
     # Fetch raw OHLCV for all stocks — same pipeline as distillation so
-    # feature columns are consistent (no market-context extras from get_stock_features).
-    from app.db import crud as _crud_ppo
+    # Fetch Full Features (OHLCV + Regimes + Indicators) for all stocks
+    from app.core import data_service
     import pandas as pd
     multi_dfs: list[pd.DataFrame] = []
     total_stocks = len(stock_ids)
@@ -629,23 +629,17 @@ async def _stage_ppo_finetune(job_id: str, stock_ids: list[int], pretrained_path
                       message=f"Loading data for {sym} ({idx+1}/{total_stocks})…")
 
         async with async_session_factory() as db:
-            ohlcv_rows = await _crud_ppo.get_ohlcv(db, sid, interval)
+            # FIX: Fetch the exact same DB features used in CQL and BC
+            df = await data_service.get_stock_features(db, sid, interval, normalize=False)
 
-        if ohlcv_rows:
-            df = pd.DataFrame([
-                {
-                    "date": r.date, "open": float(r.open), "high": float(r.high),
-                    "low": float(r.low), "close": float(r.close), "volume": float(r.volume),
-                }
-                for r in ohlcv_rows
-            ])
+        if not df.empty:
             multi_dfs.append(df)
         else:
-            logger.warning("Pipeline PPO: no OHLCV data for stock #%d — skipping", sid)
+            logger.warning("Pipeline PPO: no feature data for stock #%d — skipping", sid)
 
     if not multi_dfs:
-        await _update_stage(job_id, 3, status="failed", progress=5, message="No OHLCV data found for any stock. Sync data first.")
-        raise RuntimeError("No OHLCV data for any stock in the universe")
+        await _update_stage(job_id, 3, status="failed", progress=5, message="No feature data found for any stock. Sync data first.")
+        raise RuntimeError("No feature data for any stock in the universe")
 
     await _update_stage(job_id, 3, status="running", progress=10,
                   message=f"Training {algorithm} across {len(multi_dfs)}/{total_stocks} stocks for {total_timesteps:,} steps…")
