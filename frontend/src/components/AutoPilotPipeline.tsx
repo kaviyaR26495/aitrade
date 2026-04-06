@@ -16,11 +16,11 @@
 import { useState, useCallback, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
-  Rocket, CheckCircle2, Loader2, AlertCircle, Circle,
-  ChevronRight, X, ExternalLink, RefreshCw, Layers,
+  Rocket, CheckCircle2, Loader2, AlertCircle,
+  ChevronRight, X, ExternalLink, RefreshCw, Layers, StopCircle, Trash2,
 } from 'lucide-react';
 import { useAppStore } from '../store/appStore';
-import { useStartPipeline, usePipelineStatus, useUniverse } from '../hooks/useApi';
+import { useStartPipeline, usePipelineStatus, useUniverse, useTerminatePipeline } from '../hooks/useApi';
 import { listUniverseStocks } from '../services/api';
 import type { PipelineStatus, PipelineStageStatus } from '../services/api';
 import { Button } from './ui';
@@ -74,6 +74,7 @@ function StageRow({
   isCurrent,
   isComplete,
   isFailed,
+  isCancelled,
   isPending,
 }: {
   index: number;
@@ -82,6 +83,7 @@ function StageRow({
   isCurrent: boolean;
   isComplete: boolean;
   isFailed: boolean;
+  isCancelled: boolean;
   isPending: boolean;
 }) {
   const progress = stage?.progress ?? 0;
@@ -98,6 +100,8 @@ function StageRow({
               ? 'bg-emerald-500/15 border-emerald-500 text-emerald-400'
               : isFailed
               ? 'bg-rose-500/15 border-rose-500 text-rose-400'
+              : isCancelled
+              ? 'bg-amber-500/15 border-amber-500 text-amber-400'
               : isCurrent
               ? 'bg-indigo-500/15 border-indigo-500 text-indigo-400'
               : isPending
@@ -110,6 +114,8 @@ function StageRow({
             <CheckCircle2 size={18} className="text-emerald-400" />
           ) : isFailed ? (
             <AlertCircle size={18} className="text-rose-400" />
+          ) : isCancelled ? (
+            <StopCircle size={18} className="text-amber-400" />
           ) : isCurrent ? (
             <Loader2 size={18} className="animate-spin text-indigo-400" />
           ) : (
@@ -139,6 +145,8 @@ function StageRow({
                 ? 'text-emerald-400'
                 : isFailed
                 ? 'text-rose-400'
+                : isCancelled
+                ? 'text-amber-400'
                 : isCurrent
                 ? 'text-[var(--text)]'
                 : 'text-[var(--text-muted)]'
@@ -154,6 +162,11 @@ function StageRow({
           {isFailed && (
             <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-rose-500/10 text-rose-400 font-semibold">
               Failed
+            </span>
+          )}
+          {isCancelled && (
+            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-500/10 text-amber-400 font-semibold">
+              Cancelled
             </span>
           )}
           {isCurrent && (
@@ -249,8 +262,10 @@ export default function AutoPilotPipeline() {
   } = useAppStore();
 
   const [startError, setStartError] = useState<string | null>(null);
+  const [confirmAction, setConfirmAction] = useState<'terminate' | 'purge' | null>(null);
 
   const startMutation = useStartPipeline();
+  const terminateMutation = useTerminatePipeline();
   const { data: statusData, isError: statusError } = usePipelineStatus(jobId);
   const { data: universe, isLoading: universeLoading } = useUniverse();
 
@@ -282,6 +297,7 @@ export default function AutoPilotPipeline() {
   const isComplete = statusData?.status === 'completed';
   const isFailed = statusData?.status === 'failed';
   const isQueued = statusData?.status === 'queued';
+  const isCancelled = statusData?.status === 'cancelled';
   const hasStarted = !!jobId;
 
   const currentStage = statusData?.current_stage ?? -1;
@@ -316,7 +332,54 @@ export default function AutoPilotPipeline() {
   const handleReset = useCallback(() => {
     setJobId(null);
     setStartError(null);
+    setConfirmAction(null);
   }, []);
+
+  const handleTerminate = useCallback(() => {
+    if (!jobId) return;
+    terminateMutation.mutate(
+      { jobId, purge: false },
+      {
+        onSuccess: () => {
+          setConfirmAction(null);
+          addNotification({ type: 'info', message: 'Pipeline termination requested.' });
+        },
+        onError: () => {
+          setConfirmAction(null);
+          addNotification({ type: 'error', message: 'Failed to terminate pipeline.' });
+        },
+      },
+    );
+  }, [jobId, terminateMutation, addNotification]);
+
+  const handlePurge = useCallback(() => {
+    if (!jobId) return;
+    terminateMutation.mutate(
+      { jobId, purge: true },
+      {
+        onSuccess: (result) => {
+          setConfirmAction(null);
+          const files = result.files_deleted?.length ?? 0;
+          const models =
+            (result.records_deleted?.rl_models ?? 0) +
+            (result.records_deleted?.knn_models ?? 0) +
+            (result.records_deleted?.lstm_models ?? 0);
+          addNotification({
+            type: 'success',
+            message: `Pipeline purged — ${models} model(s) and ${files} file(s) deleted.`,
+          });
+          setJobId(null);
+        },
+        onError: () => {
+          setConfirmAction(null);
+          addNotification({ type: 'error', message: 'Failed to purge pipeline data.' });
+        },
+      },
+    );
+  }, [jobId, terminateMutation, addNotification, setJobId]);
+
+  // Stop polling once cancelled
+  const isTerminal = isComplete || isFailed || isCancelled;
 
   // Build stage rows — merge backend data with local defs
   const stageRows = STAGE_DEFS.map((def, i) => {
@@ -329,6 +392,7 @@ export default function AutoPilotPipeline() {
       isCurrent: hasStarted && i === currentStage && (isRunning || isQueued),
       isComplete: stageStatus === 'completed',
       isFailed: stageStatus === 'failed',
+      isCancelled: stageStatus === 'cancelled',
       isPending: !hasStarted || stageStatus === 'pending',
     };
   });
@@ -429,17 +493,19 @@ export default function AutoPilotPipeline() {
               <CheckCircle2 size={16} className="text-emerald-400" />
             ) : isFailed ? (
               <AlertCircle size={16} className="text-rose-400" />
+            ) : isCancelled ? (
+              <StopCircle size={16} className="text-amber-400" />
             ) : (
               <Loader2 size={16} className="animate-spin text-indigo-400" />
             )}
-            <span className={`text-sm font-semibold ${isComplete ? 'text-emerald-400' : isFailed ? 'text-rose-400' : 'text-[var(--text)]'}`}>
-              {isComplete ? 'Pipeline complete!' : isFailed ? 'Pipeline failed' : isQueued ? 'Queued…' : 'Pipeline running…'}
+            <span className={`text-sm font-semibold ${isComplete ? 'text-emerald-400' : isFailed ? 'text-rose-400' : isCancelled ? 'text-amber-400' : 'text-[var(--text)]'}`}>
+              {isComplete ? 'Pipeline complete!' : isFailed ? 'Pipeline failed' : isCancelled ? 'Pipeline terminated' : isQueued ? 'Queued…' : 'Pipeline running…'}
             </span>
             <span className="text-xs text-[var(--text-dim)] font-mono">{jobId}</span>
           </div>
 
           <div className="flex items-center gap-2">
-            {(isComplete || isFailed) && (
+            {isTerminal && (
               <button
                 type="button"
                 onClick={handleReset}
@@ -449,6 +515,87 @@ export default function AutoPilotPipeline() {
                 Run again
               </button>
             )}
+            {/* Terminate button — stop a running pipeline */}
+            {(isRunning || isQueued) && confirmAction !== 'terminate' && confirmAction !== 'purge' && (
+              <button
+                type="button"
+                onClick={() => setConfirmAction('terminate')}
+                className="flex items-center gap-1.5 text-xs text-amber-400 hover:text-amber-300 transition-colors"
+              >
+                <StopCircle size={12} />
+                Terminate
+              </button>
+            )}
+            {/* Delete All Data button — purge everything */}
+            {(isTerminal || isRunning || isQueued) && confirmAction !== 'purge' && confirmAction !== 'terminate' && (
+              <button
+                type="button"
+                onClick={() => setConfirmAction('purge')}
+                className="flex items-center gap-1.5 text-xs text-rose-400 hover:text-rose-300 transition-colors"
+              >
+                <Trash2 size={12} />
+                Delete All Data
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ── Confirmation dialogs ──────────────────────────────────── */}
+      {confirmAction === 'terminate' && (
+        <div className="flex items-start gap-3 px-4 py-3 rounded-[var(--radius)] bg-amber-500/10 border border-amber-500/30 text-sm text-amber-300">
+          <StopCircle size={15} className="mt-0.5 shrink-0 text-amber-400" />
+          <div className="flex-1">
+            <p className="font-semibold">Terminate the running pipeline?</p>
+            <p className="text-xs text-amber-200/70 mt-0.5">
+              The pipeline will stop at the next checkpoint. DB records and model files created so far will be kept.
+            </p>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={handleTerminate}
+              disabled={terminateMutation.isPending}
+              className="text-xs px-3 py-1.5 rounded bg-amber-500 hover:bg-amber-400 text-black font-semibold transition-colors disabled:opacity-50"
+            >
+              {terminateMutation.isPending ? 'Terminating…' : 'Yes, terminate'}
+            </button>
+            <button
+              type="button"
+              onClick={() => setConfirmAction(null)}
+              className="text-xs px-2 py-1.5 rounded hover:bg-[var(--bg-hover)] transition-colors"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {confirmAction === 'purge' && (
+        <div className="flex items-start gap-3 px-4 py-3 rounded-[var(--radius)] bg-rose-500/10 border border-rose-500/30 text-sm text-rose-300">
+          <Trash2 size={15} className="mt-0.5 shrink-0 text-rose-400" />
+          <div className="flex-1">
+            <p className="font-semibold">Delete all pipeline data?</p>
+            <p className="text-xs text-rose-200/70 mt-0.5">
+              This will <strong>permanently delete</strong> all RL, KNN and LSTM model files, backtest results, and DB records created by this pipeline session. This cannot be undone.
+            </p>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={handlePurge}
+              disabled={terminateMutation.isPending}
+              className="text-xs px-3 py-1.5 rounded bg-rose-500 hover:bg-rose-400 text-white font-semibold transition-colors disabled:opacity-50"
+            >
+              {terminateMutation.isPending ? 'Deleting…' : 'Yes, delete everything'}
+            </button>
+            <button
+              type="button"
+              onClick={() => setConfirmAction(null)}
+              className="text-xs px-2 py-1.5 rounded hover:bg-[var(--bg-hover)] transition-colors"
+            >
+              Cancel
+            </button>
           </div>
         </div>
       )}
@@ -461,6 +608,8 @@ export default function AutoPilotPipeline() {
               ? 'border-emerald-500/30 bg-emerald-500/5'
               : isFailed
               ? 'border-rose-500/30 bg-rose-500/5'
+              : isCancelled
+              ? 'border-amber-500/30 bg-amber-500/5'
               : hasStarted
               ? 'border-indigo-500/30 bg-indigo-500/5'
               : 'border-[var(--border)] bg-[var(--bg-card)]/40'
@@ -468,8 +617,16 @@ export default function AutoPilotPipeline() {
         >
           {statusError && (
             <div className="mb-4 flex items-center gap-2 text-xs text-rose-400 bg-rose-500/10 border border-rose-500/20 rounded px-3 py-2">
-              <AlertCircle size={12} />
-              <span>Status polling error — retrying automatically…</span>
+              <AlertCircle size={12} className="shrink-0" />
+              <span className="flex-1">Could not reach backend — polling stopped.</span>
+              <button
+                type="button"
+                onClick={handleReset}
+                className="ml-2 shrink-0 underline hover:text-rose-300 transition-colors"
+                title="Dismiss and clear this pipeline session"
+              >
+                Dismiss
+              </button>
             </div>
           )}
 
@@ -483,6 +640,7 @@ export default function AutoPilotPipeline() {
                 isCurrent={row.isCurrent}
                 isComplete={row.isComplete}
                 isFailed={row.isFailed}
+                isCancelled={row.isCancelled}
                 isPending={row.isPending}
               />
             ))}

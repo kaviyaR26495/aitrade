@@ -352,7 +352,7 @@ def train_rl_model(
         "min_quality": min_quality,
         "regime_ids": regime_ids,
         "reward_function": reward_function,
-        "data_rows": len(df),
+        "data_rows": len(prep_df),
         "training_metrics": progress_cb.metrics_log,
         "best_reward": best_model_cb.best_reward,
     }
@@ -374,7 +374,7 @@ def train_rl_model(
         "total_timesteps": total_timesteps,
         "final_reward": final_reward,
         "best_reward": best_model_cb.best_reward,
-        "data_rows": len(df),
+        "data_rows": len(prep_df),
         "num_features": len(feature_cols),
         "training_log": progress_cb.metrics_log,
     }

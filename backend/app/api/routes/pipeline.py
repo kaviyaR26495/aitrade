@@ -1,7 +1,8 @@
 """One-Click Universal Training Pipeline route.
 
-POST /pipeline/start   — kicks off a multi-stage background pipeline
-GET  /pipeline/status/{job_id} — poll for progress
+POST /pipeline/start              — kicks off a multi-stage background pipeline
+GET  /pipeline/status/{job_id}    — poll for progress
+DELETE /pipeline/{job_id}         — terminate + optionally purge all created data/files
 
 Pipeline stages:
   0  data_sync        — Sync OHLCV + compute indicators for every symbol
@@ -31,6 +32,15 @@ from app.db.database import async_session_factory
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+# ── Cancellation registry ─────────────────────────────────────────────────────
+# Jobs whose job_ids are present here will abort at the next stage checkpoint.
+_CANCELLED_JOBS: set[str] = set()
+
+
+def _is_cancelled(job_id: str) -> bool:
+    return job_id in _CANCELLED_JOBS
+
 
 # ── Thread pool shared with models router (limit concurrent heavy jobs)
 _PIPELINE_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pipeline")
@@ -76,7 +86,7 @@ async def _update_stage(job_id: str, stage_idx: int, *, status: str, progress: i
             db,
             job_id,
             status="running" if status in ["running", "pending"] else None, # status usually managed by runner
-            current_stage=str(stage_idx),
+            current_stage=stages[stage_idx]["name"] if stage_idx < len(stages) else str(stage_idx),
         )
         
         # We need a separate direct update for the JSON 'stages' field since crude.update_pipeline_job doesn't take it
@@ -124,17 +134,182 @@ async def get_pipeline_status(job_id: str):
     if not job:
         raise HTTPException(status_code=404, detail="Pipeline job not found")
     
-    # Return in expected frontend format
+    # current_stage may be stored as a numeric string ("3") or a stage name
+    # ("ppo_finetune") depending on which path wrote it — handle both.
+    def _resolve_stage_index(val: str | None) -> int:
+        if val is None:
+            return 0
+        try:
+            return int(val)
+        except ValueError:
+            try:
+                return _STAGE_NAMES.index(val)
+            except ValueError:
+                return 0
+
     return {
         "job_id": job.id,
         "symbols": job.symbols,
         "status": job.status,
-        "current_stage": int(job.current_stage) if job.current_stage is not None else 0,
+        "current_stage": _resolve_stage_index(job.current_stage),
         "stages": job.stages,
         "created_at": job.created_at.isoformat(),
         "updated_at": job.updated_at.isoformat(),
         "error": job.error,
     }
+
+
+@router.delete("/{job_id}")
+async def terminate_pipeline(job_id: str, purge: bool = False):
+    """Terminate a running pipeline and optionally purge all data/files it created.
+
+    - ``purge=false`` (default): cancel the running pipeline, keep DB records + files.
+    - ``purge=true``: cancel (if running) **and** delete all DB records and model files
+      that were created by this pipeline session.
+    """
+    async with async_session_factory() as db:
+        job = await crud.get_pipeline_job(db, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Pipeline job not found")
+
+    # Signal the background coroutine to stop at the next stage checkpoint
+    if job.status in ("running", "queued"):
+        _CANCELLED_JOBS.add(job_id)
+
+    if purge:
+        deleted = await _purge_pipeline_data(job_id)
+        return {"job_id": job_id, "status": "purged", **deleted}
+
+    return {"job_id": job_id, "status": "terminating"}
+
+
+async def _purge_pipeline_data(job_id: str) -> dict:
+    """Delete all DB records and disk files created by a pipeline session.
+
+    Cleans up (in FK-safe order):
+      backtest_results → knn/lstm models (+ files) → golden_patterns →
+      rl_training_runs → rl_models (+ files) → cql/bc files → pipeline_job
+    """
+    from sqlalchemy import delete as sqla_delete, select as sqla_select
+    from app.db.models import (
+        RLModel, RLTrainingRun, GoldenPattern,
+        KNNModel, LSTMModel, BacktestResult, PipelineJob,
+    )
+
+    files_deleted: list[str] = []
+    records_deleted: dict[str, int] = {}
+
+    def _remove_file(path: str | None) -> None:
+        if not path:
+            return
+        p = Path(path)
+        if p.exists():
+            p.unlink(missing_ok=True)
+            files_deleted.append(str(p.name))
+            # Remove sibling norm-params file if present (KNN pattern)
+            norm = p.parent / (p.stem + "_norm_params.pkl")
+            if norm.exists():
+                norm.unlink(missing_ok=True)
+                files_deleted.append(str(norm.name))
+
+    async with async_session_factory() as db:
+        # ── Find RL models created by this pipeline ───────────────────────
+        # Pipeline tags models via training_config.pipeline_job_id
+        rl_result = await db.execute(sqla_select(RLModel))
+        all_rl = rl_result.scalars().all()
+        pipeline_rl_ids = [
+            m.id for m in all_rl
+            if (m.training_config or {}).get("pipeline_job_id") == job_id
+        ]
+
+        # ── Find KNN / LSTM models built from those RL models ─────────────
+        knn_models: list[KNNModel] = []
+        lstm_models: list[LSTMModel] = []
+        if pipeline_rl_ids:
+            knn_res = await db.execute(
+                sqla_select(KNNModel).where(KNNModel.source_rl_model_id.in_(pipeline_rl_ids))
+            )
+            knn_models = list(knn_res.scalars().all())
+            lstm_res = await db.execute(
+                sqla_select(LSTMModel).where(LSTMModel.source_rl_model_id.in_(pipeline_rl_ids))
+            )
+            lstm_models = list(lstm_res.scalars().all())
+
+        knn_ids = [m.id for m in knn_models]
+        lstm_ids = [m.id for m in lstm_models]
+
+        # ── Delete backtest results tied to these models ───────────────────
+        bt_count = 0
+        if knn_ids:
+            r = await db.execute(
+                sqla_delete(BacktestResult).where(
+                    BacktestResult.model_id.in_(knn_ids),
+                    BacktestResult.model_type == "ensemble",
+                )
+            )
+            bt_count += r.rowcount  # type: ignore[attr-defined]
+        if lstm_ids:
+            r = await db.execute(
+                sqla_delete(BacktestResult).where(
+                    BacktestResult.model_id.in_(lstm_ids),
+                )
+            )
+            bt_count += r.rowcount  # type: ignore[attr-defined]
+        if pipeline_rl_ids:
+            r = await db.execute(
+                sqla_delete(BacktestResult).where(
+                    BacktestResult.model_id.in_(pipeline_rl_ids),
+                    BacktestResult.model_type == "rl",
+                )
+            )
+            bt_count += r.rowcount  # type: ignore[attr-defined]
+        records_deleted["backtest_results"] = bt_count
+
+        # ── Delete KNN / LSTM model files + DB rows ───────────────────────
+        for m in knn_models:
+            _remove_file(m.model_path)
+            _remove_file(m.norm_params_path)
+        for m in lstm_models:
+            _remove_file(m.model_path)
+
+        if knn_ids:
+            await db.execute(sqla_delete(KNNModel).where(KNNModel.id.in_(knn_ids)))
+        if lstm_ids:
+            await db.execute(sqla_delete(LSTMModel).where(LSTMModel.id.in_(lstm_ids)))
+        records_deleted["knn_models"] = len(knn_ids)
+        records_deleted["lstm_models"] = len(lstm_ids)
+
+        # ── Delete RL models and their dependents ─────────────────────────
+        if pipeline_rl_ids:
+            await db.execute(sqla_delete(GoldenPattern).where(GoldenPattern.rl_model_id.in_(pipeline_rl_ids)))
+            await db.execute(sqla_delete(RLTrainingRun).where(RLTrainingRun.rl_model_id.in_(pipeline_rl_ids)))
+            for m in all_rl:
+                if m.id in pipeline_rl_ids:
+                    _remove_file(m.model_path)
+            await db.execute(sqla_delete(RLModel).where(RLModel.id.in_(pipeline_rl_ids)))
+        records_deleted["rl_models"] = len(pipeline_rl_ids)
+
+        # ── Delete CQL / BC warmup files (named after job_id prefix) ──────
+        short_id = job_id[:8]
+        for candidate_dir in [settings.MODEL_DIR, Path(settings.MODEL_DIR) / "rl"]:
+            candidate_dir = Path(candidate_dir)
+            if candidate_dir.exists():
+                for f in candidate_dir.glob(f"*pipeline_cql_{short_id}*"):
+                    f.unlink(missing_ok=True)
+                    files_deleted.append(f.name)
+                for f in candidate_dir.glob(f"*bc_warmup*{short_id}*"):
+                    f.unlink(missing_ok=True)
+                    files_deleted.append(f.name)
+
+        # ── Finally delete the pipeline_job record itself ─────────────────
+        await db.execute(sqla_delete(PipelineJob).where(PipelineJob.id == job_id))
+        await db.commit()
+
+    logger.info(
+        "Pipeline %s purged — records: %s, files: %s",
+        job_id, records_deleted, files_deleted,
+    )
+    return {"records_deleted": records_deleted, "files_deleted": files_deleted}
 
 
 # ── Background pipeline runner ─────────────────────────────────────────────────
@@ -153,27 +328,56 @@ async def _run_pipeline(job_id: str, symbols: list[str]) -> None:
             )
 
         # Stage 0 — Data Sync
+        if _is_cancelled(job_id):
+            raise asyncio.CancelledError()
         await _stage_data_sync(job_id, stock_ids, symbols)
 
         # Stage 1 — CQL Pre-training
+        if _is_cancelled(job_id):
+            raise asyncio.CancelledError()
         cql_path = await _stage_cql_pretrain(job_id, stock_ids)
 
         # Stage 2 — BC Warmup
+        if _is_cancelled(job_id):
+            raise asyncio.CancelledError()
         warmup_path = await _stage_bc_warmup(job_id, cql_path, stock_ids)
 
         # Stage 3 — PPO Fine-tuning
+        if _is_cancelled(job_id):
+            raise asyncio.CancelledError()
         rl_model_id = await _stage_ppo_finetune(job_id, stock_ids, warmup_path)
 
         # Stage 4 — Ensemble Distillation
+        if _is_cancelled(job_id):
+            raise asyncio.CancelledError()
         knn_model_id, lstm_model_id = await _stage_ensemble_distill(job_id, rl_model_id, stock_ids)
 
         # Stage 5 — Backtest
+        if _is_cancelled(job_id):
+            raise asyncio.CancelledError()
         await _stage_backtest(job_id, rl_model_id, knn_model_id, lstm_model_id, stock_ids)
 
         # Stage 6 — Ready
         await _update_stage(job_id, 6, status="completed", progress=100, message="All models ready for live trading.")
         async with async_session_factory() as db:
             await crud.update_pipeline_job(db, job_id, status="completed")
+
+    except asyncio.CancelledError:
+        logger.info("Pipeline %s was cancelled", job_id)
+        _CANCELLED_JOBS.discard(job_id)
+        async with async_session_factory() as db:
+            job_rec = await crud.get_pipeline_job(db, job_id)
+            if job_rec:
+                stages = list(job_rec.stages or [])
+                for stage in stages:
+                    if stage["status"] in ("running", "pending"):
+                        stage["status"] = "cancelled"
+                        stage["message"] = "Terminated by user."
+                await crud.update_pipeline_job(db, job_id, status="cancelled", error="Terminated by user.")
+                from sqlalchemy import update as sqla_update
+                from app.db.models import PipelineJob
+                await db.execute(sqla_update(PipelineJob).where(PipelineJob.id == job_id).values(stages=stages))
+                await db.commit()
 
     except Exception as exc:
         logger.exception("Pipeline %s failed", job_id)
@@ -412,8 +616,9 @@ async def _stage_ppo_finetune(job_id: str, stock_ids: list[int], pretrained_path
 
     await _update_stage(job_id, 3, status="running", progress=5, message=f"RL model #{rl_model_id} created. Fetching data for {len(stock_ids)} stocks…")
 
-    # Fetch Features (OHLCV + Indicators + Regimes) for all stocks
-    from app.core import data_service
+    # Fetch raw OHLCV for all stocks — same pipeline as distillation so
+    # feature columns are consistent (no market-context extras from get_stock_features).
+    from app.db import crud as _crud_ppo
     import pandas as pd
     multi_dfs: list[pd.DataFrame] = []
     total_stocks = len(stock_ids)
@@ -422,12 +627,18 @@ async def _stage_ppo_finetune(job_id: str, stock_ids: list[int], pretrained_path
         sym = symbols[idx] if idx < len(symbols) else f"#{sid}"
         await _update_stage(job_id, 3, status="running", progress=int(5 + idx / total_stocks * 5),
                       message=f"Loading data for {sym} ({idx+1}/{total_stocks})…")
-        
-        # FIX: Use full features so PPO knows about the regimes!
+
         async with async_session_factory() as db:
-            df = await data_service.get_stock_features(db, sid, interval, normalize=False)
-            
-        if not df.empty:
+            ohlcv_rows = await _crud_ppo.get_ohlcv(db, sid, interval)
+
+        if ohlcv_rows:
+            df = pd.DataFrame([
+                {
+                    "date": r.date, "open": float(r.open), "high": float(r.high),
+                    "low": float(r.low), "close": float(r.close), "volume": float(r.volume),
+                }
+                for r in ohlcv_rows
+            ])
             multi_dfs.append(df)
         else:
             logger.warning("Pipeline PPO: no OHLCV data for stock #%d — skipping", sid)

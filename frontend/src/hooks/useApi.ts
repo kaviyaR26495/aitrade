@@ -392,7 +392,7 @@ export const useGoldenPatterns = (rl_model_id?: number) =>
 
 // ── Pipeline hooks ─────────────────────────────────────────────────────────
 
-const TERMINAL_PIPELINE_STATUSES = new Set(['completed', 'failed']);
+const TERMINAL_PIPELINE_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 
 export const useStartPipeline = () => {
   const qc = useQueryClient();
@@ -410,11 +410,25 @@ export const usePipelineStatus = (jobId: string | null) =>
     queryKey: ['pipeline-status', jobId],
     queryFn: () => api.getPipelineStatus(jobId!).then(r => r.data),
     enabled: !!jobId,
+    retry: 1,
     refetchInterval: (query) => {
+      // Stop polling on any query error (e.g. 404 after purge, network failure)
+      if (query.state.status === 'error') return false;
       const data = query.state.data as PipelineStatus | undefined;
       if (!data) return 2000;
       if (TERMINAL_PIPELINE_STATUSES.has(data.status)) return false;
       return 2000;
     },
   });
+
+export const useTerminatePipeline = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ jobId, purge }: { jobId: string; purge: boolean }) =>
+      api.terminatePipeline(jobId, purge).then(r => r.data),
+    onSuccess: (_data, { jobId }) => {
+      qc.invalidateQueries({ queryKey: ['pipeline-status', jobId] });
+    },
+  });
+};
 

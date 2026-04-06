@@ -188,8 +188,8 @@ export interface PipelineStageStatus {
   stage: number;
   /** camelCase name for the stage */
   name: string;
-  /** 'pending' | 'running' | 'completed' | 'failed' */
-  status: 'pending' | 'running' | 'completed' | 'failed';
+  /** 'pending' | 'running' | 'completed' | 'failed' | 'cancelled' */
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
   /** 0–100 progress within the running stage */
   progress: number;
   message?: string;
@@ -198,8 +198,8 @@ export interface PipelineStageStatus {
 export interface PipelineStatus {
   job_id: string;
   symbols: string[];
-  /** Overall pipeline status: 'queued' | 'running' | 'completed' | 'failed' */
-  status: 'queued' | 'running' | 'completed' | 'failed';
+  /** Overall pipeline status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' */
+  status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
   /** 0-indexed index of the currently active stage */
   current_stage: number;
   stages: PipelineStageStatus[];
@@ -208,8 +208,18 @@ export interface PipelineStatus {
   error?: string;
 }
 
+export interface PipelineTerminateResult {
+  job_id: string;
+  status: 'terminating' | 'purged';
+  records_deleted?: Record<string, number>;
+  files_deleted?: string[];
+}
+
 export const startPipeline = (req: PipelineRequest) =>
   api.post<{ job_id: string }>('/pipeline/start', req);
 
 export const getPipelineStatus = (jobId: string) =>
   api.get<PipelineStatus>(`/pipeline/status/${jobId}`);
+
+export const terminatePipeline = (jobId: string, purge = false) =>
+  api.delete<PipelineTerminateResult>(`/pipeline/${jobId}`, { params: { purge } });

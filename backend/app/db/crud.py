@@ -843,7 +843,7 @@ async def create_pipeline_job(
         symbols=symbols,
         stages=stages,
         status=status,
-        current_stage=stages[0] if stages else None,
+        current_stage=stages[0]["name"] if (stages and isinstance(stages[0], dict)) else str(stages[0]) if stages else None,
     )
     db.add(job)
     await db.commit()
