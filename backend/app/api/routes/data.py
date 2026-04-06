@@ -376,12 +376,65 @@ async def set_universe(
     """Update the stock universe config."""
     import json
     await crud.set_setting(db, "stock_universe", json.dumps(cfg.model_dump()))
+
+    # NEW: Ensure all custom symbols are actually in the local DB.  If missing,
+    # fetch the full Zerodha instrument list and import them automatically.
+    # Eliminates the "Saved in Selector, but missing in Model Studio" desync.
+    if cfg.custom_symbols:
+        await _ensure_custom_stocks_imported(db, cfg.custom_symbols)
+
     count = await _resolve_universe_count(db, cfg)
     return UniverseOut(
         category=cfg.category,
         custom_symbols=cfg.custom_symbols,
         resolved_count=count,
     )
+
+
+async def _ensure_custom_stocks_imported(db: AsyncSession, symbols: list[str]) -> None:
+    from app.db.models import Stock
+    from sqlalchemy import select as sa_select
+
+    # 1. Identify which symbols are missing from our DB
+    clean_syms = {s.strip().upper() for s in symbols if s.strip()}
+    if not clean_syms:
+        return
+
+    result = await db.execute(
+        sa_select(Stock.symbol).where(Stock.symbol.in_(clean_syms))
+    )
+    existing = {s.upper() for s in result.scalars().all()}
+    missing = clean_syms - existing
+
+    if not missing:
+        return
+
+    # 2. Fetch full instrument list from Zerodha to resolve missing metadata
+    logger.info("Importing %d missing stocks from Zerodha: %s", len(missing), missing)
+    try:
+        instruments = _zerodha.get_instruments("NSE")
+    except Exception as exc:
+        logger.error("Failed to fetch Zerodha instruments for auto-import: %s", exc)
+        return
+
+    # 3. Filter for just the missing ones
+    to_import = []
+    for inst in instruments:
+        sym = str(inst["tradingsymbol"]).upper()
+        if sym in missing and inst.get("instrument_type") == "EQ":
+            to_import.append({
+                "symbol": sym,
+                "exchange": str(inst.get("exchange") or "NSE"),
+                "kite_id": int(inst["instrument_token"]),
+                "tick_size": float(inst["tick_size"]) if inst.get("tick_size") else None,
+                "lot_size": int(inst["lot_size"]) if inst.get("lot_size") else 1,
+                "is_active": True,
+            })
+
+    # 4. Bulk upsert into stocks_list
+    if to_import:
+        await crud.bulk_upsert_stocks(db, to_import)
+        logger.info("Successfully imported %d stocks", len(to_import))
 
 
 @router.get("/stocks/universe", response_model=list[StockOut])

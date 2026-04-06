@@ -128,7 +128,7 @@ def _clear_gpu_memory() -> None:
 
 
 def train_rl_model(
-    ohlcv_df: pd.DataFrame,
+    ohlcv_df: pd.DataFrame | None = None,
     algorithm: str = "PPO",
     hyperparams: dict | None = None,
     total_timesteps: int = 100_000,
@@ -143,9 +143,14 @@ def train_rl_model(
     stop_event=None,
     pause_event=None,
     pretrained_model_path: str | None = None,
+    multi_ohlcv_dfs: list[pd.DataFrame] | None = None,
 ) -> dict[str, Any]:
     """
     Train an RL model on quality-filtered, regime-tagged data.
+
+    Pass ``multi_ohlcv_dfs`` for multi-stock training: one environment is
+    created per stock (cycling when there are more stocks than parallel envs).
+    Pass ``ohlcv_df`` for traditional single-stock training.
 
     Returns dict with model path, metrics, and training info.
     """
@@ -156,45 +161,60 @@ def train_rl_model(
     obs_mode = get_obs_mode(algorithm)
     continuous = is_continuous(algorithm)
 
-    # Prepare data
-    df, feature_cols = prepare_training_data(
-        ohlcv_df,
-        min_quality=min_quality,
-        regime_ids=regime_ids,
-    )
-
-    logger.info(
-        "Prepared %d rows with %d features for %s training",
-        len(df), len(feature_cols), algorithm,
-    )
-
-    # Extract feature matrix
-    feature_data = df[feature_cols].values.astype(np.float32)
-
-    # Raw price data for env reward calculation — use split-adjusted prices so
-    # corporate actions (splits, bonuses) don't appear as crashes in the reward signal.
-    # Live execution always uses raw LTP from Kite, so the border is enforced here.
-    close_prices = df["adj_close"].fillna(df["close"]).values.astype(np.float32)
-    regime_ids_arr = df["regime_id"].values.astype(int) if "regime_id" in df.columns else None
-
     # ── CUDA optimisations ────────────────────────────────────────────
     if device == "cuda":
         import torch
-        # cudnn autotuner finds the fastest conv kernels for the fixed input size
         torch.backends.cudnn.benchmark = True
-        # Keep CPU threads lean — GPU handles the heavy lifting
         torch.set_num_threads(2)
         logger.info("cudnn.benchmark enabled.")
 
     # ── Number of parallel envs ───────────────────────────────────────
-    # More envs → more rollout data per step → GPU stays busy during policy updates.
-    # Use SubprocVecEnv when we have CUDA (true parallelism) else DummyVecEnv.
     import multiprocessing
     if device == "cuda":
-        # 4 or half of physical cores, whichever is less (cap at 8 to avoid memory pressure)
         n_envs = min(max(4, multiprocessing.cpu_count() // 2), 8)
     else:
         n_envs = 2
+
+    # ── Prepare per-stock data ────────────────────────────────────────
+    # multi_ohlcv_dfs: each df is prepared independently so indicators
+    # don't bleed across stock boundaries.
+    if multi_ohlcv_dfs:
+        stock_datasets: list[tuple[np.ndarray, np.ndarray]] = []
+        for sdf in multi_ohlcv_dfs:
+            try:
+                prep_df, feat_cols = prepare_training_data(
+                    sdf, min_quality=min_quality, regime_ids=regime_ids,
+                )
+                fd = prep_df[feat_cols].values.astype(np.float32)
+                cp = prep_df["adj_close"].fillna(prep_df["close"]).values.astype(np.float32)
+                stock_datasets.append((fd, cp))
+            except Exception as exc:
+                logger.warning("Multi-stock prep: skipping a stock — %s", exc)
+        if not stock_datasets:
+            raise ValueError("All stocks failed data preparation — cannot train")
+        # Use the first stock's feature_cols for shape reference
+        prep_df, feature_cols = prepare_training_data(
+            multi_ohlcv_dfs[0], min_quality=min_quality, regime_ids=regime_ids,
+        )
+        # feature_data / close_prices not used directly — envs use stock_datasets
+        feature_data = stock_datasets[0][0]
+        close_prices = stock_datasets[0][1]
+        logger.info(
+            "Multi-stock training: %d stocks prepared, %d features each, %d envs",
+            len(stock_datasets), feature_data.shape[1], n_envs,
+        )
+    else:
+        if ohlcv_df is None:
+            raise ValueError("Either ohlcv_df or multi_ohlcv_dfs must be provided")
+        prep_df, feature_cols = prepare_training_data(
+            ohlcv_df, min_quality=min_quality, regime_ids=regime_ids,
+        )
+        feature_data = prep_df[feature_cols].values.astype(np.float32)
+        close_prices = prep_df["adj_close"].fillna(prep_df["close"]).values.astype(np.float32)
+        stock_datasets = [(feature_data, close_prices)]
+        logger.info("Prepared %d rows with %d features for %s training", len(prep_df), len(feature_cols), algorithm)
+
+    regime_ids_arr = prep_df["regime_id"].values.astype(int) if "regime_id" in prep_df.columns else None
 
     logger.info("Creating %d parallel envs for %s training on %s", n_envs, algorithm, device)
 
@@ -203,11 +223,12 @@ def train_rl_model(
     from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv
     from stable_baselines3.common.monitor import Monitor
 
-    def _make_env():
+    def _make_env(idx: int):
+        fd, cp = stock_datasets[idx % len(stock_datasets)]
         def _init():
             env = SwingTradingEnv(
-                data=feature_data,
-                prices=close_prices,
+                data=fd,
+                prices=cp,
                 seq_len=seq_len,
                 obs_mode=obs_mode,
                 reward_type=reward_function,
@@ -217,7 +238,7 @@ def train_rl_model(
         return _init
 
     VecEnvClass = SubprocVecEnv if device == "cuda" else DummyVecEnv
-    env = VecEnvClass([_make_env() for _ in range(n_envs)])
+    env = VecEnvClass([_make_env(i) for i in range(n_envs)])
 
     # Merge hyperparams (defaults + user overrides)
     params = get_default_hyperparams(algorithm)
@@ -553,7 +574,7 @@ def hybrid_train(
     device: str = "auto",
     stop_event=None,
     pause_event=None,
-    # ── Phase 1: Offline CQL ───────────────────────────────────────────
+    # ── Phase 1: Offline CQL ─────────────────────────────
     cql_n_steps: int = 50_000,
     cql_alpha: float = 4.0,
     cql_n_episodes: int = 3,
@@ -564,7 +585,6 @@ def hybrid_train(
     online_fraction: float = 0.7,
 ) -> dict[str, Any]:
     """Hybrid Offline→Online training pipeline.
-
     Phase 1 — Offline CQL Pre-training
         DiscreteCQL learns a conservative baseline policy purely from a static
         historical dataset.  No simulator interaction.  The CQL conservative
@@ -757,3 +777,94 @@ def hybrid_train(
         "ppo_result": ppo_result,
         "total_timesteps": total_timesteps,
     }
+def run_bc_warmup(
+    cql_path: str,
+    ohlcv_df: pd.DataFrame,
+    algorithm: str = "AttentionPPO",
+    seq_len: int = 15,
+    reward_function: str = "dense",
+    min_quality: float = 0.8,
+    bc_steps: int = 2000,
+    device: str = "auto",
+    save_dir: str | None = None,
+    model_name: str | None = None,
+) -> str:
+    """Run Behavioral Cloning to align a PPO model with a pretrained CQL policy.
+    
+    Returns path to the warmed-up model (.zip).
+    """
+    from app.ml.cql_trainer import load_cql, bc_warmup_ppo, collect_offline_transitions
+    from trading_env import SwingTradingEnv
+    from stable_baselines3 import PPO
+    from stable_baselines3.common.vec_env import DummyVecEnv
+    from stable_baselines3.common.monitor import Monitor
+    from app.ml.attention_extractor import AttentionFeaturesExtractor
+
+    # 1. Load CQL
+    cql_algo = load_cql(cql_path)
+
+    # 2. Prepare data for BC supervision
+    transitions = collect_offline_transitions(
+        ohlcv_df=ohlcv_df,
+        source_model=None,
+        seq_len=seq_len,
+        obs_mode="flat",
+        reward_function=reward_function,
+        min_quality=min_quality,
+        n_episodes=1,
+    )
+    
+    # 3. Create dummy env for PPO init
+    df, feature_cols = prepare_training_data(ohlcv_df, min_quality=min_quality)
+    fd = df[feature_cols].values.astype(np.float32)
+    cp = df["adj_close"].fillna(df["close"]).values.astype(np.float32)
+    
+    def _make_env():
+        return Monitor(SwingTradingEnv(fd, cp, seq_len=seq_len, obs_mode="flat", reward_type=reward_function))
+    
+    vec_env = DummyVecEnv([_make_env])
+
+    # 4. Create PPO model
+    attn_params = get_default_hyperparams("AttentionPPO")
+    attn_params.pop("policy_kwargs", None)
+    if "n_steps" in attn_params:
+        attn_params["n_steps"] = max(attn_params["n_steps"], 512)
+
+    ppo_model = PPO(
+        "MlpPolicy",
+        vec_env,
+        verbose=0,
+        device=device,
+        policy_kwargs={
+            "net_arch": {"pi": [256, 128], "vf": [512, 512, 256]},
+            "features_extractor_class": AttentionFeaturesExtractor,
+            "features_extractor_kwargs": {
+                "features_dim": 256,
+                "seq_len": seq_len,
+                "num_heads": 4,
+            },
+        },
+        **attn_params,
+    )
+
+    # 5. Run BC
+    bc_warmup_ppo(
+        sb3_model=ppo_model,
+        cql_algo=cql_algo,
+        observations=transitions["observations"],
+        device=device,
+        n_steps=bc_steps,
+    )
+
+    # 6. Save
+    if save_dir is None:
+        save_dir = str(Path(settings.MODEL_DIR) / "rl" / "warmup")
+    Path(save_dir).mkdir(parents=True, exist_ok=True)
+    if model_name is None:
+        model_name = f"BC_Warmup_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    
+    warmup_path = str(Path(save_dir) / model_name)
+    ppo_model.save(warmup_path)
+    vec_env.close()
+    
+    return warmup_path + ".zip"

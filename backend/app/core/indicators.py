@@ -15,7 +15,7 @@ import ta
 # Which indicator groups to compute (matches pytrade obs_col keys)
 ALL_INDICATOR_GROUPS = [
     "TGRB", "rsi", "srsi", "kama", "vwkama",
-    "obv", "bbl", "macd", "adx", "sma",
+    "obv", "bbl", "macd", "adx", "sma", "atr",
 ]
 
 WARMUP_ROWS = 30  # drop first N rows after indicator calc
@@ -119,6 +119,12 @@ def compute_adx(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def compute_atr(df: pd.DataFrame) -> pd.DataFrame:
+    """Average True Range (14)."""
+    df["atr"] = ta.volatility.average_true_range(df["high"], df["low"], df["close"], window=14, fillna=True)
+    return df
+
+
 # Mapping from group names to compute functions
 INDICATOR_FUNCS = {
     "TGRB": compute_tgrb,
@@ -131,6 +137,7 @@ INDICATOR_FUNCS = {
     "sma": compute_sma,
     "bbl": compute_bollinger,
     "adx": compute_adx,
+    "atr": compute_atr,
 }
 
 
@@ -208,5 +215,7 @@ def get_indicator_columns(groups: list[str] | None = None) -> list[str]:
         cols.extend(["bbl_h", "bbl_l", "bbl"])
     if "adx" in selected:
         cols.extend(["adx", "adx_neg", "adx_pos"])
+    if "atr" in selected:
+        cols.append("atr")
 
     return cols

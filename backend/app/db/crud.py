@@ -34,6 +34,7 @@ from app.db.models import (
     StockIndicator,
     StockOHLCV,
     StockRegime,
+    PipelineJob,
     IntervalEnum,
 )
 
@@ -198,11 +199,9 @@ async def bulk_upsert_indicators(db: AsyncSession, rows: list[dict]) -> int:
     for i in range(0, len(rows), INDICATOR_BATCH_SIZE):
         batch = rows[i : i + INDICATOR_BATCH_SIZE]
         stmt = mysql_insert(StockIndicator).values(batch)
-        # Update all indicator columns on conflict
+        batch_cols = set(batch[0].keys())
         update_cols = {
-            c.name: c
-            for c in stmt.inserted
-            if c.name not in ("id", "stock_id", "date", "interval")
+            c.name: c for c in stmt.inserted if c.name != "id" and c.name in batch_cols
         }
         stmt = stmt.on_duplicate_key_update(**update_cols)
         await db.execute(stmt)
@@ -823,3 +822,54 @@ async def create_ca_block(
     await db.commit()
     await db.refresh(block)
     return block
+
+
+# ── Pipeline Job CRUD ──────────────────────────────────────────────────
+
+async def get_pipeline_job(db: AsyncSession, job_id: str) -> PipelineJob | None:
+    result = await db.execute(select(PipelineJob).where(PipelineJob.id == job_id))
+    return result.scalar_one_or_none()
+
+
+async def create_pipeline_job(
+    db: AsyncSession,
+    job_id: str,
+    symbols: list[str],
+    stages: list[str],
+    status: str = "pending",
+) -> PipelineJob:
+    job = PipelineJob(
+        id=job_id,
+        symbols=symbols,
+        stages=stages,
+        status=status,
+        current_stage=stages[0] if stages else None,
+    )
+    db.add(job)
+    await db.commit()
+    await db.refresh(job)
+    return job
+
+
+async def update_pipeline_job(
+    db: AsyncSession,
+    job_id: str,
+    status: str | None = None,
+    current_stage: str | None = None,
+    error: str | None = None,
+) -> PipelineJob | None:
+    update_data: dict[str, Any] = {}
+    if status is not None:
+        update_data["status"] = status
+    if current_stage is not None:
+        update_data["current_stage"] = current_stage
+    if error is not None:
+        update_data["error"] = error
+    
+    if not update_data:
+        return await get_pipeline_job(db, job_id)
+
+    stmt = update(PipelineJob).where(PipelineJob.id == job_id).values(**update_data)
+    await db.execute(stmt)
+    await db.commit()
+    return await get_pipeline_job(db, job_id)

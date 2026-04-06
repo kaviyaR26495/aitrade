@@ -982,14 +982,16 @@ async def get_training_log_file(model_id: int, db: AsyncSession = Depends(get_db
         lines = [_fmt_log_entry(e) for e in _training_progress[model_id]]
         content = "\n".join(lines)
     else:
-        raise HTTPException(status_code=404, detail="Log file not found.")
+        # Instead of 404, return empty if it's potentially starting
+        content = ""
+    
     size = p.stat().st_size if p.exists() else len(content.encode())
     return {
         "model_id": model_id,
         "content": content,
         "size_bytes": size,
         "size_human": _human_size(size),
-        "is_active": model_id in _training_controls,
+        "is_active": model_id in _training_controls or model_id in _training_progress,
         "status": status,
     }
 

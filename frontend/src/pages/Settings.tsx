@@ -11,6 +11,7 @@ import {
   getChatProviders,
   getChatStatus,
   updateConfigBatch,
+  listUniverseStocks,
 } from '../services/api';
 import { useAppStore } from '../store/appStore';
 import { ExternalLink, MessageCircle, Shield, ShieldCheck, ShieldAlert, Database, Server, Cpu, RefreshCw } from 'lucide-react';
@@ -56,11 +57,23 @@ export default function Settings() {
     }
   }, [universe]);
 
+  const { setPipelineUniverse } = useAppStore();
+
   const handleSaveUniverse = () => {
     setUniverseMutation.mutate(
       { category: universeCategory, customSymbols },
       {
-        onSuccess: () => addNotification({ type: 'success', message: 'Stock universe updated' }),
+        onSuccess: async () => {
+          addNotification({ type: 'success', message: 'Stock universe updated' });
+          // Sync global store with the newly resolved universe symbols
+          try {
+            const res = await listUniverseStocks();
+            const symbols = (res.data ?? []).map((s: any) => s.symbol);
+            setPipelineUniverse(symbols);
+          } catch (e) {
+            console.error('Failed to sync pipeline universe after save', e);
+          }
+        },
         onError: () => addNotification({ type: 'error', message: 'Failed to update universe' }),
       }
     );

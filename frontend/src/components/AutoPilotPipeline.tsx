@@ -13,14 +13,15 @@
  *   4  Ensemble Distillation (KNN + LSTM)
  *   5  Ready for Live Trading
  */
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Rocket, CheckCircle2, Loader2, AlertCircle, Circle,
   ChevronRight, X, ExternalLink, RefreshCw, Layers,
 } from 'lucide-react';
 import { useAppStore } from '../store/appStore';
-import { useStartPipeline, usePipelineStatus } from '../hooks/useApi';
+import { useStartPipeline, usePipelineStatus, useUniverse } from '../hooks/useApi';
+import { listUniverseStocks } from '../services/api';
 import type { PipelineStatus, PipelineStageStatus } from '../services/api';
 import { Button } from './ui';
 
@@ -51,6 +52,11 @@ const STAGE_DEFS: { name: string; label: string; description: string }[] = [
     name: 'ensemble_distill',
     label: 'Ensemble Distillation (KNN + LSTM)',
     description: 'Compress the RL policy into a fast KNN + LSTM ensemble ready for real-time inference.',
+  },
+  {
+    name: 'backtest',
+    label: 'Backtest & Validation',
+    description: 'Simulate the trained ensemble on historical data for up to 5 stocks. Metrics are saved in the Backtest page.',
   },
   {
     name: 'ready',
@@ -246,6 +252,31 @@ export default function AutoPilotPipeline() {
 
   const startMutation = useStartPipeline();
   const { data: statusData, isError: statusError } = usePipelineStatus(jobId);
+  const { data: universe, isLoading: universeLoading } = useUniverse();
+
+  // Sync pipelineUniverse from backend if it's currently empty
+  useEffect(() => {
+    if (pipelineUniverse.length === 0 && universe) {
+      // Fetch the full resolved list of symbols from the backend
+      listUniverseStocks().then((res) => {
+        const symbols = (res.data ?? []).map((s: any) => s.symbol);
+        if (symbols.length > 0) {
+          setPipelineUniverse(symbols);
+        }
+      }).catch((e) => {
+        console.error('Failed to auto-sync universe symbols', e);
+      });
+    }
+  }, [universe, pipelineUniverse.length, setPipelineUniverse]);
+
+  const handleSyncFromBackend = useCallback(() => {
+    if (universe?.category === 'custom' && universe.custom_symbols?.length > 0) {
+      setPipelineUniverse(universe.custom_symbols);
+      addNotification({ type: 'info', message: 'Universe synced from saved configuration.' });
+    } else {
+      addNotification({ type: 'warning', message: 'No custom universe found on server.' });
+    }
+  }, [universe, setPipelineUniverse, addNotification]);
 
   const isRunning = !!jobId && statusData?.status === 'running';
   const isComplete = statusData?.status === 'completed';
@@ -313,18 +344,31 @@ export default function AutoPilotPipeline() {
               Stock Universe
             </span>
             <span className="ml-1 text-[11px] px-1.5 py-0.5 rounded bg-[var(--primary-subtle)] text-[var(--primary)] font-semibold">
-              {pipelineUniverse.length}
+              {universeLoading ? '...' : pipelineUniverse.length}
             </span>
           </div>
-          {!hasStarted && (
-            <button
-              type="button"
-              onClick={() => navigate('/stocks')}
-              className="flex items-center gap-1.5 text-[11px] text-[var(--text-dim)] hover:text-[var(--primary)] transition-colors"
-            >
-              Edit <ChevronRight size={11} />
-            </button>
-          )}
+          <div className="flex items-center gap-3">
+            {!hasStarted && (
+              <button
+                type="button"
+                onClick={handleSyncFromBackend}
+                className="flex items-center gap-1.5 text-[11px] text-[var(--text-dim)] hover:text-[var(--primary)] transition-colors"
+                title="Reload from backend saved universe"
+              >
+                <RefreshCw size={11} className={universeLoading ? 'animate-spin' : ''} />
+                Sync
+              </button>
+            )}
+            {!hasStarted && (
+              <button
+                type="button"
+                onClick={() => navigate('/stocks')}
+                className="flex items-center gap-1.5 text-[11px] text-[var(--text-dim)] hover:text-[var(--primary)] transition-colors"
+              >
+                Edit <ChevronRight size={11} />
+              </button>
+            )}
+          </div>
         </div>
 
         {pipelineUniverse.length === 0 ? (
@@ -464,14 +508,22 @@ export default function AutoPilotPipeline() {
             The ensemble is distilled and validated. Head to Live Trading to deploy signals for{' '}
             <span className="font-semibold text-emerald-300">{pipelineUniverse.join(', ')}</span>.
           </p>
-          <Button
-            size="lg"
-            onClick={() => navigate('/trading')}
-            className="bg-emerald-600 hover:bg-emerald-500 border-0 shadow-[0_0_20px_rgba(52,211,153,0.3)] px-8"
-          >
-            <ExternalLink size={16} />
-            Deploy to Live Trading
-          </Button>
+          <div className="flex items-center gap-3">
+            <Button
+              onClick={() => navigate('/backtest')}
+              className="bg-indigo-600 hover:bg-indigo-500 border-0 px-6"
+            >
+              View Backtest Results
+            </Button>
+            <Button
+              size="lg"
+              onClick={() => navigate('/trading')}
+              className="bg-emerald-600 hover:bg-emerald-500 border-0 shadow-[0_0_20px_rgba(52,211,153,0.3)] px-8"
+            >
+              <ExternalLink size={16} />
+              Deploy to Live Trading
+            </Button>
+          </div>
         </div>
       )}
     </div>

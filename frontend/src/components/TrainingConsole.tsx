@@ -75,7 +75,7 @@ export default function TrainingConsole() {
 
   const models: any[] = rlModels ?? [];
   const activeModelIds = new Set(
-    models.filter((m) => m.status === 'training' || m.status === 'pending' || m.status === 'paused').map((m) => m.id)
+    models.filter((m) => m.status === 'training' || m.status === 'paused').map((m) => m.id)
   );
 
   // Auto-open and switch to first actively training model

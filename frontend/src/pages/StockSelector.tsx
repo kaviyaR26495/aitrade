@@ -364,6 +364,7 @@ export default function StockSelector() {
       {
         onSuccess: () => {
           persistSavedUniverseSymbols(symbols);
+          setPipelineUniverse(symbols);
           addNotification({ type: 'success', message: `Universe saved — ${symbols.length} stock${symbols.length !== 1 ? 's' : ''}` });
         },
         onError: () => addNotification({ type: 'error', message: 'Failed to save universe' }),
@@ -437,7 +438,7 @@ export default function StockSelector() {
           className="bg-gradient-to-r from-indigo-500 to-violet-500 hover:from-indigo-400 hover:to-violet-400 border-0"
         >
           <Rocket size={13} />
-          Confirm Universe &amp; Proceed
+          Confirm &amp; Start Pipeline
         </Button>
       </PageHeader>
 

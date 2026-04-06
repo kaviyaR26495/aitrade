@@ -452,6 +452,21 @@ class AppSetting(Base):
     value: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+# ── Pipeline Jobs (Autopilot Persistence) ──────────────────────────────
+
+class PipelineJob(Base):
+    __tablename__ = "pipeline_jobs"
+
+    id: Mapped[str] = mapped_column(String(50), primary_key=True)  # UUID
+    status: Mapped[str] = mapped_column(String(50), default="pending")
+    current_stage: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    stages: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # List of stage names
+    symbols: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # List of symbols
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist, onupdate=now_ist)
+
+
 # ── Daily Portfolio Reconciliation Snapshot ────────────────────────────
 # Written by the 08:30 IST reconciliation job.  The live position-sizing
 # algorithms (Kelly, Vol-Target) must read cash and holdings exclusively

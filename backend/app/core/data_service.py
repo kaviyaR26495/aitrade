@@ -43,6 +43,7 @@ INDICATOR_COL_MAP = {
     "Green": "tgrb_green",
     "Red": "tgrb_red",
     "Bottom": "tgrb_bottom",
+    "atr": "atr",
 }
 
 
@@ -244,12 +245,49 @@ async def get_sector_features(
     return pooled
 
 
+async def compute_and_store_regimes(
+    db: AsyncSession,
+    stock_id: int,
+    interval: str = "day",
+) -> int:
+    """Compute market regimes and quality scores for a stock and store in DB."""
+    from app.core.regime_classifier import classify_and_score
+
+    # Fetch full feature matrix (needed by regime classifier)
+    df = await get_stock_features(db, stock_id, interval, normalize=False)
+    if df.empty or len(df) < 50:
+        logger.warning("Insufficient data for regimes (stock_id=%d)", stock_id)
+        return 0
+
+    # Classify regimes and compute scores
+    df = classify_and_score(df, use_gmm=True)
+
+    # Build DB rows
+    rows = []
+    for _, row in df.iterrows():
+        rows.append({
+            "stock_id": stock_id,
+            "date": row["date"].date() if isinstance(row["date"], pd.Timestamp) else row["date"],
+            "interval": interval,
+            "trend": row["trend"],
+            "volatility": row["volatility"],
+            "regime_id": int(row["regime_id"]),
+            "regime_confidence": float(row["regime_confidence"]),
+            "quality_score": float(row["quality_score"]),
+            "is_transition": bool(row["is_transition"]),
+        })
+
+    count = await crud.bulk_upsert_regimes(db, rows)
+    logger.info("Upserted %d regime rows for stock_id=%d", count, stock_id)
+    return count
+
+
 async def sync_and_compute(
     db: AsyncSession,
     stock_id: int,
     interval: str = "day",
 ) -> dict:
-    """Full pipeline: sync OHLCV from Kite → compute indicators → store all."""
+    """Full pipeline: sync OHLCV from Kite → compute indicators → classify regimes → store all."""
     stock = await crud.get_stock_by_id(db, stock_id)
     if not stock:
         return {"error": f"Stock {stock_id} not found"}
@@ -265,9 +303,19 @@ async def sync_and_compute(
             stock_id, stock.symbol, ind_err,
         )
 
+    regime_count = 0
+    try:
+        regime_count = await compute_and_store_regimes(db, stock_id, interval)
+    except Exception as reg_err:
+        logger.error(
+            "Regime classification failed for stock_id=%d (%s): %s",
+            stock_id, stock.symbol, reg_err,
+        )
+
     return {
         "stock_id": stock_id,
         "symbol": stock.symbol,
         "ohlcv_synced": ohlcv_count,
         "indicators_computed": indicator_count,
+        "regimes_classified": regime_count,
     }

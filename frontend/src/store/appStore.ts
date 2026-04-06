@@ -49,6 +49,7 @@ export interface StockSelectorSelection {
 }
 
 const STOCK_SELECTOR_DRAFT_KEY = 'aitrade-stock-selector-draft';
+const PIPELINE_UNIVERSE_STORAGE_KEY = 'aitrade-pipeline-universe';
 
 function saveStockSelectorDraft(selection: StockSelectorSelection) {
   try {
@@ -75,6 +76,45 @@ function loadStockSelectorDraft(): StockSelectorSelection {
     };
   } catch {
     return createEmptyStockSelectorSelection();
+  }
+}
+
+function savePipelineUniverse(symbols: string[]) {
+  try {
+    localStorage.setItem(PIPELINE_UNIVERSE_STORAGE_KEY, JSON.stringify(symbols));
+  } catch (e) {
+    console.error('Failed to save pipeline universe', e);
+  }
+}
+
+function loadPipelineUniverse(): string[] {
+  try {
+    const raw = localStorage.getItem(PIPELINE_UNIVERSE_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+const ACTIVE_PIPELINE_JOB_KEY = 'aitrade-active-pipeline-job';
+
+function saveActivePipelineJobId(id: string | null) {
+  try {
+    if (id) {
+      localStorage.setItem(ACTIVE_PIPELINE_JOB_KEY, id);
+    } else {
+      localStorage.removeItem(ACTIVE_PIPELINE_JOB_KEY);
+    }
+  } catch (e) {
+    console.error('Failed to save active pipeline job ID', e);
+  }
+}
+
+function loadActivePipelineJobId(): string | null {
+  try {
+    return localStorage.getItem(ACTIVE_PIPELINE_JOB_KEY);
+  } catch {
+    return null;
   }
 }
 
@@ -193,10 +233,16 @@ export const useAppStore = create<AppState>((set) => ({
   setTrainingConsoleModelId: (id) => set({ trainingConsoleModelId: id }),
 
   // Pipeline Universe
-  pipelineUniverse: [],
-  setPipelineUniverse: (symbols) => set({ pipelineUniverse: symbols }),
-  activePipelineJobId: null,
-  setActivePipelineJobId: (id) => set({ activePipelineJobId: id }),
+  pipelineUniverse: loadPipelineUniverse(),
+  setPipelineUniverse: (symbols) => {
+    savePipelineUniverse(symbols);
+    set({ pipelineUniverse: symbols });
+  },
+  activePipelineJobId: loadActivePipelineJobId(),
+  setActivePipelineJobId: (id) => {
+    saveActivePipelineJobId(id);
+    set({ activePipelineJobId: id });
+  },
 
   // Stock Selector working draft
   stockSelectorSelection: loadStockSelectorDraft(),
