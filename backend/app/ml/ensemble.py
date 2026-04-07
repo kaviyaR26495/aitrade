@@ -44,15 +44,38 @@ def ensemble_predict(
         action = int(np.argmax(combined_probs))
         confidence = float(combined_probs[action])
 
-        # Agreement check
-        knn_agrees = int(knn_preds[i]) == action
-        lstm_agrees = int(lstm_preds[i]) == action
         both_agree = int(knn_preds[i]) == int(lstm_preds[i])
 
-        # If agreement required but models disagree → HOLD
+        # Directional agreement check (replaces exact-label agreement).
+        #
+        # Three cases when agreement_required=True:
+        #   1. knn == lstm (exact)          → keep combined action (strictest signal)
+        #   2. BUY vs SELL (hard conflict)  → always HOLD (contradictory views)
+        #   3. HOLD vs directional          → allow if combined probability already
+        #                                     favours that direction over HOLD;
+        #                                     otherwise fall back to HOLD.
+        #
+        # This preserves the precision filter while avoiding the "deadlock" where
+        # KNN (geometric) and LSTM (temporal) rarely agree on the exact same candle.
         if agreement_required and not both_agree:
-            action = 0
-            confidence = float(combined_probs[0])
+            knn_a = int(knn_preds[i])
+            lstm_a = int(lstm_preds[i])
+            hard_conflict = (knn_a != 0 and lstm_a != 0 and knn_a != lstm_a)
+            if hard_conflict:
+                # BUY vs SELL — genuinely contradictory views; force HOLD
+                action = 0
+                confidence = float(combined_probs[0])
+            else:
+                # One of them is HOLD; the other has a directional view.
+                # Trust the direction only if the *combined* probability for
+                # that direction exceeds the HOLD probability.
+                direction = knn_a if knn_a != 0 else lstm_a
+                if combined_probs[direction] > combined_probs[0]:
+                    action = direction
+                    confidence = float(combined_probs[direction])
+                else:
+                    action = 0
+                    confidence = float(combined_probs[0])
 
         results.append({
             "action": action,

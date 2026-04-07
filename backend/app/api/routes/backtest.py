@@ -85,6 +85,17 @@ async def run_backtest(
 
     dates = [x.date for x in ohlcv]
     close_prices = np.array([x.close for x in ohlcv])
+    high_prices  = np.array([x.high  for x in ohlcv])
+    low_prices   = np.array([x.low   for x in ohlcv])
+    open_prices  = np.array([x.open  for x in ohlcv])
+    # 20-day rolling average daily traded value (close × volume) for the ADV cap.
+    # Computed from raw arrays inline to avoid an extra DB round-trip.
+    _traded_val = np.array([float(x.close) * float(x.volume or 0) for x in ohlcv])
+    _adv_window = 20
+    adv_values = np.array([
+        float(np.mean(_traded_val[max(0, j - _adv_window): j + 1]))
+        for j in range(len(_traded_val))
+    ])
 
     # 2. Try to fetch predictions from DB first
     pred_dict: dict = {}
@@ -147,7 +158,13 @@ async def run_backtest(
         min_confidence=req.min_confidence,
         max_positions=req.max_positions,
     )
-    bt_result = ml_run_backtest(predictions, close_prices, dates, config)
+    bt_result = ml_run_backtest(
+        predictions, close_prices, dates, config,
+        low_prices=low_prices,
+        open_prices=open_prices,
+        high_prices=high_prices,
+        adv_values=adv_values,
+    )
 
     # 5. Persist backtest record
     record = BacktestResultModel(

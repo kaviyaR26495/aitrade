@@ -41,7 +41,12 @@ class BacktestConfig:
     # Requires ``nifty_closes`` to be passed as a kwarg to run_backtest().
     # nifty_block_buys=False → halve size when NIFTY is below 200-DMA
     # nifty_block_buys=True  → disable all new BUYs when NIFTY below 200-DMA
-    nifty_block_buys: bool = False    # ── Sector concentration guard ─────────────────────────────────────────────
+    nifty_block_buys: bool = False
+    # ── ADV liquidity cap ─────────────────────────────────────────────────────
+    # Caps each trade at adv_cap_fraction × 20-day average daily traded value
+    # (close × volume).  Prevents over-sizing into illiquid stocks.
+    adv_cap_fraction: float = 0.01   # 1% of 20-day ADV value
+    # ── Sector concentration guard ─────────────────────────────────────────────
     # Requires ``sectors`` to be passed as a list to run_backtest().
     # A new BUY is blocked when the sector already accounts for ≥ sector_cap
     # of total portfolio equity.
@@ -120,8 +125,10 @@ def run_backtest(
     config: BacktestConfig | None = None,
     low_prices: np.ndarray | None = None,
     open_prices: np.ndarray | None = None,
+    high_prices: np.ndarray | None = None,
     nifty_closes: np.ndarray | None = None,
     sectors: list[str | None] | None = None,
+    adv_values: np.ndarray | None = None,
 ) -> BacktestResult:
     """
     Run backtest on a sequence of predictions.
@@ -136,6 +143,14 @@ def run_backtest(
     open_prices  : daily open prices.  When an overnight news event causes the
                    stock to gap below the stoploss price, the exit is simulated at
                    the open (not the stoploss price), matching real market behaviour.
+    high_prices  : daily high prices.  When provided, the target check uses the
+                   intraday high — matching a resting limit order that fills as
+                   soon as price touches the target.  Exit fills at the exact
+                   target price (entry × (1 + target_pct/100)), not the high.
+    adv_values   : 20-day rolling average daily traded value (close × volume) in
+                   INR, one entry per bar.  When provided, each BUY trade is
+                   capped at BacktestConfig.adv_cap_fraction × adv_values[i]
+                   to simulate realistic market-impact limits.
 
     nifty_closes : np.ndarray | None
         Historical NIFTY 50 daily closes aligned with ``close_prices`` (same
@@ -165,13 +180,15 @@ def run_backtest(
     gap_down_exits = 0
 
     # Normalise optional price arrays (fallback to close when absent)
-    _lows = low_prices if low_prices is not None else close_prices
+    _lows  = low_prices  if low_prices  is not None else close_prices
     _opens = open_prices if open_prices is not None else close_prices
+    _highs = high_prices if high_prices is not None else close_prices
 
     for i in range(n):
         price = float(close_prices[i])
         low   = float(_lows[i])
         open_ = float(_opens[i])
+        high  = float(_highs[i])
         pred = predictions[i]
         action = pred.get("action", 0)
         confidence = pred.get("confidence", 0)
@@ -226,14 +243,18 @@ def run_backtest(
                 closed_keys.append(key)
                 continue  # don't also check target on the same bar
 
-            elif config.target_pct and ((price - pos["raw_entry_price"]) / pos["raw_entry_price"] * 100) > config.target_pct:
-                fill_exit = _slip_price(price, -1, config.slippage_bps, rv, config.vol_slippage_scale)
+            elif config.target_pct and ((high - pos["raw_entry_price"]) / pos["raw_entry_price"] * 100) > config.target_pct:
+                # Limit order sitting at target price fires when today's HIGH
+                # touches or exceeds it.  Fill at the exact target — not the
+                # intraday high — mirroring live order execution.
+                fill_raw = pos["raw_entry_price"] * (1 + config.target_pct / 100)
+                fill_exit = _slip_price(fill_raw, -1, config.slippage_bps, rv, config.vol_slippage_scale)
                 exit_value = pos["quantity"] * fill_exit * (1 - config.commission_pct)
                 pnl = exit_value - (pos["quantity"] * pos["entry_price"])
                 pnl_pct = (pnl / (pos["quantity"] * pos["entry_price"])) * 100
                 slip_cost = (
                     (pos["entry_price"] - pos["raw_entry_price"]) * pos["quantity"]
-                    + (price - fill_exit) * pos["quantity"]
+                    + (fill_raw - fill_exit) * pos["quantity"]
                 )
                 cash += exit_value
                 trades.append(Trade(
@@ -291,6 +312,12 @@ def run_backtest(
                 total_equity = cash + current_open_value
                 ideal_position_value = total_equity * pos_frac
                 actual_position_value = min(ideal_position_value, cash)
+                # ADV liquidity cap: never commit more than adv_cap_fraction of
+                # 20-day average daily traded value (price × volume).  This
+                # prevents the order from becoming the market in illiquid stocks.
+                if adv_values is not None and i < len(adv_values) and adv_values[i] > 0:
+                    adv_cap = float(adv_values[i]) * config.adv_cap_fraction
+                    actual_position_value = min(actual_position_value, adv_cap)
                 qty = int(actual_position_value / fill_entry)
                 # Sector concentration guard: block the trade if the sector
                 # already occupies ≥ sector_cap of total portfolio equity
