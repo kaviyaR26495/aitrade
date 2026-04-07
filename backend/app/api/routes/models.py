@@ -246,6 +246,7 @@ async def _run_distillation_background(
     # ── Fetch OHLCV + extract patterns for each stock ─────────────────
     loop = asyncio.get_event_loop()
     all_patterns: list[dict] = []
+    stock_errors: list[str] = []
 
     for stock_id in stock_ids:
         _dlog(knn_model_id, f"INFO   Stock #{stock_id}: fetching OHLCV data...")
@@ -254,10 +255,12 @@ async def _run_distillation_background(
                 ohlcv_rows = await crud.get_ohlcv(db, stock_id, interval)
         except Exception as exc:
             _dlog(knn_model_id, f"ERROR  Stock #{stock_id}: failed to fetch OHLCV: {exc}")
+            stock_errors.append(f"Stock #{stock_id}: OHLCV fetch failed: {exc}")
             continue
 
         if not ohlcv_rows:
             _dlog(knn_model_id, f"ERROR  Stock #{stock_id}: no OHLCV data for interval={interval}")
+            stock_errors.append(f"Stock #{stock_id}: no OHLCV data")
             continue
 
         _dlog(knn_model_id, f"INFO   Stock #{stock_id}: {len(ohlcv_rows)} candles loaded. Preparing features...")
@@ -270,15 +273,19 @@ async def _run_distillation_background(
             for r in ohlcv_rows
         ])
 
-        # Prepare training data (indicators + quality filter + normalization)
+        # Prepare training data (indicators + normalization)
+        # Use min_quality=0.0 and exclude_transitions=False for replay:
+        # the RL model is already trained — we need all available data for
+        # pattern extraction, not the strict quality gate used during training.
         try:
             from app.ml.rl_trainer import prepare_training_data
             df_prep, feature_cols = await loop.run_in_executor(
                 _training_executor,
-                lambda: prepare_training_data(df, min_quality=min_quality, regime_ids=regime_ids),
+                lambda: prepare_training_data(df, min_quality=0.0, exclude_transitions=False),
             )
         except Exception as exc:
             _dlog(knn_model_id, f"ERROR  Stock #{stock_id}: data preparation failed: {exc}")
+            stock_errors.append(f"Stock #{stock_id}: data prep failed: {exc}")
             continue
 
         _dlog(knn_model_id, f"INFO   Stock #{stock_id}: {len(df_prep)} quality rows, {len(feature_cols)} features. Loading RL model...")
@@ -292,6 +299,7 @@ async def _run_distillation_background(
             )
         except Exception as exc:
             _dlog(knn_model_id, f"ERROR  Stock #{stock_id}: could not load RL model: {exc}")
+            stock_errors.append(f"Stock #{stock_id}: RL model load failed: {exc}")
             continue
 
         _dlog(knn_model_id, f"INFO   Stock #{stock_id}: replaying RL model to extract golden patterns...")
@@ -304,8 +312,13 @@ async def _run_distillation_background(
             cols_for_env = feature_cols_from_meta if feature_cols_from_meta else feature_cols
             missing_cols = [c for c in cols_for_env if c not in df_prep.columns]
             if missing_cols:
-                _dlog(knn_model_id, f"WARN   Stock #{stock_id}: {len(missing_cols)} RL training feature(s) missing from current data — skipping. Missing: {missing_cols[:5]}")
-                continue
+                # Zero-fill missing market-wide features (e.g. fii_net_norm,
+                # dii_net_norm, sector_breadth_pct) so the observation shape
+                # matches the trained model.  The core price/indicator features
+                # still carry the essential signal for pattern extraction.
+                _dlog(knn_model_id, f"WARN   Stock #{stock_id}: zero-filling {len(missing_cols)} missing feature(s): {missing_cols[:5]}")
+                for mc in missing_cols:
+                    df_prep[mc] = 0.0
             feature_data = df_prep[cols_for_env].values.astype("float32")
             close_prices = df_prep["close"].values.astype("float32")
             dates = df_prep["date"].values if "date" in df_prep.columns else list(range(len(df_prep)))
@@ -324,11 +337,13 @@ async def _run_distillation_background(
                     reward_function=reward_function,
                     min_profit_threshold=min_profit_threshold,
                     profit_horizon=profit_horizon,
+                    mode="behavioral_cloning",
                     parquet_key=f"{rl_model_id}_{stock_id}_{interval}",
                 ),
             )
         except Exception as exc:
             _dlog(knn_model_id, f"ERROR  Stock #{stock_id}: pattern extraction failed: {exc}")
+            stock_errors.append(f"Stock #{stock_id}: pattern extraction failed: {exc}")
             continue
 
         # Tag patterns with rl_model_id, stock_id and interval
@@ -341,7 +356,8 @@ async def _run_distillation_background(
         all_patterns.extend(patterns)
 
     if not all_patterns:
-        _dlog(knn_model_id, "ERROR  No golden patterns extracted. Check RL model quality and data availability.")
+        err_summary = "; ".join(stock_errors[:10]) if stock_errors else "unknown reason"
+        _dlog(knn_model_id, f"ERROR  No patterns extracted from any stock. Per-stock errors: {err_summary}")
         async with async_session_factory() as db:
             await crud.update_knn_model_status(db, knn_model_id, "failed")
             await crud.update_lstm_model_status(db, lstm_model_id, "failed")

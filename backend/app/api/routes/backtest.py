@@ -33,7 +33,7 @@ class BacktestRequest(BaseModel):
     initial_capital: float = 100_000.0
     stoploss_pct: float = 5.0
     target_pct: float | None = None
-    min_confidence: float = 0.65
+    min_confidence: float = 0.50
     max_positions: int = 10
 
 
@@ -276,8 +276,13 @@ async def _run_live_inference(
     if len(X_all) == 0:
         return {}
 
+    # Load KNN norm_params for inference-time Z-score normalization
+    # (must match the StandardScaler fitted during training)
+    from app.ml.knn_distiller import load_knn_norm_params
+    knn_norm_params = load_knn_norm_params(knn_path.parent)
+
     # Run individual models
-    knn_preds_raw, knn_probs_raw = predict_knn(knn_model, X_all)
+    knn_preds_raw, knn_probs_raw = predict_knn(knn_model, X_all, norm_params=knn_norm_params)
     lstm_preds_raw, lstm_probs_raw = predict_lstm(lstm_model, X_all)
 
     # KNN may have been trained on only [1, 2] classes → expand to 3-column prob [HOLD, BUY, SELL]
@@ -324,15 +329,27 @@ async def _run_live_inference(
 
 
 def _latest_model_path(distill_dir: Path, prefix: str, filename: str) -> Path | None:
-    """Find the numerically highest-versioned model directory under distill_dir."""
+    """Find the newest model file in the highest-versioned model directory under distill_dir.
+
+    Models are saved with a UTC timestamp suffix (e.g. knn_model_20260406_2310.joblib)
+    rather than a fixed name.  This helper accepts ``filename`` as a fallback exact name
+    but also globs by extension so timestamped files are discovered automatically.
+    """
     candidates = sorted(
         [d for d in distill_dir.iterdir() if d.is_dir() and d.name.startswith(prefix)],
         key=lambda p: int("".join(filter(str.isdigit, p.name)) or "0"),
     )
+    # Derive glob pattern from the filename extension (e.g. *.joblib, *.pt)
+    suffix = Path(filename).suffix  # ".joblib" or ".pt"
     for candidate in reversed(candidates):
-        model_file = candidate / filename
-        if model_file.exists():
-            return model_file
+        # First try the exact fixed name (backward compat)
+        exact = candidate / filename
+        if exact.exists():
+            return exact
+        # Then find the newest timestamped file with the same extension
+        versioned = sorted(candidate.glob(f"*{suffix}"), key=lambda p: p.stat().st_mtime)
+        if versioned:
+            return versioned[-1]
     return None
 
 

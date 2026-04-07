@@ -892,7 +892,8 @@ async def _stage_ensemble_distill(job_id: str, rl_model_id: int, stock_ids: list
         )
     else:
         raise RuntimeError(
-            "Ensemble distillation failed — no golden patterns could be extracted from the RL model."
+            "Ensemble distillation failed — both KNN and LSTM models failed. "
+            "Check distillation logs for per-stock details."
         )
 
     return knn_model_id, lstm_model_id
@@ -926,7 +927,7 @@ async def _stage_backtest(job_id: str, rl_model_id: int, knn_model_id: int | Non
                       message="Backtest skipped — distilled models not available on disk.")
         return
 
-    from app.ml.knn_distiller import load_knn_model, predict_knn
+    from app.ml.knn_distiller import load_knn_model, predict_knn, load_knn_norm_params
     from app.ml.lstm_distiller import load_lstm_model, predict_lstm
     from app.ml.ensemble import ensemble_predict
     from app.ml.backtester import BacktestConfig, run_backtest as ml_run_backtest
@@ -940,6 +941,7 @@ async def _stage_backtest(job_id: str, rl_model_id: int, knn_model_id: int | Non
 
     try:
         knn_m = load_knn_model(str(knn_path))
+        knn_norm_params = load_knn_norm_params(Path(knn_path).parent)
         lstm_m = load_lstm_model(str(lstm_path))
     except Exception as exc:
         await _update_stage(job_id, 5, status="completed", progress=100,
@@ -974,7 +976,7 @@ async def _stage_backtest(job_id: str, rl_model_id: int, knn_model_id: int | Non
             if len(X) == 0:
                 continue
 
-            knn_preds_raw, knn_probs_raw = predict_knn(knn_m, X)
+            knn_preds_raw, knn_probs_raw = predict_knn(knn_m, X, norm_params=knn_norm_params)
             lstm_preds_raw, lstm_probs_raw = predict_lstm(lstm_m, X)
 
             knn_classes = list(knn_m.classes_)

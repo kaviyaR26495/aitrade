@@ -57,14 +57,14 @@ class TestIndicators:
         result = compute_tgrb(df.copy())
 
         # TGRB values should be percentages (can be negative for Bottom)
-        assert "Top" in result.columns
-        assert "Green" in result.columns
-        assert "Red" in result.columns
-        assert "Bottom" in result.columns
+        assert "tgrb_top" in result.columns
+        assert "tgrb_green" in result.columns
+        assert "tgrb_red" in result.columns
+        assert "tgrb_bottom" in result.columns
 
         # Green and Red should be mutually exclusive (one is 0 per row)
         for _, row in result.head(10).iterrows():
-            assert row["Green"] == 0 or row["Red"] == 0
+            assert row["tgrb_green"] == 0 or row["tgrb_red"] == 0
 
     def test_rsi_range(self):
         df = make_sample_ohlcv()
@@ -89,13 +89,13 @@ class TestIndicators:
         df = make_sample_ohlcv()
         result = compute_bollinger(df.copy())
 
-        assert "bbl_h" in result.columns
-        assert "bbl_l" in result.columns
-        assert "bbl" in result.columns
+        assert "bb_upper" in result.columns
+        assert "bb_lower" in result.columns
+        assert "bb_mid" in result.columns
 
         # Upper band > Lower band
-        valid_h = result["bbl_h"].dropna()
-        valid_l = result["bbl_l"].dropna()
+        valid_h = result["bb_upper"].dropna()
+        valid_l = result["bb_lower"].dropna()
         assert (valid_h.values[-50:] > valid_l.values[-50:]).all()
 
     def test_macd(self):

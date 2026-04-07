@@ -162,8 +162,8 @@ def _classify_volatility(df: pd.DataFrame, lookback: int = 252) -> pd.DataFrame:
     rolling_p90 = atr_pct.rolling(lookback, min_periods=50).quantile(0.90)
 
     # BB width as confirming signal
-    if all(c in df.columns for c in ["bbl_h", "bbl_l", "bbl"]):
-        bb_width = (df["bbl_h"] - df["bbl_l"]) / df["bbl"]
+    if all(c in df.columns for c in ["bb_upper", "bb_lower", "bb_mid"]):
+        bb_width = (df["bb_upper"] - df["bb_lower"]) / df["bb_mid"]
         bb_p90 = bb_width.rolling(lookback, min_periods=50).quantile(0.90)
         bb_high = bb_width > bb_p90
     else:

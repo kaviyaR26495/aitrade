@@ -38,17 +38,17 @@ def calc_vw_kama(df: pd.DataFrame, length: int = 10) -> pd.Series:
 
 
 def compute_tgrb(df: pd.DataFrame) -> pd.DataFrame:
-    """Candle body pattern: Top, Green, Red, Bottom."""
+    """Candle body pattern: tgrb_top, tgrb_green, tgrb_red, tgrb_bottom."""
     o, h, l, c = df["open"], df["high"], df["low"], df["close"]
 
-    df["Top"] = np.where(
+    df["tgrb_top"] = np.where(
         o >= c,
         (h - o) / o,
         (h - c) / c,
     )
-    df["Green"] = np.where(o >= c, 0, (c - o) / o)
-    df["Red"] = np.where(o >= c, (o - c) / c, 0)
-    df["Bottom"] = np.where(
+    df["tgrb_green"] = np.where(o >= c, 0, (c - o) / o)
+    df["tgrb_red"] = np.where(o >= c, (o - c) / c, 0)
+    df["tgrb_bottom"] = np.where(
         o >= c,
         (c - l) / l,
         (o - l) / l,
@@ -96,18 +96,19 @@ def compute_macd(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def compute_sma(df: pd.DataFrame) -> pd.DataFrame:
-    """SMA at multiple windows."""
+    """SMA at multiple windows plus EMA-20."""
     for w in [5, 12, 24, 50, 100, 200]:
         df[f"sma_{w}"] = ta.trend.sma_indicator(df["close"], window=w, fillna=True)
+    df["ema_20"] = ta.trend.ema_indicator(df["close"], window=20, fillna=True)
     return df
 
 
 def compute_bollinger(df: pd.DataFrame) -> pd.DataFrame:
-    """Bollinger Bands (20, 2)."""
+    """Bollinger Bands (20, 2) — bb_upper, bb_lower, bb_mid."""
     bb = ta.volatility.BollingerBands(close=df["close"], window=20, window_dev=2, fillna=True)
-    df["bbl_h"] = bb.bollinger_hband()
-    df["bbl_l"] = bb.bollinger_lband()
-    df["bbl"] = bb.bollinger_mavg()
+    df["bb_upper"] = bb.bollinger_hband()
+    df["bb_lower"] = bb.bollinger_lband()
+    df["bb_mid"] = bb.bollinger_mavg()
     return df
 
 
@@ -196,7 +197,7 @@ def get_indicator_columns(groups: list[str] | None = None) -> list[str]:
     selected = groups or ALL_INDICATOR_GROUPS
 
     if "TGRB" in selected:
-        cols.extend(["Top", "Green", "Red", "Bottom"])
+        cols.extend(["tgrb_top", "tgrb_green", "tgrb_red", "tgrb_bottom"])
     if "rsi" in selected:
         cols.append("rsi")
     if "srsi" in selected:
@@ -210,9 +211,9 @@ def get_indicator_columns(groups: list[str] | None = None) -> list[str]:
     if "macd" in selected:
         cols.extend(["macd", "macd_signal", "macd_hist"])
     if "sma" in selected:
-        cols.extend([f"sma_{w}" for w in [5, 12, 24, 50, 100, 200]])
+        cols.extend([f"sma_{w}" for w in [5, 12, 24, 50, 100, 200]] + ["ema_20"])
     if "bbl" in selected:
-        cols.extend(["bbl_h", "bbl_l", "bbl"])
+        cols.extend(["bb_upper", "bb_lower", "bb_mid"])
     if "adx" in selected:
         cols.extend(["adx", "adx_neg", "adx_pos"])
     if "atr" in selected:

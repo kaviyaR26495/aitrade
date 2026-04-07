@@ -21,7 +21,7 @@ EXCLUDE_COLS = {
     "macd", "macd_signal", "macd_hist",
     "adx", "adx_neg", "adx_pos",
     "rsi",
-    "Top", "Green", "Red", "Bottom",
+    "tgrb_top", "tgrb_green", "tgrb_red", "tgrb_bottom",
     "dow", "day", "month",
     # Regime features are pre-scaled (0/1 binary or 0-1 float); skip log-return treatment
     "regime_trend_bullish", "regime_trend_bearish", "regime_trend_neutral",
@@ -35,7 +35,7 @@ EXCLUDE_COLS = {
 MINMAX_COLS = {"n_volume", "obv"}
 
 # Percentage-change-from-close columns
-PCTCHG_COLS = {"sma_50", "bbl_h", "bbl_l", "bbl"}
+PCTCHG_COLS = {"sma_50", "bb_upper", "bb_lower", "bb_mid"}
 
 # Reference window for z-score normalization
 ZSCORE_WINDOW = 100
