@@ -61,6 +61,7 @@ class Trade:
     confidence: float = 0.0
     exit_reason: str = ""
     slippage_cost: float = 0.0   # total INR lost to slippage on this round-trip
+    matched_pattern_indices: list[int] | None = None
 
 
 @dataclass
@@ -215,6 +216,7 @@ def run_backtest(
                     regime_id=pos.get("regime_id"), confidence=pos.get("confidence", 0),
                     exit_reason="gap_down_stoploss" if gap_down else "stoploss",
                     slippage_cost=round(slip_cost, 4),
+                    matched_pattern_indices=pos.get("matched_pattern_indices"),
                 ))
                 closed_keys.append(key)
                 continue  # don't also check target on the same bar
@@ -235,6 +237,7 @@ def run_backtest(
                     quantity=pos["quantity"], pnl=pnl, pnl_pct=pnl_pct,
                     regime_id=pos.get("regime_id"), confidence=pos.get("confidence", 0),
                     exit_reason="target", slippage_cost=round(slip_cost, 4),
+                    matched_pattern_indices=pos.get("matched_pattern_indices"),
                 ))
                 closed_keys.append(key)
 
@@ -300,6 +303,7 @@ def run_backtest(
                             "entry_date": dt,
                             "regime_id": regime_id,
                             "confidence": confidence,
+                            "matched_pattern_indices": pred.get("matched_pattern_indices"),
                             "sector": sector_label,
                             "price": price,  # current MTM price for sector calc
                         }
@@ -321,6 +325,7 @@ def run_backtest(
                     quantity=pos["quantity"], pnl=pnl, pnl_pct=pnl_pct,
                     regime_id=pos.get("regime_id"), confidence=pos.get("confidence", 0),
                     exit_reason="sell_signal", slippage_cost=round(slip_cost, 4),
+                    matched_pattern_indices=pos.get("matched_pattern_indices"),
                 ))
             positions.clear()
 
@@ -352,6 +357,7 @@ def run_backtest(
                 regime_id=pos.get("regime_id"),
                 exit_reason="end_of_backtest",
                 slippage_cost=round(slip_cost, 4),
+                matched_pattern_indices=pos.get("matched_pattern_indices"),
             ))
 
     # Compute metrics
@@ -448,6 +454,7 @@ def _compute_metrics(
             "confidence": t.confidence,
             "exit_reason": t.exit_reason,
             "slippage_cost": round(t.slippage_cost, 4),
+            "matched_pattern_indices": t.matched_pattern_indices,
         }
         for t in trades
     ]

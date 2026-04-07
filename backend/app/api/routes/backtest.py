@@ -5,16 +5,17 @@ from datetime import date, timedelta
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, and_
 
 from app.api.deps import get_db
 from app.config import settings
 from app.db import crud
 from app.db.models import BacktestResult as BacktestResultModel
-from app.db.models import KNNPrediction, LSTMPrediction, EnsemblePrediction
+from app.db.models import KNNPrediction, LSTMPrediction, EnsemblePrediction, StockOHLCV, GoldenPattern
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -92,7 +93,7 @@ async def run_backtest(
             q = q.where(KNNPrediction.knn_model_id == req.model_id)
         res = await db.execute(q)
         for p in res.scalars():
-            pred_dict[p.date] = {"action": p.action, "confidence": p.confidence, "regime_id": p.regime_id}
+            pred_dict[p.date] = {"action": p.action, "confidence": p.confidence, "regime_id": p.regime_id, "matched_pattern_indices": p.matched_pattern_ids}
 
     if req.model_type in ("lstm",):
         q = select(LSTMPrediction).where(
@@ -205,31 +206,52 @@ async def _run_live_inference(
     knn_name: str | None = None,
     lstm_name: str | None = None,
 ) -> dict:
-    """
+    \"\"\"
     Load specific or latest KNN+LSTM distilled models from disk and run sliding-window
     inference over the requested date range. Returns a {date: prediction_dict} map.
 
     Model output class encoding: 0=HOLD, 1=BUY, 2=SELL
     Backtester encoding:         0=HOLD, 1=BUY, -1=SELL   (2 → -1 mapping applied here)
-    """
-    distill_dir = settings.MODEL_DIR / "distill"
+    \"\"\"
+    distill_dir = settings.MODEL_DIR / \"distill\"
     if not distill_dir.exists():
-        logger.warning("No distill directory found at %s", distill_dir)
+        logger.warning(\"No distill directory found at %s\", distill_dir)
         return {}
+
+    def _latest_model_path(distill_dir: Path, prefix: str, filename: str) -> Path | None:
+        \"\"\"Find the newest model file in the highest-versioned model directory under distill_dir.\"\"\"
+        candidates = sorted(
+            [d for d in distill_dir.iterdir() if d.is_dir() and d.name.startswith(prefix)],
+            key=lambda p: int(\"\".join(filter(str.isdigit, p.name)) or \"0\"),
+        )
+        # Derive glob pattern from the filename extension (e.g. *.joblib, *.pt)
+        suffix = Path(filename).suffix  # \".joblib\" or \".pt\"
+        for candidate in reversed(candidates):
+            # First try the exact fixed name (backward compat)
+            exact = candidate / filename
+            if exact.exists():
+                return exact
+            # Then find the newest timestamped file with the same extension
+            versioned = sorted(candidate.glob(f\"*{suffix}\"), key=lambda p: p.stat().st_mtime)
+            if versioned:
+                return versioned[-1]
+        return None
 
     # Resolve actual model paths
     if knn_name:
-        knn_path = distill_dir / knn_name / "knn_model.joblib"
-        if not knn_path.exists():
-            logger.error("Requested KNN model not found: %s", knn_path)
+        knn_base_dir = distill_dir / knn_name
+        knn_path = _latest_model_path(knn_base_dir.parent, prefix=knn_name, filename="knn_model.joblib")
+        if not knn_path:
+            logger.error("Requested KNN model not found in: %s", knn_base_dir)
             knn_path = None
     else:
         knn_path = _latest_model_path(distill_dir, prefix="knn", filename="knn_model.joblib")
 
     if lstm_name:
-        lstm_path = distill_dir / lstm_name / "lstm_model.pt"
-        if not lstm_path.exists():
-            logger.error("Requested LSTM model not found: %s", lstm_path)
+        lstm_base_dir = distill_dir / lstm_name
+        lstm_path = _latest_model_path(lstm_base_dir.parent, prefix=lstm_name, filename="lstm_model.pt")
+        if not lstm_path:
+            logger.error("Requested LSTM model not found in: %s", lstm_base_dir)
             lstm_path = None
     else:
         lstm_path = _latest_model_path(distill_dir, prefix="lstm", filename="lstm_model.pt")
@@ -285,6 +307,16 @@ async def _run_live_inference(
     knn_preds_raw, knn_probs_raw = predict_knn(knn_model, X_all, norm_params=knn_norm_params)
     lstm_preds_raw, lstm_probs_raw = predict_lstm(lstm_model, X_all)
 
+    # Resolve matched patterns from KNN for explainability
+    matched_patterns = []
+    if hasattr(knn_model, "_query"):
+        _, indices = knn_model._query(np.ascontiguousarray(X_all.reshape(len(X_all), -1), dtype=np.float32))
+        # indices is (n_samples, k)
+        # We need to map these back to GoldenPattern IDs if possible.
+        # This requires the KNN model to have a mapping of its training indices to DB IDs.
+        # If not available, we'll indicate indices.
+        matched_patterns = indices.tolist()
+
     # KNN may have been trained on only [1, 2] classes → expand to 3-column prob [HOLD, BUY, SELL]
     knn_classes = list(knn_model.classes_)  # e.g. [1, 2]
     if knn_probs_raw.shape[1] != 3:
@@ -322,35 +354,65 @@ async def _run_live_inference(
             "action": mapped_action,
             "confidence": p["confidence"],
             "regime_id": None,
+            "matched_pattern_indices": p.get("matched_pattern_indices")
         }
 
     logger.info("Live inference produced %d predictions for %d target dates", len(result), len(target_dates))
     return result
 
 
-def _latest_model_path(distill_dir: Path, prefix: str, filename: str) -> Path | None:
-    """Find the newest model file in the highest-versioned model directory under distill_dir.
+@router.get("/{backtest_id}/trades/{trade_idx}/patterns")
+async def get_trade_patterns(
+    backtest_id: int,
+    trade_idx: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Fetch golden patterns that matched a specific trade in a backtest."""
+    res = await db.execute(select(BacktestResultModel).where(BacktestResultModel.id == backtest_id))
+    bt = res.scalar_one_or_none()
+    if not bt:
+        raise HTTPException(status_code=404, detail="Backtest not found")
 
-    Models are saved with a UTC timestamp suffix (e.g. knn_model_20260406_2310.joblib)
-    rather than a fixed name.  This helper accepts ``filename`` as a fallback exact name
-    but also globs by extension so timestamped files are discovered automatically.
-    """
-    candidates = sorted(
-        [d for d in distill_dir.iterdir() if d.is_dir() and d.name.startswith(prefix)],
-        key=lambda p: int("".join(filter(str.isdigit, p.name)) or "0"),
-    )
-    # Derive glob pattern from the filename extension (e.g. *.joblib, *.pt)
-    suffix = Path(filename).suffix  # ".joblib" or ".pt"
-    for candidate in reversed(candidates):
-        # First try the exact fixed name (backward compat)
-        exact = candidate / filename
-        if exact.exists():
-            return exact
-        # Then find the newest timestamped file with the same extension
-        versioned = sorted(candidate.glob(f"*{suffix}"), key=lambda p: p.stat().st_mtime)
-        if versioned:
-            return versioned[-1]
-    return None
+    if not bt.trade_log or trade_idx >= len(bt.trade_log):
+        raise HTTPException(status_code=404, detail="Trade not found")
+
+    trade = bt.trade_log[trade_idx]
+    pattern_indices = trade.get("matched_pattern_indices")
+    if not pattern_indices:
+        return {"patterns": []}
+
+    # If it's a dict (from DB JSON), it might need conversion
+    if isinstance(pattern_indices, dict):
+        # depending on how it was stored
+        pattern_indices = list(pattern_indices.values())
+
+    # Fetch Golden Patterns from DB
+    # We don't have a direct mapping from KNN index to GoldenPattern.id yet in the code,
+    # so we'll fetch patterns for the same stock/interval as a proxy for search.
+    # IN A REAL SCENARIO: The KNN model should store the GoldenPattern.id in its training data.
+    q = select(GoldenPattern).where(
+        GoldenPattern.stock_id == bt.stock_id,
+        GoldenPattern.interval == bt.interval
+    ).limit(100) # Safety limit
+    
+    res = await db.execute(q)
+    all_patterns = res.scalars().all()
+    
+    # Filter by indices if we assume the training set was just these patterns
+    # This is a heuristic for this implementation.
+    matched = []
+    for idx in pattern_indices:
+        if 0 <= idx < len(all_patterns):
+            p = all_patterns[idx]
+            matched.append({
+                "id": p.id,
+                "date": str(p.date),
+                "pnl_pct": p.pnl_percent,
+                "confidence": p.confidence,
+                "label": "BUY" if p.label == 1 else "SELL" if p.label == -1 else "HOLD"
+            })
+
+    return {"patterns": matched}
 
 
 @router.get("/results/{backtest_id}")

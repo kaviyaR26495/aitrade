@@ -48,17 +48,17 @@ export const useSetUniverse = () => {
   });
 };
 
-export const useOhlcv = (stockId: number, interval = 'day') =>
+export const useOhlcv = (stockId: number | undefined, interval = 'day', startDate?: string, endDate?: string) =>
   useQuery({
-    queryKey: ['ohlcv', stockId, interval],
-    queryFn: () => api.getOhlcv(stockId, interval).then(r => r.data),
+    queryKey: ['ohlcv', stockId, interval, startDate, endDate],
+    queryFn: () => api.getOhlcv(stockId!, interval, startDate, endDate).then(r => r.data),
     enabled: !!stockId,
   });
 
-export const useIndicators = (stockId: number, interval = 'day') =>
+export const useIndicators = (stockId: number | undefined, interval = 'day', startDate?: string, endDate?: string) =>
   useQuery({
-    queryKey: ['indicators', stockId, interval],
-    queryFn: () => api.getIndicators(stockId, interval).then(r => r.data),
+    queryKey: ['indicators', stockId, interval, startDate, endDate],
+    queryFn: () => api.getIndicators(stockId!, interval, startDate, endDate).then(r => r.data),
     enabled: !!stockId,
   });
 
@@ -93,11 +93,13 @@ export const useAlgorithms = () =>
 export const useDeviceInfo = () =>
   useQuery({ queryKey: ['device-info'], queryFn: () => api.getDeviceInfo().then(r => r.data), staleTime: 60_000 });
 
-export const useRlModels = () =>
+export const useRlModels = (enabled = true) =>
   useQuery({
     queryKey: ['rl-models'],
     queryFn: () => api.listRlModels().then(r => r.data),
+    enabled,
     refetchInterval: (query) => {
+      if (!enabled) return false;
       const models: any[] = query.state.data ?? [];
       const hasActive = models.some(
         (m) => m.status === 'pending' || m.status === 'training' || m.status === 'paused',
@@ -189,8 +191,13 @@ export const useDeleteRlModel = () => {
   });
 };
 
-export const useTrainingLogFiles = () =>
-  useQuery({ queryKey: ['training-log-files'], queryFn: () => api.listTrainingLogFiles().then(r => r.data), staleTime: 5000 });
+export const useTrainingLogFiles = (enabled = true) =>
+  useQuery({
+    queryKey: ['training-log-files'],
+    queryFn: () => api.listTrainingLogFiles().then(r => r.data),
+    enabled,
+    staleTime: 5000,
+  });
 
 export const useTrainingLogFile = (modelId: number | null, isActive: boolean) => {
   const qc = useQueryClient();
@@ -215,8 +222,13 @@ export const useTrainingLogFile = (modelId: number | null, isActive: boolean) =>
   return query;
 };
 
-export const useTrainingLogsTotalSize = () =>
-  useQuery({ queryKey: ['training-logs-size'], queryFn: () => api.getTrainingLogsTotalSize().then(r => r.data), staleTime: 5000 });
+export const useTrainingLogsTotalSize = (enabled = true) =>
+  useQuery({
+    queryKey: ['training-logs-size'],
+    queryFn: () => api.getTrainingLogsTotalSize().then(r => r.data),
+    enabled,
+    staleTime: 5000,
+  });
 
 export const useDeleteTrainingLogFile = () => {
   const qc = useQueryClient();
@@ -326,6 +338,13 @@ export const useDeleteEnsemble = () => {
 // ── Backtest hooks ──
 export const useBacktestResults = () =>
   useQuery({ queryKey: ['backtests'], queryFn: () => api.listBacktestResults().then(r => r.data) });
+
+export const useTradePatterns = (backtestId: number | null, tradeIdx: number | null) =>
+  useQuery({
+    queryKey: ['trade-patterns', backtestId, tradeIdx],
+    queryFn: () => api.getTradePatterns(backtestId!, tradeIdx!).then(r => r.data),
+    enabled: !!backtestId && tradeIdx !== null,
+  });
 
 export const useRunBacktest = () => {
   const qc = useQueryClient();

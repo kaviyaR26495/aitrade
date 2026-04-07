@@ -14,7 +14,8 @@ import {
   listUniverseStocks,
 } from '../services/api';
 import { useAppStore } from '../store/appStore';
-import { ExternalLink, MessageCircle, Shield, ShieldCheck, ShieldAlert, Database, Server, Cpu, RefreshCw } from 'lucide-react';
+import { ExternalLink, MessageCircle, Shield, ShieldCheck, ShieldAlert, Database, Server, Cpu, RefreshCw, Trash2 } from 'lucide-react';
+import SystemMaintenance from '../components/SystemMaintenance';
 
 const SETTING_FIELDS = [
   { key: 'KITE_API_KEY', label: 'Kite API Key', type: 'password', guideId: 'zerodha-api-key' },
@@ -451,6 +452,8 @@ export default function Settings() {
           ))}
         </div>
       </Card>
+
+      <SystemMaintenance />
 
       {/* Chat Assistant */}
       <Card title="Chat Assistant" data-guide-id="chat-config-section">

@@ -67,9 +67,11 @@ export default function TrainingConsole() {
   const [showFiles, setShowFiles] = useState(false);
   const [deleteAllConfirm, setDeleteAllConfirm] = useState(false);
 
-  const { data: rlModels } = useRlModels();
-  const { data: logFiles } = useTrainingLogFiles();
-  const { data: totalSize } = useTrainingLogsTotalSize();
+  const shouldLoadConsoleData = trainingConsoleOpen;
+
+  const { data: rlModels } = useRlModels(shouldLoadConsoleData);
+  const { data: logFiles } = useTrainingLogFiles(shouldLoadConsoleData);
+  const { data: totalSize } = useTrainingLogsTotalSize(shouldLoadConsoleData);
   const deleteFileMutation = useDeleteTrainingLogFile();
   const deleteAllMutation = useDeleteAllTrainingLogs();
 

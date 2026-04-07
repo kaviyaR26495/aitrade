@@ -70,8 +70,8 @@ export const updateConfigBatch = (settings: { key: string; value: string }[]) =>
 export const listStocks = () => api.get('/data/stocks');
 export const getOhlcv = (stockId: number, interval?: string, startDate?: string, endDate?: string) =>
   api.get(`/data/stocks/${stockId}/ohlcv`, { params: { interval, start_date: startDate, end_date: endDate } });
-export const getIndicators = (stockId: number, interval?: string) =>
-  api.get(`/data/stocks/${stockId}/indicators`, { params: { interval } });
+export const getIndicators = (stockId: number, interval?: string, startDate?: string, endDate?: string) =>
+  api.get(`/data/stocks/${stockId}/indicators`, { params: { interval, start_date: startDate, end_date: endDate } });
 export const syncData = (stockIds: number[], interval?: string) =>
   api.post('/data/sync', { stock_ids: stockIds, interval });
 export const syncStockList = () => api.post('/data/sync/stocks');
@@ -136,6 +136,8 @@ export const runBacktest = (params: Record<string, unknown>) =>
   api.post('/backtest/run', params);
 export const getBacktestResults = (id: number) => api.get(`/backtest/results/${id}`);
 export const listBacktestResults = () => api.get('/backtest/results');
+export const getTradePatterns = (backtestId: number, tradeIdx: number) =>
+  api.get(`/backtest/${backtestId}/trades/${tradeIdx}/patterns`);
 
 // ── Trading ──
 export const getPredictions = (params?: Record<string, unknown>) =>
