@@ -27,7 +27,7 @@ class BacktestConfig:
     commission_pct: float = 0.001  # 0.1% per trade (Zerodha CNC is ~0.03% but includes STT etc)
     stoploss_pct: float = 5.0
     target_pct: float | None = None  # None = hold until sell signal
-    min_confidence: float = 0.65
+    min_confidence: float = 0.72
     max_positions: int = 10
     position_size_pct: float = 10.0  # % of capital per trade (used by 'fixed' sizing)
     # ── Slippage simulation ────────────────────────────────────────────────
@@ -46,6 +46,11 @@ class BacktestConfig:
     # A new BUY is blocked when the sector already accounts for ≥ sector_cap
     # of total portfolio equity.
     sector_cap: float = 0.25  # maximum equity fraction in any single sector
+    # ── Regime lock ───────────────────────────────────────────────────────────
+    # When True: only execute a BUY/SELL signal if the current bar's regime_id
+    # matches the regime_id recorded on the pattern that generated the signal.
+    # Requires predictions to carry "pattern_regime_id" (set by live inference).
+    regime_lock: bool = False
 
 @dataclass
 class Trade:
@@ -245,6 +250,12 @@ def run_backtest(
             del positions[key]
 
         # ── New signals ────────────────────────────────────────────────
+        # Regime lock: skip signal if current regime doesn't match the pattern's regime
+        if config.regime_lock and action in (1, -1):
+            pattern_regime = pred.get("pattern_regime_id")
+            if pattern_regime is not None and regime_id is not None and pattern_regime != regime_id:
+                action = 0  # suppress — wrong market regime
+
         if action == 1 and confidence >= config.min_confidence:
             if len(positions) < config.max_positions and price > 0:
                 # Dynamic position sizing + optional NIFTY breadth kill-switch
@@ -308,7 +319,7 @@ def run_backtest(
                             "price": price,  # current MTM price for sector calc
                         }
 
-        elif action == -1 and confidence >= config.min_confidence:
+        elif action == -1 and confidence >= config.min_confidence:  # noqa: E501
             for key, pos in list(positions.items()):
                 fill_exit = _slip_price(price, -1, config.slippage_bps, rv, config.vol_slippage_scale)
                 exit_value = pos["quantity"] * fill_exit * (1 - config.commission_pct)

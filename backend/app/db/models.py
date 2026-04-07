@@ -242,6 +242,7 @@ class GoldenPattern(Base):
     pnl_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
     regime_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    atr_at_capture: Mapped[float | None] = mapped_column(Float, nullable=True)  # raw ATR % at pattern date
 
 
 # ── KNN Models ─────────────────────────────────────────────────────────

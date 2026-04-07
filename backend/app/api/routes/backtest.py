@@ -281,7 +281,7 @@ async def _run_live_inference(
     # Indicators like SMA_200 need ~200 trading days of warmup; fetch extra data
     warmup_start = start_d - timedelta(days=400)
 
-    from app.core.data_service import get_model_ready_data
+    from app.core.data_service import get_model_ready_data, get_stock_features
     from app.core.normalizer import prepare_model_input
 
     df, feature_cols = await get_model_ready_data(
@@ -290,6 +290,26 @@ async def _run_live_inference(
     if df.empty or len(df) < seq_len + 1:
         logger.warning("Insufficient feature data for live inference on stock %d", stock_id)
         return {}
+
+    # Build a date→ATR% lookup from raw (unnormalized) close prices for the ATR gate.
+    # ATR% is approximated as the 14-bar rolling mean of |ΔClose|/Close × 100.
+    _atr_by_date: dict = {}
+    try:
+        df_raw = await get_stock_features(
+            db, stock_id, interval, start_date=warmup_start, end_date=end_d, normalize=False
+        )
+        if not df_raw.empty and "close" in df_raw.columns:
+            _raw_close = df_raw["close"].astype(float)
+            _abs_ret = _raw_close.pct_change().abs() * 100.0  # |ΔC/C| in %
+            _atr_pct_series = _abs_ret.rolling(14, min_periods=1).mean()
+            _raw_dates = (
+                df_raw["date"].dt.date.tolist()
+                if "date" in df_raw.columns and hasattr(df_raw["date"].iloc[0], "date")
+                else list(df_raw["date"])
+            )
+            _atr_by_date = {d: v for d, v in zip(_raw_dates, _atr_pct_series)}
+    except Exception as _atr_exc:
+        logger.warning("ATR gate data fetch failed (gate disabled): %s", _atr_exc)
 
     # date column name
     date_col = "date" if "date" in df.columns else df.index.name or None
@@ -341,6 +361,25 @@ async def _run_live_inference(
     )
 
     # Each window[i] covers data rows [i, i+seq_len-1] → prediction is for all_dates[i+seq_len-1]
+    # Build rolling-median ATR for the gate: suppress signals on panic/crash days
+    # where current ATR% > 3× the 60-bar rolling median (market is unusually wild).
+    _sorted_atr_dates = sorted(_atr_by_date.keys())
+    _atr_values = [_atr_by_date[d] for d in _sorted_atr_dates]
+    _atr_median_by_date: dict = {}
+    _window = 60
+    for _j, _d in enumerate(_sorted_atr_dates):
+        _slice = _atr_values[max(0, _j - _window): _j + 1]
+        _valid = [v for v in _slice if v == v and v > 0]  # exclude NaN and zero
+        if _valid:
+            _sorted_slice = sorted(_valid)
+            _mid = len(_sorted_slice) // 2
+            _median = (
+                _sorted_slice[_mid]
+                if len(_sorted_slice) % 2 == 1
+                else (_sorted_slice[_mid - 1] + _sorted_slice[_mid]) / 2.0
+            )
+            _atr_median_by_date[_d] = _median
+
     result: dict = {}
     target_date_set = set(target_dates)
     for i, p in enumerate(preds_list):
@@ -355,6 +394,17 @@ async def _run_live_inference(
             continue
         raw_action = p["action"]  # 0=HOLD, 1=BUY, 2=SELL
         mapped_action = -1 if raw_action == 2 else raw_action  # convert SELL → -1 for backtester
+
+        # ATR gate: suppress BUY/SELL during panic/crash days (unusually high volatility).
+        # Skip signal when current ATR% > 3× the 60-bar rolling median ATR%.
+        if mapped_action != 0 and _atr_median_by_date:
+            _curr_atr = _atr_by_date.get(d, 0.0)
+            _med_atr = _atr_median_by_date.get(d, 0.0)
+            if _med_atr > 0 and _curr_atr > 3.0 * _med_atr:
+                logger.debug("ATR gate suppressed %s signal on %s (atr=%.2f%%, median=%.2f%%)",
+                             "BUY" if mapped_action == 1 else "SELL", d, _curr_atr, _med_atr)
+                mapped_action = 0
+
         result[d] = {
             "action": mapped_action,
             "confidence": p["confidence"],

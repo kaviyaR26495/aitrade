@@ -701,7 +701,7 @@ class DistillRequest(BaseModel):
     lstm_dropout: float = 0.3
     lstm_max_epochs: int = 100
     min_profit_threshold: float = 1.2
-    profit_horizon: int = 1
+    profit_horizon: int = 5
     knn_weight: float = 0.5
     lstm_weight: float = 0.5
     agreement_required: bool = True

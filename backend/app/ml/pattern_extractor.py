@@ -41,6 +41,8 @@ def extract_patterns(
     mode: str = "behavioral_cloning",
     max_hold_ratio: float = 5.0,
     parquet_key: str | None = None,
+    min_pnl_for_buy_sell: float = 1.5,
+    min_support: int = 3,
 ) -> list[dict[str, Any]]:
     """
     Replay RL model on data and extract labelled training patterns.
@@ -58,6 +60,14 @@ def extract_patterns(
         golden_patterns only: minimum forward P&L % to keep a pattern.
     profit_horizon : int
         Number of candles forward used to measure realised P&L.
+    min_pnl_for_buy_sell : float
+        behavioral_cloning only: BUY/SELL patterns with forward P&L below this
+        threshold are *relabeled* to HOLD (not dropped) so the model learns
+        which setups look like signals but shouldn't be traded.
+    min_support : int
+        Minimum number of same-label occurrences in the same regime required
+        for a pattern to keep its BUY/SELL label.  Patterns below this count
+        are relabeled to HOLD (idiosyncratic noise → don't trade).
 
     Returns list of pattern dicts ready for DB insertion.
     """
@@ -122,11 +132,21 @@ def extract_patterns(
         else:
             # ── Behavioral cloning: all RL decisions become training labels
             if action == 1:
-                label = 1
-                confidence = min(max(pnl_pct / 5.0, 0.0), 1.0)
+                # Step 1a: relabel unprofitable BUY as HOLD (model learns "looks like BUY but don't")
+                if pnl_pct < min_pnl_for_buy_sell:
+                    label = 0
+                    confidence = 0.5
+                else:
+                    label = 1
+                    confidence = min(max(pnl_pct / 5.0, 0.0), 1.0)
             elif action == 2:
-                label = -1
-                confidence = min(max(pnl_pct / 5.0, 0.0), 1.0)
+                # Step 1a: relabel unprofitable SELL as HOLD
+                if pnl_pct < min_pnl_for_buy_sell:
+                    label = 0
+                    confidence = 0.5
+                else:
+                    label = -1
+                    confidence = min(max(pnl_pct / 5.0, 0.0), 1.0)
             else:
                 label = 0
                 confidence = 0.5  # HOLD: neutral confidence
@@ -139,18 +159,46 @@ def extract_patterns(
         # Regime at the action point
         rid = int(regime_ids[data_idx]) if regime_ids is not None and data_idx < len(regime_ids) else None
 
+        # ATR % at capture: rolling 14-bar mean of |close[t] - close[t-1]| / close[t]
+        # Using raw close_prices so the value is interpretable at inference time.
+        atr_window_start = max(1, data_idx - 13)
+        atr_closes = close_prices[atr_window_start: data_idx + 1]
+        if len(atr_closes) >= 2 and float(atr_closes[-1]) > 0:
+            daily_ranges = np.abs(np.diff(atr_closes.astype(np.float64))) / atr_closes[1:].astype(np.float64)
+            atr_pct = float(np.mean(daily_ranges) * 100)
+        else:
+            atr_pct = None
+
         pattern = {
             "date": dates[data_idx] if data_idx < len(dates) else None,
             "label": label,
             "pnl_percent": round(float(pnl_pct), 4),
             "regime_id": rid,
             "confidence": round(float(confidence), 4),
+            "atr_at_capture": round(atr_pct, 4) if atr_pct is not None else None,
             "_feature_window": feature_window.astype(np.float32),  # temp; replaced after sort
         }
         raw_patterns.append(pattern)
 
     # ── Downsample HOLDs in behavioral_cloning mode ────────────────────
     if mode == "behavioral_cloning":
+        # Step 1c: min-support gate — relabel BUY/SELL labels with < min_support
+        # occurrences in a given (regime_id, label) bucket to HOLD.  This
+        # prevents the model from memorising single idiosyncratic events.
+        if min_support > 1:
+            from collections import Counter
+            bucket_counts: Counter = Counter(
+                (p.get("regime_id"), p["label"])
+                for p in raw_patterns
+                if p["label"] != 0
+            )
+            for p in raw_patterns:
+                if p["label"] != 0:
+                    key = (p.get("regime_id"), p["label"])
+                    if bucket_counts[key] < min_support:
+                        p["label"] = 0
+                        p["confidence"] = 0.5
+
         trade_patterns = [p for p in raw_patterns if p["label"] != 0]
         hold_patterns  = [p for p in raw_patterns if p["label"] == 0]
         max_holds = int(len(trade_patterns) * max_hold_ratio)
