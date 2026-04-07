@@ -42,6 +42,11 @@ class BacktestSummary(BaseModel):
     id: int
     model_type: str
     model_id: int
+    stock_id: int | None = None
+    symbol: str | None = None
+    interval: str | None = None
+    start_date: str | None = None
+    end_date: str | None = None
     total_return: float | None
     win_rate: float | None
     max_drawdown: float | None
@@ -206,33 +211,33 @@ async def _run_live_inference(
     knn_name: str | None = None,
     lstm_name: str | None = None,
 ) -> dict:
-    \"\"\"
+    """
     Load specific or latest KNN+LSTM distilled models from disk and run sliding-window
     inference over the requested date range. Returns a {date: prediction_dict} map.
 
     Model output class encoding: 0=HOLD, 1=BUY, 2=SELL
     Backtester encoding:         0=HOLD, 1=BUY, -1=SELL   (2 → -1 mapping applied here)
-    \"\"\"
-    distill_dir = settings.MODEL_DIR / \"distill\"
+    """
+    distill_dir = settings.MODEL_DIR / "distill"
     if not distill_dir.exists():
-        logger.warning(\"No distill directory found at %s\", distill_dir)
+        logger.warning("No distill directory found at %s", distill_dir)
         return {}
 
     def _latest_model_path(distill_dir: Path, prefix: str, filename: str) -> Path | None:
-        \"\"\"Find the newest model file in the highest-versioned model directory under distill_dir.\"\"\"
+        """Find the newest model file in the highest-versioned model directory under distill_dir."""
         candidates = sorted(
             [d for d in distill_dir.iterdir() if d.is_dir() and d.name.startswith(prefix)],
-            key=lambda p: int(\"\".join(filter(str.isdigit, p.name)) or \"0\"),
+            key=lambda p: int("".join(filter(str.isdigit, p.name)) or "0"),
         )
         # Derive glob pattern from the filename extension (e.g. *.joblib, *.pt)
-        suffix = Path(filename).suffix  # \".joblib\" or \".pt\"
+        suffix = Path(filename).suffix  # ".joblib" or ".pt"
         for candidate in reversed(candidates):
             # First try the exact fixed name (backward compat)
             exact = candidate / filename
             if exact.exists():
                 return exact
             # Then find the newest timestamped file with the same extension
-            versioned = sorted(candidate.glob(f\"*{suffix}\"), key=lambda p: p.stat().st_mtime)
+            versioned = sorted(candidate.glob(f"*{suffix}"), key=lambda p: p.stat().st_mtime)
             if versioned:
                 return versioned[-1]
         return None
@@ -433,13 +438,14 @@ async def get_backtest_results(
         "model_type": bt.model_type,
         "model_id": bt.model_id,
         "stock_id": bt.stock_id,
-        "interval": bt.interval,
+        "interval": bt.interval.value if hasattr(bt.interval, "value") else str(bt.interval),
         "start_date": str(bt.start_date),
         "end_date": str(bt.end_date),
         "total_return": bt.total_return,
         "win_rate": bt.win_rate,
         "max_drawdown": bt.max_drawdown,
         "sharpe": bt.sharpe,
+        "sharpe_ratio": bt.sharpe,
         "profit_factor": bt.profit_factor,
         "trades_count": bt.trades_count,
         "trade_log": bt.trade_log,
@@ -452,8 +458,32 @@ async def list_backtest_results(
     model_type: str | None = Query(None),
 ):
     """List all backtest results."""
-    q = select(BacktestResultModel).order_by(BacktestResultModel.id.desc())
+    from app.db.models import Stock
+    q = (
+        select(BacktestResultModel, Stock.symbol)
+        .outerjoin(Stock, Stock.id == BacktestResultModel.stock_id)
+        .order_by(BacktestResultModel.id.desc())
+    )
     if model_type:
         q = q.where(BacktestResultModel.model_type == model_type)
     result = await db.execute(q)
-    return result.scalars().all()
+    rows = result.all()
+    return [
+        {
+            "id": bt.id,
+            "model_type": bt.model_type,
+            "model_id": bt.model_id,
+            "stock_id": bt.stock_id,
+            "symbol": symbol,
+            "interval": bt.interval.value if hasattr(bt.interval, "value") else str(bt.interval),
+            "start_date": str(bt.start_date),
+            "end_date": str(bt.end_date),
+            "total_return": bt.total_return,
+            "win_rate": bt.win_rate,
+            "max_drawdown": bt.max_drawdown,
+            "sharpe": bt.sharpe,
+            "profit_factor": bt.profit_factor,
+            "trades_count": bt.trades_count,
+        }
+        for bt, symbol in rows
+    ]

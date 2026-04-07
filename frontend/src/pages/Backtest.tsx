@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo } from 'react';
 import { Card, Button, Select, SearchableSelect, Input, Badge, StatCard, EmptyState, PageHeader, ListItem } from '../components/ui';
-import { useUniverseStocks, useBacktestResults, useRunBacktest, useOhlcv, useIndicators, useTradePatterns } from '../hooks/useApi';
+import { useUniverseStocks, useBacktestResults, useBacktestDetail, useRunBacktest, useOhlcv, useIndicators, useTradePatterns } from '../hooks/useApi';
 import { useAppStore } from '../store/appStore';
 import LightweightAreaChart, { type ChartPoint } from '../components/LightweightAreaChart';
 import LightweightCandleChart from '../components/LightweightCandleChart';
@@ -20,6 +20,8 @@ export default function Backtest() {
   const [endDate, setEndDate] = useState('');
   const [initialCapital, setInitialCapital] = useState('100000');
   const [selectedResult, setSelectedResult] = useState<any>(null);
+  const [selectedId, setSelectedId] = useState<number | null>(null);
+  const { data: backtestDetail } = useBacktestDetail(selectedId);
   const [isBulkRunning, setIsBulkRunning] = useState(false);
   const [shouldStopBulk, setShouldStopBulk] = useState(false);
   const [bulkProgress, setBulkProgress] = useState<{ current: number; total: number; symbol: string } | null>(null);
@@ -62,6 +64,7 @@ export default function Backtest() {
       {
         onSuccess: (res: any) => {
           addNotification({ type: 'success', message: 'Backtest complete' });
+          setSelectedId(null);
           setSelectedResult(res.data);
         },
         onError: () => addNotification({ type: 'error', message: 'Backtest failed' }),
@@ -122,6 +125,13 @@ export default function Backtest() {
   const handleStopBulk = () => {
     setShouldStopBulk(true);
   };
+
+  // When detail arrives for a previous-backtest selection, merge trade_log + full fields
+  useEffect(() => {
+    if (backtestDetail && selectedResult?.id === backtestDetail.id) {
+      setSelectedResult((prev: any) => prev ? { ...prev, ...backtestDetail } : backtestDetail);
+    }
+  }, [backtestDetail]);
 
   useEffect(() => {
     setSelectedTrade(null);
@@ -456,12 +466,12 @@ export default function Backtest() {
       </div>
 
       {backtests && backtests.length > 0 && (
-        <Card title="Previous Backtests">
+        <Card title={`Previous Backtests (${backtests.length})`}>
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-            {backtests.slice(0, 12).map((bt: any) => (
+            {backtests.map((bt: any) => (
               <div 
                 key={bt.id}
-                onClick={() => setSelectedResult(bt)}
+                onClick={() => { setSelectedResult(bt); setSelectedId(bt.id); }}
                 className={`p-3 rounded-[var(--radius-sm)] border cursor-pointer transition-all hover:shadow-md ${
                   selectedResult?.id === bt.id 
                     ? 'border-[var(--primary)] bg-[var(--primary-subtle)]/10 shadow-sm' 
@@ -473,23 +483,23 @@ export default function Backtest() {
                     <span className="font-bold text-sm tracking-tight">{bt.symbol || `ID: ${bt.stock_id}`}</span>
                     <span className="text-[10px] uppercase text-[var(--text-dim)] font-semibold">{bt.model_type}</span>
                   </div>
-                  <div className={`text-sm font-black tabular-nums ${bt.total_return >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                    {(bt.total_return * 100).toFixed(1)}%
+                  <div className={`text-sm font-black tabular-nums ${(bt.total_return ?? 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                    {bt.total_return != null ? `${(bt.total_return * 100).toFixed(1)}%` : '—'}
                   </div>
                 </div>
                 
                 <div className="flex justify-between items-center text-[10px]">
                   <div className="flex flex-col gap-0.5">
                     <span className="text-[var(--text-dim)]">DRAWDOWN</span>
-                    <span className="font-mono text-rose-300">{(bt.max_drawdown * 100).toFixed(1)}%</span>
+                    <span className="font-mono text-rose-300">{bt.max_drawdown != null ? `${(bt.max_drawdown * 100).toFixed(1)}%` : '—'}</span>
                   </div>
                   <div className="flex flex-col gap-0.5 text-center">
                     <span className="text-[var(--text-dim)]">WIN RATE</span>
-                    <span className="font-mono text-blue-300">{(bt.win_rate * 100).toFixed(0)}%</span>
+                    <span className="font-mono text-blue-300">{bt.win_rate != null ? `${(bt.win_rate * 100).toFixed(0)}%` : '—'}</span>
                   </div>
                   <div className="flex flex-col gap-0.5 text-right">
                     <span className="text-[var(--text-dim)]">DATE</span>
-                    <span className="font-mono">{new Date(bt.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</span>
+                    <span className="font-mono">{bt.end_date ? new Date(bt.end_date).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: '2-digit' }) : '—'}</span>
                   </div>
                 </div>
               </div>

@@ -1,4 +1,5 @@
 import { Routes, Route } from 'react-router-dom';
+import { useEffect } from 'react';
 import Layout from './components/Layout';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import Dashboard from './pages/Dashboard';
@@ -12,8 +13,16 @@ import Portfolio from './pages/Portfolio';
 import Settings from './pages/Settings';
 import ThemeShowcase from './components/ThemeShowcase';
 import StockSelector from './pages/StockSelector';
+import { useAppStore } from './store/appStore';
 
 export default function App() {
+  const { initialize } = useAppStore();
+
+  useEffect(() => {
+    // Background health check — never blocks rendering
+    initialize();
+  }, []);
+
   return (
     <ErrorBoundary>
       <Routes>

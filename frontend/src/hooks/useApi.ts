@@ -339,6 +339,14 @@ export const useDeleteEnsemble = () => {
 export const useBacktestResults = () =>
   useQuery({ queryKey: ['backtests'], queryFn: () => api.listBacktestResults().then(r => r.data) });
 
+export const useBacktestDetail = (id: number | null) =>
+  useQuery({
+    queryKey: ['backtest-detail', id],
+    queryFn: () => api.getBacktestResults(id!).then(r => r.data),
+    enabled: !!id,
+    staleTime: 5 * 60 * 1000,
+  });
+
 export const useTradePatterns = (backtestId: number | null, tradeIdx: number | null) =>
   useQuery({
     queryKey: ['trade-patterns', backtestId, tradeIdx],

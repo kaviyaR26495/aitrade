@@ -60,6 +60,7 @@ export const zerodhaCallback = (requestToken: string) =>
 
 // ── Config ──
 export const getConfig = () => api.get('/config/');
+export const getHealth = () => api.get('/health');
 export const getSetting = (key: string) => api.get(`/config/${key}`);
 export const updateSetting = (key: string, value: string) =>
   api.put('/config/', { key, value });

@@ -168,6 +168,11 @@ interface AppState {
   setPipelineUniverse: (symbols: string[]) => void;
   activePipelineJobId: string | null;
   setActivePipelineJobId: (id: string | null) => void;
+
+  // Initialization
+  isInitialized: boolean;
+  initialize: () => Promise<void>;
+  error: string | null;
 }
 
 function getStoredTheme(): ThemeId {
@@ -257,5 +262,21 @@ export const useAppStore = create<AppState>((set) => ({
   resetStockSelectorSelection: () => {
     try { localStorage.removeItem(STOCK_SELECTOR_DRAFT_KEY); } catch { /* ignore */ }
     set({ stockSelectorSelection: createEmptyStockSelectorSelection() });
+  },
+
+  isInitialized: true,
+  error: null,
+  initialize: async () => {
+    // health check runs in the background — never blocks app render
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 5000);
+      const res = await fetch('/api/health', { signal: controller.signal });
+      clearTimeout(timer);
+      if (!res.ok) throw new Error(`Health check returned ${res.status}`);
+      set({ error: null });
+    } catch {
+      set({ error: 'Backend is not reachable. Some features may not work.' });
+    }
   },
 }));
