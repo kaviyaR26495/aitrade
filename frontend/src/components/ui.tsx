@@ -555,12 +555,12 @@ interface ModalProps {
   description?: string;
   icon?: ReactNode;
   variant?: 'default' | 'danger';
-  size?: 'sm' | 'md' | 'lg';
+  size?: 'sm' | 'md' | 'lg' | 'xl' | '2xl';
   children: ReactNode;
   footer?: ReactNode;
 }
 
-export function Modal({ open, onClose, title, description, icon, variant = 'default', size = 'md', children, footer }: ModalProps) {
+export function Modal({ open, onClose, title, description, icon, variant = 'default', size = 'md', children, footer }: ModalProps) {  // eslint-disable-line max-len
   const overlayRef = useRef<HTMLDivElement>(null);
 
   const handleEscape = useCallback((e: KeyboardEvent) => {
@@ -576,7 +576,7 @@ export function Modal({ open, onClose, title, description, icon, variant = 'defa
 
   if (!open) return null;
 
-  const sizeClass = size === 'sm' ? 'w-[360px]' : size === 'lg' ? 'w-[560px]' : 'w-[440px]';
+  const sizeClass = size === '2xl' ? 'w-[min(1100px,95vw)]' : size === 'xl' ? 'w-[min(860px,95vw)]' : size === 'lg' ? 'w-[560px]' : size === 'sm' ? 'w-[360px]' : 'w-[440px]';
   const borderColor = variant === 'danger' ? 'border-rose-500/40' : 'border-[var(--modal-border)]';
 
   return (
@@ -585,7 +585,7 @@ export function Modal({ open, onClose, title, description, icon, variant = 'defa
       className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 animate-[fade-in_0.15s_ease-out]"
       onClick={(e) => { if (e.target === overlayRef.current) onClose(); }}
     >
-      <div className={`bg-[var(--modal-bg)] border ${borderColor} rounded-[var(--radius-xl)] p-7 ${sizeClass} shadow-[var(--modal-shadow)] animate-[fade-in_0.2s_ease-out]`}>
+      <div className={`bg-[var(--modal-bg)] border ${borderColor} rounded-[var(--radius-xl)] p-7 ${sizeClass} max-h-[90vh] flex flex-col overflow-y-auto shadow-[var(--modal-shadow)] animate-[fade-in_0.2s_ease-out]`}>
         {(icon || title) && (
           <div className="flex items-center gap-3 mb-4">
             {icon && (

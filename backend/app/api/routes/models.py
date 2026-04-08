@@ -1387,6 +1387,56 @@ async def get_golden_patterns(
             "pnl_percent": p.pnl_percent,
             "confidence": p.confidence,
             "interval": p.interval,
-            "regime_id": p.regime_id
+            "regime_id": p.regime_id,
+            "atr_at_capture": p.atr_at_capture,
         })
     return out
+
+
+@router.get("/patterns/{pattern_id}/ohlcv")
+async def get_pattern_ohlcv(
+    pattern_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Return the raw OHLCV candle sequence around a golden pattern date."""
+    from datetime import timedelta
+    from app.db.models import RLModel
+
+    res = await db.execute(select(GoldenPattern).where(GoldenPattern.id == pattern_id))
+    pattern = res.scalar_one_or_none()
+    if not pattern:
+        raise HTTPException(status_code=404, detail="Pattern not found")
+
+    rl_res = await db.execute(select(RLModel).where(RLModel.id == pattern.rl_model_id))
+    rl_model = rl_res.scalar_one_or_none()
+    seq_len: int = 15
+    if rl_model and rl_model.training_config:
+        seq_len = int(rl_model.training_config.get("seq_len", 15))
+
+    pattern_date = pattern.date
+    # Generous window: seq_len + buffer before, 10 days after
+    start = pattern_date - timedelta(days=(seq_len + 30) * 2)
+    end = pattern_date + timedelta(days=14)
+
+    interval_str = pattern.interval.value if hasattr(pattern.interval, "value") else str(pattern.interval)
+    rows = await crud.get_ohlcv_as_dicts(
+        db, pattern.stock_id, interval_str, start_date=start, end_date=end
+    )
+
+    candles = [
+        {
+            "time": str(r["date"]),
+            "open": float(r["open"]),
+            "high": float(r["high"]),
+            "low": float(r["low"]),
+            "close": float(r["close"]),
+            "volume": int(r.get("volume") or 0),
+        }
+        for r in rows
+    ]
+
+    return {
+        "pattern_date": str(pattern_date),
+        "seq_len": seq_len,
+        "candles": candles,
+    }
