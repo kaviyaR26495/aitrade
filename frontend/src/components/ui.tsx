@@ -1,4 +1,4 @@
-import { type ReactNode, type HTMLAttributes, useEffect, useCallback, useRef, useState } from 'react';
+import { type ReactNode, type HTMLAttributes, useEffect, useCallback, useRef, useState, useMemo } from 'react';
 
 /* ═══════════════════════════════════════════════════════════
    CARD — Primary content container
@@ -482,6 +482,7 @@ export interface TableColumn<T = any> {
   width?: string;
   render?: (row: T, index: number) => ReactNode;
   mono?: boolean;
+  sortable?: boolean;
 }
 
 interface TableProps<T = any> {
@@ -494,12 +495,44 @@ interface TableProps<T = any> {
 }
 
 export function Table<T extends Record<string, any>>({ columns, data, onRowClick, emptyState, compact, className = '' }: TableProps<T>) {
-  if (data.length === 0 && emptyState) {
+  const [sortKey, setSortKey] = useState<string | null>(null);
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
+
+  const sortedData = useMemo(() => {
+    if (!sortKey) return data;
+    return [...data].sort((a, b) => {
+      const av = a[sortKey];
+      const bv = b[sortKey];
+      if (av == null && bv == null) return 0;
+      if (av == null) return 1;
+      if (bv == null) return -1;
+      const diff = typeof av === 'number' && typeof bv === 'number'
+        ? av - bv
+        : String(av).localeCompare(String(bv));
+      return sortDir === 'asc' ? diff : -diff;
+    });
+  }, [data, sortKey, sortDir]);
+
+  const handleSort = (key: string) => {
+    if (sortKey === key) {
+      setSortDir(d => d === 'asc' ? 'desc' : 'asc');
+    } else {
+      setSortKey(key);
+      setSortDir('asc');
+    }
+  };
+
+  if (sortedData.length === 0 && emptyState) {
     return <>{emptyState}</>;
   }
 
   const cellPad = compact ? 'py-2.5 px-3' : 'py-3 px-4';
   const alignClass = (a?: string) => a === 'center' ? 'text-center' : a === 'right' ? 'text-right' : 'text-left';
+
+  const SortIcon = ({ colKey }: { colKey: string }) => {
+    if (sortKey !== colKey) return <span className="ml-1 opacity-30 text-[10px]">⇅</span>;
+    return <span className="ml-1 text-[var(--primary)] text-[10px]">{sortDir === 'asc' ? '↑' : '↓'}</span>;
+  };
 
   return (
     <div className={`overflow-x-auto ${className}`}>
@@ -509,16 +542,20 @@ export function Table<T extends Record<string, any>>({ columns, data, onRowClick
             {columns.map((col) => (
               <th
                 key={col.key}
-                className={`${cellPad} text-[11px] text-[var(--text-dim)] font-medium uppercase tracking-wider ${alignClass(col.align)}`}
+                onClick={col.sortable ? () => handleSort(col.key) : undefined}
+                className={`${cellPad} text-[11px] text-[var(--text-dim)] font-medium uppercase tracking-wider ${alignClass(col.align)} ${col.sortable ? 'cursor-pointer select-none hover:text-[var(--text)] transition-colors' : ''}`}
                 style={col.width ? { width: col.width } : undefined}
               >
-                {col.label}
+                <span className="inline-flex items-center gap-0.5">
+                  {col.label}
+                  {col.sortable && <SortIcon colKey={col.key} />}
+                </span>
               </th>
             ))}
           </tr>
         </thead>
         <tbody>
-          {data.map((row, i) => (
+          {sortedData.map((row, i) => (
             <tr
               key={i}
               onClick={onRowClick ? () => onRowClick(row, i) : undefined}

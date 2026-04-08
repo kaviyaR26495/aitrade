@@ -1,16 +1,12 @@
-import { Card, Button, Badge, StatCard, EmptyState, PageHeader, Table, Modal, SkeletonTable, type TableColumn } from '../components/ui';
+import { Card, Button, Badge, StatCard, EmptyState, PageHeader, Table, SkeletonTable, type TableColumn } from '../components/ui';
 import { useHoldings, usePositions } from '../hooks/useApi';
-import { exitAll } from '../services/api';
 import { useAppStore } from '../store/appStore';
-import { Briefcase, AlertTriangle } from 'lucide-react';
-import { useState } from 'react';
+import { Briefcase, RefreshCw } from 'lucide-react';
 
 export default function Portfolio() {
-  const { data: holdingsData, isLoading: loadingHoldings } = useHoldings();
-  const { data: positionsData, isLoading: loadingPositions } = usePositions();
+  const { data: holdingsData, isLoading: loadingHoldings, refetch: refetchHoldings } = useHoldings();
+  const { data: positionsData, isLoading: loadingPositions, refetch: refetchPositions } = usePositions();
   const { addNotification } = useAppStore();
-  const [exiting, setExiting] = useState(false);
-  const [showExitConfirm, setShowExitConfirm] = useState(false);
 
   const holdings = holdingsData?.holdings ?? [];
   const positions = positionsData?.positions ?? [];
@@ -52,24 +48,20 @@ export default function Portfolio() {
     )},
   ];
 
-  const handleExitAll = async () => {
-    setExiting(true);
+  const handleRefresh = async () => {
     try {
-      const res = await exitAll();
-      addNotification({ type: 'success', message: `${res.data.orders_placed} exit orders placed` });
+      await Promise.all([refetchHoldings(), refetchPositions()]);
+      addNotification({ type: 'success', message: 'Portfolio refreshed' });
     } catch {
-      addNotification({ type: 'error', message: 'Exit all failed' });
-    } finally {
-      setExiting(false);
-      setShowExitConfirm(false);
+      addNotification({ type: 'error', message: 'Failed to refresh portfolio' });
     }
   };
 
   return (
     <div className="space-y-8">
       <PageHeader title="Portfolio" description="Holdings, positions, and P&L overview">
-        <Button variant="danger" size="sm" onClick={() => setShowExitConfirm(true)} data-guide-id="exit-all-btn">
-          <AlertTriangle size={14} /> Exit All
+        <Button variant="secondary" size="sm" onClick={handleRefresh} loading={loadingHoldings || loadingPositions}>
+          <RefreshCw size={14} className={(loadingHoldings || loadingPositions) ? 'animate-spin' : ''} /> Refresh
         </Button>
       </PageHeader>
 
@@ -107,25 +99,6 @@ export default function Portfolio() {
           />
         )}
       </Card>
-
-      <Modal
-        open={showExitConfirm}
-        onClose={() => setShowExitConfirm(false)}
-        title="Emergency Exit"
-        variant="danger"
-        icon={<AlertTriangle size={20} className="text-rose-400" />}
-        description="This will place SELL orders for ALL holdings at market price. This action cannot be undone."
-        footer={
-          <>
-            <Button variant="secondary" onClick={() => setShowExitConfirm(false)} className="flex-1">Cancel</Button>
-            <Button variant="danger" onClick={handleExitAll} loading={exiting} className="flex-1">
-              Exit All Holdings
-            </Button>
-          </>
-        }
-      >
-        <span />
-      </Modal>
     </div>
   );
 }
