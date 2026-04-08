@@ -10,7 +10,7 @@ from datetime import date
 import pandas as pd
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.indicators import compute_all_indicators, get_indicator_columns
+from app.core.indicators import compute_all_indicators, get_indicator_columns, compute_weekly_indicators, WEEKLY_INDICATOR_COLS
 from app.core.normalizer import normalize_dataframe, get_feature_columns, prepare_model_input
 from app.core.data_pipeline import ohlcv_to_dataframe, sync_stock_ohlcv, sync_all_stocks
 from app.db import crud
@@ -46,6 +46,81 @@ INDICATOR_COL_MAP = {
     "ema_20": "ema_20",
     "atr": "atr",
 }
+
+
+def merge_weekly_features(
+    daily_df: pd.DataFrame,
+    weekly_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Merge weekly technical indicators into a daily OHLCV DataFrame.
+
+    Algorithm
+    ---------
+    1. Compute weekly indicators (RSI, MACD, SMA-50, ADX) on *weekly_df*.
+    2. Align weekly values onto daily dates using ``pd.merge_asof`` with
+       ``direction='backward'`` — each daily row receives the most recent
+       *prior* week's indicator value (never the current week, so there is
+       zero lookahead bias).
+    3. Forward-fill any remaining NaNs (e.g. early rows before the first
+       complete weekly bar).
+    4. Fill with neutral defaults if weekly data is missing entirely.
+
+    Parameters
+    ----------
+    daily_df  : unsorted or sorted daily OHLCV + indicator DataFrame.
+    weekly_df : raw weekly OHLCV DataFrame (will have indicators computed internally).
+
+    Returns
+    -------
+    daily_df with WEEKLY_INDICATOR_COLS appended as new columns.
+    """
+    if weekly_df is None or weekly_df.empty:
+        logger.debug("merge_weekly_features: no weekly data — filling with neutral defaults.")
+        for col in WEEKLY_INDICATOR_COLS:
+            daily_df[col] = 0.0
+        return daily_df
+
+    try:
+        w_indicators = compute_weekly_indicators(weekly_df)
+    except Exception as exc:
+        logger.warning("merge_weekly_features: weekly indicator computation failed (%s) — using defaults.", exc)
+        for col in WEEKLY_INDICATOR_COLS:
+            daily_df[col] = 0.0
+        return daily_df
+
+    if w_indicators.empty or len(w_indicators) < 2:
+        for col in WEEKLY_INDICATOR_COLS:
+            daily_df[col] = 0.0
+        return daily_df
+
+    # Ensure both DataFrames have datetime date columns, sorted ascending.
+    daily_df = daily_df.copy()
+    daily_df["date"] = pd.to_datetime(daily_df["date"])
+    w_indicators["date"] = pd.to_datetime(w_indicators["date"])
+
+    daily_df = daily_df.sort_values("date").reset_index(drop=True)
+    w_indicators = w_indicators.sort_values("date").reset_index(drop=True)
+
+    # merge_asof: for each daily row find the last weekly bar whose date
+    # is <= the daily date.  This is the strict no-lookahead condition.
+    merged = pd.merge_asof(
+        daily_df,
+        w_indicators,
+        on="date",
+        direction="backward",
+        suffixes=("", "_weekly_raw"),
+    )
+
+    # Forward-fill any NaN at the start of the series (before the first full weekly bar).
+    weekly_cols_present = [c for c in WEEKLY_INDICATOR_COLS if c in merged.columns]
+    merged[weekly_cols_present] = merged[weekly_cols_present].ffill().fillna(0.0)
+
+    logger.debug(
+        "merge_weekly_features: merged %d weekly bars into %d daily rows (%d weekly cols)",
+        len(w_indicators), len(merged), len(weekly_cols_present),
+    )
+    return merged
 
 
 async def compute_and_store_indicators(
@@ -102,6 +177,7 @@ async def get_stock_features(
     start_date: date | None = None,
     end_date: date | None = None,
     normalize: bool = True,
+    use_weekly_context: bool = True,
 ) -> pd.DataFrame:
     """
     Get full feature matrix for a stock (OHLCV + indicators + regimes).
@@ -115,6 +191,11 @@ async def get_stock_features(
     Falls back to live indicator computation (``compute_all_indicators``) only
     when the indicators table has no rows for this stock (e.g. just after a
     fresh sync before the nightly indicator job has run).
+
+    When ``use_weekly_context=True`` (the default) and ``interval='day'``,
+    weekly OHLCV is fetched and weekly indicators are forward-filled into every
+    daily row before normalization.  This gives models a multi-timeframe view
+    of the weekly trend without any lookahead bias.
 
     Returns a DataFrame with all features, optionally normalized.
     """
@@ -139,6 +220,30 @@ async def get_stock_features(
             stock_id,
         )
         df = compute_all_indicators(df)
+
+    # ── Weekly multi-timeframe enrichment ──────────────────────────────
+    # Only applied when requesting daily features; weekly-on-weekly doesn't
+    # add information and would require weekly-of-weekly data.
+    if use_weekly_context and interval == "day":
+        try:
+            weekly_ohlcv_rows = await crud.get_ohlcv_as_dicts(db, stock_id, "week")
+            if weekly_ohlcv_rows:
+                from app.core.data_pipeline import ohlcv_to_dataframe
+                weekly_df = ohlcv_to_dataframe(weekly_ohlcv_rows)
+                df = merge_weekly_features(df, weekly_df)
+                logger.debug(
+                    "stock_id=%d: weekly context merged (%d weekly bars)",
+                    stock_id, len(weekly_ohlcv_rows),
+                )
+            else:
+                logger.debug("stock_id=%d: no weekly OHLCV rows found — skipping weekly enrichment", stock_id)
+                for col in WEEKLY_INDICATOR_COLS:
+                    df[col] = 0.0
+        except Exception as _wk_exc:
+            logger.warning("Weekly context enrichment failed for stock_id=%d: %s", stock_id, _wk_exc)
+            for col in WEEKLY_INDICATOR_COLS:
+                if col not in df.columns:
+                    df[col] = 0.0
 
     # Default-fill regime columns if the regime table was empty / partially filled
     regime_fill = {
@@ -175,11 +280,15 @@ async def get_model_ready_data(
     seq_len: int = 15,
     start_date: date | None = None,
     end_date: date | None = None,
+    use_weekly_context: bool = True,
 ) -> tuple[pd.DataFrame, list[str]]:
     """
     Get normalized feature DataFrame and feature column list for model input.
     """
-    df = await get_stock_features(db, stock_id, interval, start_date, end_date, normalize=True)
+    df = await get_stock_features(
+        db, stock_id, interval, start_date, end_date,
+        normalize=True, use_weekly_context=use_weekly_context,
+    )
     if df.empty:
         return df, []
 

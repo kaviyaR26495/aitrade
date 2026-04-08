@@ -1135,7 +1135,10 @@ async def resume_training(model_id: int, db: AsyncSession = Depends(get_db)):
 async def _cascade_delete_ensemble(db: AsyncSession, config_id: int) -> None:
     """Delete one EnsembleConfig and all its child rows, preserving trade_order history."""
     from sqlalchemy import select, delete, update
-    from app.db.models import EnsembleConfig, EnsemblePrediction, TradeOrder
+    from app.db.models import (
+        EnsembleConfig, EnsemblePrediction, TradeOrder,
+        StockEnsembleWeights, BacktestResult
+    )
 
     # Null-out the FK on any trade orders that reference these predictions
     pred_ids_result = await db.execute(
@@ -1149,9 +1152,23 @@ async def _cascade_delete_ensemble(db: AsyncSession, config_id: int) -> None:
             .values(ensemble_prediction_id=None)
         )
 
+    # ── DB cleanup in safe FK order ──────────────────────────────────
+    # 1. Delete predictions
     await db.execute(
         delete(EnsemblePrediction).where(EnsemblePrediction.ensemble_config_id == config_id)
     )
+    # 2. Delete per-stock weight calibrations
+    await db.execute(
+        delete(StockEnsembleWeights).where(StockEnsembleWeights.ensemble_config_id == config_id)
+    )
+    # 3. Delete associated backtest results
+    await db.execute(
+        delete(BacktestResult).where(
+            BacktestResult.model_type == "ensemble",
+            BacktestResult.model_id == config_id
+        )
+    )
+    # 4. Finally delete the config itself
     await db.execute(delete(EnsembleConfig).where(EnsembleConfig.id == config_id))
 
 
@@ -1159,7 +1176,9 @@ async def _cascade_delete_ensemble(db: AsyncSession, config_id: int) -> None:
 async def delete_rl_model(model_id: int, db: AsyncSession = Depends(get_db)):
     """Stop training (if active) then cascade-delete the full RL model tree."""
     from sqlalchemy import select, delete
-    from app.db.models import KNNModel, LSTMModel, KNNPrediction, LSTMPrediction
+    from app.db.models import (
+        KNNModel, LSTMModel, KNNPrediction, LSTMPrediction, BacktestResult
+    )
 
     # Stop training if running
     if model_id in _training_controls:
@@ -1205,6 +1224,14 @@ async def delete_rl_model(model_id: int, db: AsyncSession = Depends(get_db)):
         if lstm_artifact and lstm_artifact.exists():
             shutil.rmtree(lstm_artifact, ignore_errors=True)
 
+    # ── Delete RL associated backtest results ───────────────────────
+    await db.execute(
+        delete(BacktestResult).where(
+            BacktestResult.model_type == "rl",
+            BacktestResult.model_id == model_id
+        )
+    )
+
     # ── Delete RL model itself (golden_patterns + training_runs inside) ─
     # Commit cascades above first so FK constraints are satisfied
     await db.commit()
@@ -1231,7 +1258,7 @@ async def list_knn_models(db: AsyncSession = Depends(get_db)):
 async def delete_knn_model(model_id: int, db: AsyncSession = Depends(get_db)):
     """Cascade-delete a KNN model and all its dependent data."""
     from sqlalchemy import select, delete
-    from app.db.models import KNNModel, EnsembleConfig, KNNPrediction
+    from app.db.models import KNNModel, EnsembleConfig, KNNPrediction, BacktestResult
 
     result = await db.execute(select(KNNModel).where(KNNModel.id == model_id))
     model = result.scalar_one_or_none()
@@ -1244,6 +1271,15 @@ async def delete_knn_model(model_id: int, db: AsyncSession = Depends(get_db)):
         await _cascade_delete_ensemble(db, cfg_id)
 
     await db.execute(delete(KNNPrediction).where(KNNPrediction.knn_model_id == model_id))
+    
+    # Delete KNN associated backtest results
+    await db.execute(
+        delete(BacktestResult).where(
+            BacktestResult.model_type == "knn",
+            BacktestResult.model_id == model_id
+        )
+    )
+    
     await db.execute(delete(KNNModel).where(KNNModel.id == model_id))
     await db.commit()
 
@@ -1270,7 +1306,7 @@ async def list_lstm_models(db: AsyncSession = Depends(get_db)):
 async def delete_lstm_model(model_id: int, db: AsyncSession = Depends(get_db)):
     """Cascade-delete an LSTM model and all its dependent data."""
     from sqlalchemy import select, delete
-    from app.db.models import LSTMModel, EnsembleConfig, LSTMPrediction
+    from app.db.models import LSTMModel, EnsembleConfig, LSTMPrediction, BacktestResult
 
     result = await db.execute(select(LSTMModel).where(LSTMModel.id == model_id))
     model = result.scalar_one_or_none()
@@ -1283,6 +1319,15 @@ async def delete_lstm_model(model_id: int, db: AsyncSession = Depends(get_db)):
         await _cascade_delete_ensemble(db, cfg_id)
 
     await db.execute(delete(LSTMPrediction).where(LSTMPrediction.lstm_model_id == model_id))
+    
+    # Delete LSTM associated backtest results
+    await db.execute(
+        delete(BacktestResult).where(
+            BacktestResult.model_type == "lstm",
+            BacktestResult.model_id == model_id
+        )
+    )
+    
     await db.execute(delete(LSTMModel).where(LSTMModel.id == model_id))
     await db.commit()
 

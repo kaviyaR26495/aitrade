@@ -449,17 +449,22 @@ async def _stage_data_sync(job_id: str, stock_ids: list[int], symbols: list[str]
     # FIX: Moved db session INSIDE the loop to isolate transactions
     for i, stock_id in enumerate(stock_ids):
         sym = symbols[i] if i < len(symbols) else f"#{stock_id}"
-        pct = int(i / total * 90)
-        await _update_stage(job_id, 0, status="running", progress=pct, message=f"Syncing & Classifying {sym}…")
         
-        async with async_session_factory() as db:
-            try:
-                # Compute and commit immediately per stock
-                res = await data_service.sync_and_compute(db, stock_id, interval="day")
-                if res.get("ohlcv_synced", 0) >= 0:
-                    synced += 1
-            except Exception as exc:
-                logger.warning("Pipeline data sync: %s failed: %s", sym, exc)
+        for interval in ["day", "week"]:
+            pct = int(i / total * 90) + (5 if interval == "week" else 0)
+            await _update_stage(
+                job_id, 0, status="running", progress=min(95, pct), 
+                message=f"Syncing & Classifying {sym} ({interval.capitalize()})…"
+            )
+            
+            async with async_session_factory() as db:
+                try:
+                    # Compute and commit immediately per stock/interval
+                    res = await data_service.sync_and_compute(db, stock_id, interval=interval)
+                    if res.get("ohlcv_synced", 0) >= 0 and interval == "day":
+                        synced += 1
+                except Exception as exc:
+                    logger.warning("Pipeline data sync: %s (%s) failed: %s", sym, interval, exc)
 
     await _update_stage(
         job_id, 0, status="completed", progress=100,

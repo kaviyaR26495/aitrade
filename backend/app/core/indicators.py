@@ -18,6 +18,19 @@ ALL_INDICATOR_GROUPS = [
     "obv", "bbl", "macd", "adx", "sma", "atr",
 ]
 
+# Reduced set of indicators computed on weekly bars and merged into daily rows.
+# Chosen for maximum signal on longer timeframes; intentionally narrower than
+# ALL_INDICATOR_GROUPS to avoid feature bloat.
+WEEKLY_INDICATOR_GROUPS = ["rsi", "macd", "sma", "adx"]
+
+# Final column names that appear in the daily DataFrame after the weekly merge.
+WEEKLY_INDICATOR_COLS = [
+    "weekly_rsi",
+    "weekly_macd", "weekly_macd_signal", "weekly_macd_hist",
+    "weekly_sma_50",
+    "weekly_adx", "weekly_adx_pos", "weekly_adx_neg",
+]
+
 WARMUP_ROWS = 30  # drop first N rows after indicator calc
 
 
@@ -189,6 +202,50 @@ def compute_all_indicators(
         df = df.iloc[WARMUP_ROWS:].reset_index(drop=True)
 
     return df
+
+
+def compute_weekly_indicators(weekly_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Compute a high-signal subset of indicators on a *weekly* OHLCV DataFrame
+    and rename every output column with a ``weekly_`` prefix.
+
+    Returns a DataFrame with columns:
+        date, weekly_rsi, weekly_macd, weekly_macd_signal, weekly_macd_hist,
+        weekly_sma_50, weekly_adx, weekly_adx_pos, weekly_adx_neg.
+
+    Only ``date`` and the indicator columns are returned; raw OHLCV columns are
+    dropped so the result is safe to merge into a daily DataFrame without
+    column collisions.  The ``drop_warmup`` flag is set to False so the caller
+    retains the full weekly series for forward-filling purposes.
+    """
+    if weekly_df.empty:
+        return pd.DataFrame(columns=["date"] + WEEKLY_INDICATOR_COLS)
+
+    # Compute on a clean copy with warm-up rows kept (we need the full series
+    # so that forward-filling into daily rows doesn't lose the early weeks).
+    wdf = compute_all_indicators(
+        weekly_df.copy(),
+        groups=WEEKLY_INDICATOR_GROUPS,
+        drop_warmup=False,
+    )
+
+    # Build rename map: only keep the weekly-group output columns
+    daily_to_weekly: dict[str, str] = {}
+    if "rsi" in wdf.columns:
+        daily_to_weekly["rsi"] = "weekly_rsi"
+    for col in ["macd", "macd_signal", "macd_hist"]:
+        if col in wdf.columns:
+            daily_to_weekly[col] = f"weekly_{col}"
+    if "sma_50" in wdf.columns:
+        daily_to_weekly["sma_50"] = "weekly_sma_50"
+    for col in ["adx", "adx_pos", "adx_neg"]:
+        if col in wdf.columns:
+            daily_to_weekly[col] = f"weekly_{col}"
+
+    # Rename and keep only date + weekly indicator columns
+    wdf = wdf.rename(columns=daily_to_weekly)
+    keep = ["date"] + [c for c in WEEKLY_INDICATOR_COLS if c in wdf.columns]
+    return wdf[keep].reset_index(drop=True)
 
 
 def get_indicator_columns(groups: list[str] | None = None) -> list[str]:

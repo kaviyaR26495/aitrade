@@ -31,6 +31,7 @@ from app.ml.callbacks import ProgressCallback, BestModelCallback
 from app.core.indicators import compute_all_indicators
 from app.core.normalizer import normalize_dataframe, get_feature_columns
 from app.core.regime_classifier import classify_and_score
+from app.core.data_service import merge_weekly_features
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,7 @@ def prepare_training_data(
     min_quality: float = 0.8,
     regime_ids: list[int] | None = None,
     exclude_transitions: bool = True,
+    weekly_df: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, list[str]]:
     """
     Full data preparation pipeline for RL training.
@@ -70,16 +72,25 @@ def prepare_training_data(
     Returns (normalized_df, feature_column_names).
 
     Order-of-operations rationale
-    ──────────────────────────────
+    ────────────────────────────────
+    0. Merge weekly indicators into the daily DataFrame (if provided) so they
+       pass through the same normalization pipeline.  Must happen before
+       compute_all_indicators() is called so we don't lose them on recompute.
     1. Compute indicators if absent or all-NaN (LEFT JOIN from DB may return NaN columns).
     2. Classify regimes if absent or all-NaN (same LEFT JOIN issue).
     3. Normalize BEFORE filtering — preserves the unbroken daily time-series needed
        for accurate .diff() log-returns and rolling(100) Z-scores.  Removing rows
-       first would create artificial "gaps" that corrupt the rolling statistics.
+       first would create artificial “gaps” that corrupt the rolling statistics.
     4. Filter low-quality / transition rows AFTER normalization.
     5. Append one-hot regime feature columns (must stay as 0/1, not log-normalized).
     """
     df = ohlcv_df.copy()
+
+    # 0. Merge weekly context (before indicator computation so columns exist
+    #    when normalize_dataframe is called and are handled by the correct
+    #    normalisation strategy registered in normalizer.EXCLUDE_COLS etc.)
+    if weekly_df is not None and not weekly_df.empty:
+        df = merge_weekly_features(df, weekly_df)
 
     # 1. Compute indicators only if missing or completely empty (NaN from LEFT JOIN)
     if "sma_50" not in df.columns or df["sma_50"].isna().all():
@@ -187,6 +198,9 @@ def train_rl_model(
     pause_event=None,
     pretrained_model_path: str | None = None,
     multi_ohlcv_dfs: list[pd.DataFrame] | None = None,
+    # ── Multi-timeframe weekly context ──────────────────────────────
+    weekly_df: pd.DataFrame | None = None,
+    weekly_ohlcv_dfs: list[pd.DataFrame | None] | None = None,
 ) -> dict[str, Any]:
     """
     Train an RL model on quality-filtered, regime-tagged data.
@@ -194,6 +208,11 @@ def train_rl_model(
     Pass ``multi_ohlcv_dfs`` for multi-stock training: one environment is
     created per stock (cycling when there are more stocks than parallel envs).
     Pass ``ohlcv_df`` for traditional single-stock training.
+
+    ``weekly_df`` / ``weekly_ohlcv_dfs`` are the corresponding weekly OHLCV
+    DataFrames.  When provided, weekly indicators are merged into each stock's
+    daily feature matrix before normalization, giving the policy an additional
+    multi-timeframe informational advantage.
 
     Returns dict with model path, metrics, and training info.
     """
@@ -224,10 +243,12 @@ def train_rl_model(
     # don't bleed across stock boundaries.
     if multi_ohlcv_dfs:
         stock_datasets: list[tuple[np.ndarray, np.ndarray]] = []
-        for sdf in multi_ohlcv_dfs:
+        for idx, sdf in enumerate(multi_ohlcv_dfs):
+            # Get the matching weekly DataFrame if supplied (None falls through gracefully)
+            wdf = weekly_ohlcv_dfs[idx] if (weekly_ohlcv_dfs and idx < len(weekly_ohlcv_dfs)) else weekly_df
             try:
                 prep_df, feat_cols = prepare_training_data(
-                    sdf, min_quality=min_quality, regime_ids=regime_ids,
+                    sdf, min_quality=min_quality, regime_ids=regime_ids, weekly_df=wdf,
                 )
                 fd = prep_df[feat_cols].values.astype(np.float32)
                 cp = prep_df.get("adj_close", prep_df["close"]).fillna(prep_df["close"]).values.astype(np.float32)
@@ -237,8 +258,9 @@ def train_rl_model(
         if not stock_datasets:
             raise ValueError("All stocks failed data preparation — cannot train")
         # Use the first stock's feature_cols for shape reference
+        wdf0 = weekly_ohlcv_dfs[0] if (weekly_ohlcv_dfs and len(weekly_ohlcv_dfs) > 0) else weekly_df
         prep_df, feature_cols = prepare_training_data(
-            multi_ohlcv_dfs[0], min_quality=min_quality, regime_ids=regime_ids,
+            multi_ohlcv_dfs[0], min_quality=min_quality, regime_ids=regime_ids, weekly_df=wdf0,
         )
         # feature_data / close_prices not used directly — envs use stock_datasets
         feature_data = stock_datasets[0][0]
@@ -251,7 +273,7 @@ def train_rl_model(
         if ohlcv_df is None:
             raise ValueError("Either ohlcv_df or multi_ohlcv_dfs must be provided")
         prep_df, feature_cols = prepare_training_data(
-            ohlcv_df, min_quality=min_quality, regime_ids=regime_ids,
+            ohlcv_df, min_quality=min_quality, regime_ids=regime_ids, weekly_df=weekly_df,
         )
         feature_data = prep_df[feature_cols].values.astype(np.float32)
         close_prices = prep_df.get("adj_close", prep_df["close"]).fillna(prep_df["close"]).values.astype(np.float32)

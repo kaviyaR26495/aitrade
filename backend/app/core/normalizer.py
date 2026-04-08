@@ -29,13 +29,19 @@ EXCLUDE_COLS = {
     "trend", "volatility", "regime_id", "quality_score", "is_transition",
     # Market context features — pre-normalized, pass through as-is
     "fii_net_norm", "dii_net_norm", "sector_breadth_pct",
+    # ── Weekly multi-timeframe features ───────────────────────────────────
+    # Treated the same as their daily equivalents (already 0-1 scaled or raw values
+    # that should not be log-return normalised).
+    "weekly_rsi",
+    "weekly_macd", "weekly_macd_signal", "weekly_macd_hist",
+    "weekly_adx", "weekly_adx_pos", "weekly_adx_neg",
 }
 
 # MinMax-scaled columns (obv can be negative → cannot use log-return)
 MINMAX_COLS = {"n_volume", "obv"}
 
 # Percentage-change-from-close columns
-PCTCHG_COLS = {"sma_50", "bb_upper", "bb_lower", "bb_mid"}
+PCTCHG_COLS = {"sma_50", "bb_upper", "bb_lower", "bb_mid", "weekly_sma_50"}
 
 # Reference window for z-score normalization
 ZSCORE_WINDOW = 100

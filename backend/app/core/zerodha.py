@@ -139,6 +139,21 @@ def get_kite() -> Any:
     return _kite
 
 
+def refresh_kite(api_key: str, zerodha_ip: str | None = None) -> Any:
+    """Force re-initialization of the KiteConnect instance with new credentials."""
+    global _kite
+    try:
+        from kiteconnect import KiteConnect
+    except ImportError:
+        raise RuntimeError("kiteconnect package not installed.")
+
+    logger.info("Refreshing KiteConnect instance with api_key=%s...", api_key[:4] + "****" if api_key else "None")
+    _kite = KiteConnect(api_key=api_key)
+    if zerodha_ip:
+        _kite.root = f"https://{zerodha_ip}"
+    return _kite
+
+
 def set_access_token(access_token: str):
     kite = get_kite()
     kite.set_access_token(access_token)
@@ -152,9 +167,11 @@ def is_authenticated() -> bool:
         return False
 
 
-def generate_session(request_token: str) -> dict:
+def generate_session(request_token: str, api_secret: str | None = None) -> dict:
+    """Generate a new Kite session using request_token and optional api_secret."""
     kite = get_kite()
-    data = kite.generate_session(request_token, api_secret=settings.KITE_API_SECRET)
+    secret = api_secret or settings.KITE_API_SECRET
+    data = kite.generate_session(request_token, api_secret=secret)
     kite.set_access_token(data["access_token"])
     return data
 
