@@ -73,42 +73,43 @@ def prepare_training_data(
 
     Order-of-operations rationale
     ────────────────────────────────
-    0. Merge weekly indicators into the daily DataFrame (if provided) so they
-       pass through the same normalization pipeline.  Must happen before
-       compute_all_indicators() is called so we don't lose them on recompute.
-    1. Compute indicators if absent or all-NaN (LEFT JOIN from DB may return NaN columns).
-    2. Classify regimes if absent or all-NaN (same LEFT JOIN issue).
-    3. Normalize BEFORE filtering — preserves the unbroken daily time-series needed
-       for accurate .diff() log-returns and rolling(100) Z-scores.  Removing rows
-       first would create artificial “gaps” that corrupt the rolling statistics.
-    4. Filter low-quality / transition rows AFTER normalization.
-    5. Append one-hot regime feature columns (must stay as 0/1, not log-normalized).
+    This pipeline mirrors get_stock_features() in data_service.py exactly so
+    the RL agent is trained on the same data transformation sequence used in
+    live prediction:
+
+    1. Compute daily indicators if absent (LEFT JOIN from DB may return NaN cols).
+    2. Classify regimes if absent (same LEFT JOIN issue).
+    3. Merge weekly context AFTER indicators & regimes so compute_all_indicators()
+       cannot overwrite the newly added weekly_* columns.
+    4. Normalize BEFORE filtering — preserves the unbroken daily time-series
+       needed for accurate .diff() log-returns and rolling(100) Z-scores.
+    5. Filter low-quality / transition rows AFTER normalization.
+    6. Append one-hot regime feature columns (must stay as 0/1, not log-normalized).
     """
     df = ohlcv_df.copy()
 
-    # 0. Merge weekly context (before indicator computation so columns exist
-    #    when normalize_dataframe is called and are handled by the correct
-    #    normalisation strategy registered in normalizer.EXCLUDE_COLS etc.)
-    if weekly_df is not None and not weekly_df.empty:
-        df = merge_weekly_features(df, weekly_df)
-
-    # 1. Compute indicators only if missing or completely empty (NaN from LEFT JOIN)
+    # 1. Compute daily indicators only if missing or completely empty
     if "sma_50" not in df.columns or df["sma_50"].isna().all():
         from app.core.indicators import compute_all_indicators
         df = compute_all_indicators(df)
 
-    # 2. Classify regimes + quality score only if missing or completely empty (NaN)
+    # 2. Classify regimes + quality score only if missing or completely empty
     if "quality_score" not in df.columns or df["quality_score"].isna().all():
         from app.core.regime_classifier import classify_and_score
         df = classify_and_score(df)
 
-    # 3. Normalize FIRST to preserve temporal sequence integrity
+    # 3. Merge weekly context AFTER daily indicators & regimes so weekly_* columns
+    #    cannot be overwritten by compute_all_indicators() (mirrors data_service.py)
+    if weekly_df is not None and not weekly_df.empty:
+        df = merge_weekly_features(df, weekly_df)
+
+    # 4. Normalize FIRST to preserve temporal sequence integrity
     df = normalize_dataframe(df)
 
     if len(df) < 100:
         raise ValueError(f"Insufficient data after normalization: {len(df)} rows (need >= 100)")
 
-    # 4. Filter by quality + regime AFTER normalization
+    # 5. Filter by quality + regime AFTER normalization
     if "quality_score" in df.columns:
         mask = df["quality_score"] >= min_quality
         if exclude_transitions and "is_transition" in df.columns:
@@ -124,10 +125,10 @@ def prepare_training_data(
             "Try relaxing min_quality or regime filters."
         )
 
-    # 5. Append regime one-hot features (0/1 floats — must not be log-normalized)
+    # 6. Append regime one-hot features (0/1 floats — must not be log-normalized)
     df = _append_regime_features(df)
 
-    # 6. Build feature column list (indicator columns + regime columns)
+    # 7. Build feature column list (indicator columns + regime columns)
     feature_cols = get_feature_columns(df)
     regime_feat_cols = [
         "regime_trend_bullish", "regime_trend_bearish", "regime_trend_neutral",
@@ -138,6 +139,7 @@ def prepare_training_data(
             feature_cols.append(col)
 
     return df, feature_cols
+
 
 
 def _clear_gpu_memory() -> None:

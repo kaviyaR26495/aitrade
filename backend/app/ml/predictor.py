@@ -10,10 +10,12 @@ from typing import Any
 import numpy as np
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from sqlalchemy import select, desc
 from app.config import settings
 from app.core.data_service import get_model_ready_data
 from app.core.normalizer import prepare_model_input
 from app.db import crud
+from app.db.models import KNNModel, LSTMModel, EnsembleConfig
 from app.ml.knn_distiller import load_knn_model, predict_knn, load_knn_norm_params
 from app.ml.lstm_distiller import load_lstm_model, predict_lstm
 from app.ml.ensemble import ensemble_predict
@@ -82,11 +84,21 @@ async def run_daily_predictions(
         knn_model = load_knn_model(knn_db.model_path)
         knn_norm_params = load_knn_norm_params(Path(knn_db.model_path).parent)
     else:
-        knn_model_dir = model_path / "knn" / knn_name
-        knn_model = load_knn_model(
-            _latest_artifact(knn_model_dir, "knn_model_*.joblib", "knn_model.joblib")
-        )
-        knn_norm_params = load_knn_norm_params(knn_model_dir)
+        # Resolve 'latest' via DB
+        q = select(KNNModel).where(KNNModel.status == "completed").order_by(desc(KNNModel.created_at)).limit(1)
+        res = await db.execute(q)
+        knn_db = res.scalar_one_or_none()
+        
+        if knn_db and knn_db.model_path:
+            knn_model = load_knn_model(knn_db.model_path)
+            knn_norm_params = load_knn_norm_params(Path(knn_db.model_path).parent)
+        else:
+            # Fallback legacy path
+            knn_model_dir = model_path / "knn" / knn_name
+            knn_model = load_knn_model(
+                _latest_artifact(knn_model_dir, "knn_model_*.joblib", "knn_model.joblib")
+            )
+            knn_norm_params = load_knn_norm_params(knn_model_dir)
 
     # ── Load LSTM model ───────────────────────────────────────────────
     if lstm_model_id is not None:
@@ -95,10 +107,50 @@ async def run_daily_predictions(
             raise ValueError(f"LSTM model id={lstm_model_id} has no saved artifact in DB")
         lstm_model = load_lstm_model(lstm_db.model_path)
     else:
-        lstm_model_dir = model_path / "lstm" / lstm_name
-        lstm_model = load_lstm_model(
-            _latest_artifact(lstm_model_dir, "lstm_model_*.pt", "lstm_model.pt")
-        )
+        # Resolve 'latest' via DB
+        q = select(LSTMModel).where(LSTMModel.status == "completed").order_by(desc(LSTMModel.created_at)).limit(1)
+        res = await db.execute(q)
+        lstm_db = res.scalar_one_or_none()
+        
+        if lstm_db and lstm_db.model_path:
+            lstm_model = load_lstm_model(lstm_db.model_path)
+        else:
+            # Fallback legacy path
+            lstm_model_dir = model_path / "lstm" / lstm_name
+            lstm_model = load_lstm_model(
+                _latest_artifact(lstm_model_dir, "lstm_model_*.pt", "lstm_model.pt")
+            )
+
+    # ── Resolve Ensemble Config ──────────────────────────────────────────
+    try:
+        if ensemble_config_id is None:
+            # Try to find latest config
+            q_cfg = select(EnsembleConfig).order_by(desc(EnsembleConfig.created_at)).limit(1)
+            res_cfg = await db.execute(q_cfg)
+            cfg_db = res_cfg.scalar_one_or_none()
+            
+            if cfg_db:
+                ensemble_config_id = cfg_db.id
+            else:
+                # Create a default config if we have model IDs
+                k_id = knn_db.id if (knn_db and hasattr(knn_db, "id")) else None
+                l_id = lstm_db.id if (lstm_db and hasattr(lstm_db, "id")) else None
+                
+                if k_id and l_id:
+                    new_cfg = await crud.create_ensemble_config(
+                        db,
+                        name=f"Auto-generated Config ({target_date})",
+                        knn_model_id=k_id,
+                        lstm_model_id=l_id,
+                        interval=interval,
+                    )
+                    ensemble_config_id = new_cfg.id
+                    logger.info(f"Created default EnsembleConfig id={ensemble_config_id}")
+                else:
+                    logger.warning("Cannot find/create EnsembleConfig: missing model IDs")
+    except Exception as e:
+        logger.error(f"Failed to resolve EnsembleConfig: {e}", exc_info=True)
+        raise
 
     # Get stocks to predict
     if stock_ids:
@@ -157,11 +209,14 @@ async def run_daily_predictions(
                     "date": target_date,
                     "interval": interval,
                     "action": ACTION_MAP.get(p["action"], "HOLD"),
+                    "action_id": int(p["action"]),
                     "confidence": float(p["confidence"]),
                     "knn_action": ACTION_MAP.get(p["knn_action"], "HOLD"),
-                    "knn_confidence": float(p["combined_probs"][p["knn_action"]]),
+                    "knn_action_id": int(p["knn_action"]),
+                    "knn_confidence": float(p["combined_probs"][ACTION_MAP[p["knn_action"]].lower()]),
                     "lstm_action": ACTION_MAP.get(p["lstm_action"], "HOLD"),
-                    "lstm_confidence": float(p["combined_probs"][p["lstm_action"]]),
+                    "lstm_action_id": int(p["lstm_action"]),
+                    "lstm_confidence": float(p["combined_probs"][ACTION_MAP[p["lstm_action"]].lower()]),
                     "agreement": p["agreement"],
                     "regime_id": None,  # filled below if available
                 })
@@ -173,17 +228,29 @@ async def run_daily_predictions(
     # Store predictions in DB
     if results:
         from app.db.models import EnsemblePrediction
+        from sqlalchemy import delete
+        
+        # Make operation idempotent — clear existing predictions for this config/date/interval
+        await db.execute(
+            delete(EnsemblePrediction).where(
+                EnsemblePrediction.ensemble_config_id == ensemble_config_id,
+                EnsemblePrediction.date == target_date,
+                EnsemblePrediction.interval == interval
+            )
+        )
+        
         rows = []
         for r in results:
             rows.append(EnsemblePrediction(
+                ensemble_config_id=ensemble_config_id,
                 stock_id=r["stock_id"],
                 date=r["date"],
                 interval=r["interval"],
-                action=r["action"],
+                action=r["action_id"],
                 confidence=r["confidence"],
-                knn_action=r["knn_action"],
+                knn_action=r["knn_action_id"],
                 knn_confidence=r["knn_confidence"],
-                lstm_action=r["lstm_action"],
+                lstm_action=r["lstm_action_id"],
                 lstm_confidence=r["lstm_confidence"],
                 agreement=r["agreement"],
                 regime_id=r["regime_id"],

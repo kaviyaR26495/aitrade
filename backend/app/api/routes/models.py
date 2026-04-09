@@ -321,7 +321,7 @@ async def _run_distillation_background(
                     df_prep[mc] = 0.0
             feature_data = df_prep[cols_for_env].values.astype("float32")
             close_prices = df_prep["close"].values.astype("float32")
-            dates = df_prep["date"].values if "date" in df_prep.columns else list(range(len(df_prep)))
+            dates = df_prep["date"].tolist() if "date" in df_prep.columns else [r.date for r in ohlcv_rows]
             regime_ids_arr = df_prep["regime_id"].values.astype(int) if "regime_id" in df_prep.columns else None
 
             patterns = await loop.run_in_executor(
@@ -1161,11 +1161,12 @@ async def _cascade_delete_ensemble(db: AsyncSession, config_id: int) -> None:
     await db.execute(
         delete(StockEnsembleWeights).where(StockEnsembleWeights.ensemble_config_id == config_id)
     )
-    # 3. Delete associated backtest results
+    # 3. Delete associated backtest results (+ legacy model_id=0 orphans)
+    from sqlalchemy import or_ as _or_bt
     await db.execute(
         delete(BacktestResult).where(
             BacktestResult.model_type == "ensemble",
-            BacktestResult.model_id == config_id
+            _or_bt(BacktestResult.model_id == config_id, BacktestResult.model_id == 0)
         )
     )
     # 4. Finally delete the config itself
@@ -1202,6 +1203,13 @@ async def delete_rl_model(model_id: int, db: AsyncSession = Depends(get_db)):
         cfg_result = await db.execute(sa_select(EC.id).where(EC.knn_model_id == knn.id))
         for (cfg_id,) in cfg_result:
             await _cascade_delete_ensemble(db, cfg_id)
+        # ── Delete child backtest results ──
+        await db.execute(
+            delete(BacktestResult).where(
+                BacktestResult.model_type == "knn",
+                BacktestResult.model_id == knn.id
+            )
+        )
         await db.execute(delete(KNNPrediction).where(KNNPrediction.knn_model_id == knn.id))
         await db.execute(delete(KNNModel).where(KNNModel.id == knn.id))
         knn_artifact = Path(knn.model_path).parent if knn.model_path else None
@@ -1218,17 +1226,27 @@ async def delete_rl_model(model_id: int, db: AsyncSession = Depends(get_db)):
         cfg_result2 = await db.execute(sa_select(EC2.id).where(EC2.lstm_model_id == lstm.id))
         for (cfg_id,) in cfg_result2:
             await _cascade_delete_ensemble(db, cfg_id)
+        # ── Delete child backtest results ──
+        await db.execute(
+            delete(BacktestResult).where(
+                BacktestResult.model_type == "lstm",
+                BacktestResult.model_id == lstm.id
+            )
+        )
         await db.execute(delete(LSTMPrediction).where(LSTMPrediction.lstm_model_id == lstm.id))
         await db.execute(delete(LSTMModel).where(LSTMModel.id == lstm.id))
         lstm_artifact = Path(lstm.model_path).parent if lstm.model_path else None
         if lstm_artifact and lstm_artifact.exists():
             shutil.rmtree(lstm_artifact, ignore_errors=True)
 
-    # ── Delete RL associated backtest results ───────────────────────
+    # ── Delete RL associated backtest results ───────────────────
+    # Delete both correctly-keyed records (model_id == model_id) AND any
+    # legacy orphan records stored with model_id=0 before the fix.
+    from sqlalchemy import or_
     await db.execute(
         delete(BacktestResult).where(
             BacktestResult.model_type == "rl",
-            BacktestResult.model_id == model_id
+            or_(BacktestResult.model_id == model_id, BacktestResult.model_id == 0)
         )
     )
 
@@ -1241,6 +1259,15 @@ async def delete_rl_model(model_id: int, db: AsyncSession = Depends(get_db)):
     if artifact_dir and artifact_dir.exists():
         shutil.rmtree(artifact_dir, ignore_errors=True)
     _log_path(model_id).unlink(missing_ok=True)
+
+    # ── Pattern dataset cleanup (parquet files) ──
+    try:
+        parquet_dir = settings.MODEL_DIR / "patterns"
+        if parquet_dir.exists():
+            for p in parquet_dir.glob(f"patterns_{model_id}_*.parquet"):
+                p.unlink(missing_ok=True)
+    except Exception as e:
+        logger.warning(f"Failed to clean up pattern files for RL model {model_id}: {e}")
 
     return {"message": "Model deleted."}
 
@@ -1272,11 +1299,12 @@ async def delete_knn_model(model_id: int, db: AsyncSession = Depends(get_db)):
 
     await db.execute(delete(KNNPrediction).where(KNNPrediction.knn_model_id == model_id))
     
-    # Delete KNN associated backtest results
+    # Delete KNN associated backtest results (+ legacy model_id=0 orphans)
+    from sqlalchemy import or_ as _or
     await db.execute(
         delete(BacktestResult).where(
             BacktestResult.model_type == "knn",
-            BacktestResult.model_id == model_id
+            _or(BacktestResult.model_id == model_id, BacktestResult.model_id == 0)
         )
     )
     
@@ -1320,11 +1348,12 @@ async def delete_lstm_model(model_id: int, db: AsyncSession = Depends(get_db)):
 
     await db.execute(delete(LSTMPrediction).where(LSTMPrediction.lstm_model_id == model_id))
     
-    # Delete LSTM associated backtest results
+    # Delete LSTM associated backtest results (+ legacy model_id=0 orphans)
+    from sqlalchemy import or_ as _or2
     await db.execute(
         delete(BacktestResult).where(
             BacktestResult.model_type == "lstm",
-            BacktestResult.model_id == model_id
+            _or2(BacktestResult.model_id == model_id, BacktestResult.model_id == 0)
         )
     )
     

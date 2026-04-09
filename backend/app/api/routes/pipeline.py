@@ -198,13 +198,17 @@ async def _purge_pipeline_data(job_id: str) -> dict:
     """Delete all DB records and disk files created by a pipeline session.
 
     Cleans up (in FK-safe order):
-      backtest_results → knn/lstm models (+ files) → golden_patterns →
-      rl_training_runs → rl_models (+ files) → cql/bc files → pipeline_job
+      EnsembleConfigs & Predictions → backtest_results → knn/lstm models (+ directory & logs) → 
+      golden_patterns → rl_training_runs → rl_models (+ directory, parquets & logs) → 
+      cql/bc files → pipeline_job
     """
-    from sqlalchemy import delete as sqla_delete, select as sqla_select
+    import shutil
+    from sqlalchemy import delete as sqla_delete, select as sqla_select, or_ as sqla_or
     from app.db.models import (
         RLModel, RLTrainingRun, GoldenPattern,
         KNNModel, LSTMModel, BacktestResult, PipelineJob,
+        EnsembleConfig, StockEnsembleWeights, EnsemblePrediction,
+        KNNPrediction, LSTMPrediction
     )
 
     files_deleted: list[str] = []
@@ -217,15 +221,9 @@ async def _purge_pipeline_data(job_id: str) -> dict:
         if p.exists():
             p.unlink(missing_ok=True)
             files_deleted.append(str(p.name))
-            # Remove sibling norm-params file if present (KNN pattern)
-            norm = p.parent / (p.stem + "_norm_params.pkl")
-            if norm.exists():
-                norm.unlink(missing_ok=True)
-                files_deleted.append(str(norm.name))
 
     async with async_session_factory() as db:
         # ── Find RL models created by this pipeline ───────────────────────
-        # Pipeline tags models via training_config.pipeline_job_id
         rl_result = await db.execute(sqla_select(RLModel))
         all_rl = rl_result.scalars().all()
         pipeline_rl_ids = [
@@ -249,39 +247,86 @@ async def _purge_pipeline_data(job_id: str) -> dict:
         knn_ids = [m.id for m in knn_models]
         lstm_ids = [m.id for m in lstm_models]
 
+        # ── Find EnsembleConfig tied to these KNN/LSTM models ─────────────
+        ensemble_configs: list[EnsembleConfig] = []
+        if knn_ids or lstm_ids:
+            conds = []
+            if knn_ids:
+                conds.append(EnsembleConfig.knn_model_id.in_(knn_ids))
+            if lstm_ids:
+                conds.append(EnsembleConfig.lstm_model_id.in_(lstm_ids))
+            enc_res = await db.execute(
+                sqla_select(EnsembleConfig).where(sqla_or(*conds))
+            )
+            ensemble_configs = list(enc_res.scalars().all())
+        ensemble_ids = [e.id for e in ensemble_configs]
+
+        # ── Delete Ensemble Weights & Predictions ─────────────────────────
+        if ensemble_ids:
+            await db.execute(sqla_delete(StockEnsembleWeights).where(StockEnsembleWeights.ensemble_config_id.in_(ensemble_ids)))
+            await db.execute(sqla_delete(EnsemblePrediction).where(EnsemblePrediction.ensemble_config_id.in_(ensemble_ids)))
+        
+        # ── Delete KNN & LSTM Predictions ─────────────────────────────────
+        if knn_ids:
+            await db.execute(sqla_delete(KNNPrediction).where(KNNPrediction.knn_model_id.in_(knn_ids)))
+        if lstm_ids:
+            await db.execute(sqla_delete(LSTMPrediction).where(LSTMPrediction.lstm_model_id.in_(lstm_ids)))
+
         # ── Delete backtest results tied to these models ───────────────────
         bt_count = 0
+        if ensemble_ids:
+            r = await db.execute(
+                sqla_delete(BacktestResult).where(
+                    BacktestResult.model_type == "ensemble",
+                    sqla_or(BacktestResult.model_id.in_(ensemble_ids), BacktestResult.model_id == 0)
+                )
+            )
+            bt_count += r.rowcount
         if knn_ids:
             r = await db.execute(
                 sqla_delete(BacktestResult).where(
-                    BacktestResult.model_id.in_(knn_ids),
-                    BacktestResult.model_type == "ensemble",
+                    BacktestResult.model_type == "knn",
+                    sqla_or(BacktestResult.model_id.in_(knn_ids), BacktestResult.model_id == 0)
                 )
             )
-            bt_count += r.rowcount  # type: ignore[attr-defined]
+            bt_count += r.rowcount
         if lstm_ids:
             r = await db.execute(
                 sqla_delete(BacktestResult).where(
-                    BacktestResult.model_id.in_(lstm_ids),
+                    BacktestResult.model_type == "lstm",
+                    sqla_or(BacktestResult.model_id.in_(lstm_ids), BacktestResult.model_id == 0)
                 )
             )
-            bt_count += r.rowcount  # type: ignore[attr-defined]
+            bt_count += r.rowcount
         if pipeline_rl_ids:
             r = await db.execute(
                 sqla_delete(BacktestResult).where(
-                    BacktestResult.model_id.in_(pipeline_rl_ids),
                     BacktestResult.model_type == "rl",
+                    sqla_or(BacktestResult.model_id.in_(pipeline_rl_ids), BacktestResult.model_id == 0)
                 )
             )
-            bt_count += r.rowcount  # type: ignore[attr-defined]
+            bt_count += r.rowcount
         records_deleted["backtest_results"] = bt_count
 
-        # ── Delete KNN / LSTM model files + DB rows ───────────────────────
+        # ── Delete EnsembleConfig DB rows ─────────────────────────────────
+        if ensemble_ids:
+            await db.execute(sqla_delete(EnsembleConfig).where(EnsembleConfig.id.in_(ensemble_ids)))
+            records_deleted["ensemble_configs"] = len(ensemble_ids)
+
+        # ── Delete KNN / LSTM model dirs + norm params + DB rows ──────────
         for m in knn_models:
-            _remove_file(m.model_path)
             _remove_file(m.norm_params_path)
+            if m.model_path:
+                art_dir = Path(m.model_path).parent
+                if art_dir.exists():
+                    shutil.rmtree(art_dir, ignore_errors=True)
+                    files_deleted.append(str(art_dir.name))
         for m in lstm_models:
-            _remove_file(m.model_path)
+            if m.model_path:
+                art_dir = Path(m.model_path).parent
+                if art_dir.exists():
+                    shutil.rmtree(art_dir, ignore_errors=True)
+                    files_deleted.append(str(art_dir.name))
 
         if knn_ids:
             await db.execute(sqla_delete(KNNModel).where(KNNModel.id.in_(knn_ids)))
@@ -296,9 +341,34 @@ async def _purge_pipeline_data(job_id: str) -> dict:
             await db.execute(sqla_delete(RLTrainingRun).where(RLTrainingRun.rl_model_id.in_(pipeline_rl_ids)))
             for m in all_rl:
                 if m.id in pipeline_rl_ids:
-                    _remove_file(m.model_path)
+                    if m.model_path:
+                        art_dir = Path(m.model_path).parent
+                        if art_dir.exists():
+                            shutil.rmtree(art_dir, ignore_errors=True)
+                            files_deleted.append(str(art_dir.name))
             await db.execute(sqla_delete(RLModel).where(RLModel.id.in_(pipeline_rl_ids)))
         records_deleted["rl_models"] = len(pipeline_rl_ids)
+
+        # ── Delete pattern datasets and log files ─────────────────────────
+        parquet_dir = Path(settings.MODEL_DIR) / "patterns"
+        if parquet_dir.exists() and pipeline_rl_ids:
+            for pid in pipeline_rl_ids:
+                for p in parquet_dir.glob(f"patterns_{pid}_*.parquet"):
+                    p.unlink(missing_ok=True)
+                    files_deleted.append(p.name)
+        
+        log_dir = Path(__file__).resolve().parents[3] / "logs" / "training"
+        if log_dir.exists():
+            for pid in pipeline_rl_ids:
+                p = log_dir / f"model_{pid}.log"
+                if p.exists():
+                    p.unlink(missing_ok=True)
+                    files_deleted.append(p.name)
+            for kid in knn_ids:
+                p = log_dir / f"distill_{kid}.log"
+                if p.exists():
+                    p.unlink(missing_ok=True)
+                    files_deleted.append(p.name)
 
         # ── Delete CQL / BC warmup files (named after job_id prefix) ──────
         short_id = job_id[:8]
@@ -1009,6 +1079,7 @@ async def _stage_backtest(job_id: str, rl_model_id: int, knn_model_id: int | Non
 
             predictions: list[dict] = []
             close_arr: list[float] = []
+            backtest_dates: list = []
             async with async_session_factory() as db:
                 ohlcv_rows = await _crud.get_ohlcv(db, sid, "day", start_d, end_d)
 
@@ -1029,12 +1100,13 @@ async def _stage_backtest(job_id: str, rl_model_id: int, knn_model_id: int | Non
                 predictions.append({"action": -1 if raw_action == 2 else raw_action,
                                      "confidence": p["confidence"], "regime_id": None})
                 close_arr.append(price)
+                backtest_dates.append(d)
 
             if len(predictions) < 10:
                 continue
 
             bt_cfg = BacktestConfig(initial_capital=100_000.0, stoploss_pct=5.0, min_confidence=0.6)
-            bt_res = ml_run_backtest(predictions, np.array(close_arr), list(range(len(predictions))), bt_cfg)
+            bt_res = ml_run_backtest(predictions, np.array(close_arr), backtest_dates, bt_cfg)
 
             async with async_session_factory() as db:
                 rec = BacktestResultModel(

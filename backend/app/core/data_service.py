@@ -102,6 +102,29 @@ def merge_weekly_features(
     daily_df = daily_df.sort_values("date").reset_index(drop=True)
     w_indicators = w_indicators.sort_values("date").reset_index(drop=True)
 
+    # ── Incomplete-bar guard ───────────────────────────────────────────────
+    # During live trading (Mon–Thu) the most recent weekly bar in the DB is
+    # the *current* week whose candle is still open and whose indicators are
+    # still actively changing.  Drop it so daily rows never receive a partial
+    # weekly RSI/MACD value.  This is a no-op for historical data because every
+    # past weekly bar is already fully closed.
+    if not w_indicators.empty:
+        from datetime import date as _date
+        today = pd.Timestamp(_date.today())
+        last_week_date = w_indicators["date"].iloc[-1]
+        # ISO weekday: Mon=0 … Fri=4 … Sun=6
+        # If today falls inside the same ISO week as the last bar → bar is open
+        if (today - last_week_date).days < 7 and today.weekday() < 5:
+            w_indicators = w_indicators.iloc[:-1].reset_index(drop=True)
+            logger.debug(
+                "merge_weekly_features: dropped last unclosed weekly bar (%s) — today is %s (%s)",
+                last_week_date.date(), today.date(), today.strftime("%A"),
+            )
+        if len(w_indicators) < 2:
+            for col in WEEKLY_INDICATOR_COLS:
+                daily_df[col] = 0.0
+            return daily_df
+
     # merge_asof: for each daily row find the last weekly bar whose date
     # is <= the daily date.  This is the strict no-lookahead condition.
     merged = pd.merge_asof(

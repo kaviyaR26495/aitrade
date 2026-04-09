@@ -167,6 +167,29 @@ def is_authenticated() -> bool:
         return False
 
 
+async def is_authenticated_live() -> bool:
+    """Perform a live check against Zerodha API to verify token validity.
+
+    Makes a lightweight kite.profile() call.  Returns False if it fails
+    with a 'token' or 'access' error.
+    """
+    if not is_authenticated():
+        return False
+    try:
+        kite = get_kite()
+        # Lightweight call to check if token is actually valid on server
+        await asyncio.to_thread(kite.profile)
+        return True
+    except Exception as e:
+        err = str(e).lower()
+        if "token" in err or "access" in err or "invalid" in err or "403" in err:
+            logger.warning("Zerodha token validation failed: %s", e)
+            return False
+        # For other network errors, assume we're still authenticated but server is down/unreachable
+        logger.error("Network error during Zerodha validation: %s", e)
+        return True
+
+
 def generate_session(request_token: str, api_secret: str | None = None) -> dict:
     """Generate a new Kite session using request_token and optional api_secret."""
     kite = get_kite()

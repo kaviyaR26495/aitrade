@@ -13,6 +13,7 @@ import Portfolio from './pages/Portfolio';
 import Settings from './pages/Settings';
 import ThemeShowcase from './components/ThemeShowcase';
 import StockSelector from './pages/StockSelector';
+import AuthCallback from './pages/AuthCallback';
 import { useAppStore } from './store/appStore';
 
 export default function App() {
@@ -26,6 +27,7 @@ export default function App() {
   return (
     <ErrorBoundary>
       <Routes>
+        <Route path="/token" element={<AuthCallback />} />
         <Route element={<Layout />}>
           <Route path="/" element={<Dashboard />} />
           <Route path="/data" element={<DataManager />} />

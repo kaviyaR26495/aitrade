@@ -36,7 +36,6 @@ export default function Settings() {
   const [formValues, setFormValues] = useState<Record<string, string>>({});
   const [dirty, setDirty] = useState<Set<string>>(new Set());
   const [loginUrl, setLoginUrl] = useState('');
-  const [requestTokenInput, setRequestTokenInput] = useState('');
   const [authLoading, setAuthLoading] = useState(false);
   const [populateLoading, setPopulateLoading] = useState(false);
   const [showLoginSteps, setShowLoginSteps] = useState(false);
@@ -156,47 +155,6 @@ export default function Settings() {
     }
   };
 
-  const extractRequestToken = (raw: string): string => {
-    const value = raw.trim();
-    if (!value) return '';
-    if (value.includes('request_token=')) {
-      try {
-        const url = new URL(value);
-        return url.searchParams.get('request_token') ?? '';
-      } catch {
-        const match = value.match(/request_token=([^&\s]+)/);
-        return match?.[1] ?? '';
-      }
-    }
-    return value;
-  };
-
-  const handleAuthenticate = async () => {
-    const token = extractRequestToken(requestTokenInput);
-    if (!token) {
-      addNotification({ type: 'warning', message: 'Paste request_token or full redirect URL' });
-      return;
-    }
-
-    setAuthLoading(true);
-    try {
-      const res = await zerodhaCallback(token);
-      addNotification({
-        type: 'success',
-        message: `Authenticated as ${res.data.user_id ?? 'Zerodha user'}`,
-      });
-      setRequestTokenInput('');
-      setShowLoginSteps(false);
-      refetchAuth();
-    } catch (e: any) {
-      addNotification({
-        type: 'error',
-        message: e?.response?.data?.detail ?? 'Authentication failed',
-      });
-    } finally {
-      setAuthLoading(false);
-    }
-  };
 
   const handlePopulateFromZerodha = async () => {
     setPopulateLoading(true);
@@ -293,48 +251,25 @@ export default function Settings() {
                   {loginUrl}
                 </div>
               )}
-
-              <div className="p-5 rounded-[var(--radius)] bg-[var(--bg-input)] space-y-4">
-                <div className="flex items-center gap-4">
-                  <div className="w-10 h-10 rounded-full bg-[var(--primary-subtle)] flex items-center justify-center flex-shrink-0">
-                    <span className="text-sm font-bold text-[var(--primary)]">2</span>
-                  </div>
-                  <p className="text-sm font-semibold">Paste request_token</p>
-                </div>
-                <Input
-                  value={requestTokenInput}
-                  onChange={setRequestTokenInput}
-                  placeholder="Paste request_token or full redirect URL"
-                  data-guide-id="request-token-input"
-                />
-                <div className="flex gap-3">
-                  <Button onClick={handleAuthenticate} loading={authLoading} data-guide-id="authenticate-btn">
-                    <Shield size={14} /> Authenticate Token
-                  </Button>
-                  <Button variant="secondary" onClick={() => setRequestTokenInput('')}>
-                    Clear
-                  </Button>
-                </div>
-              </div>
             </>
           )}
 
-          <div className="p-5 rounded-[var(--radius)] bg-[var(--bg-input)] space-y-4">
-            <div className="flex items-center gap-4">
-              <div className="w-10 h-10 rounded-full bg-[var(--primary-subtle)] flex items-center justify-center flex-shrink-0">
-                <span className="text-sm font-bold text-[var(--primary)]">3</span>
+            <div className="p-5 rounded-[var(--radius)] bg-[var(--bg-input)] space-y-4">
+              <div className="flex items-center gap-4">
+                <div className="w-10 h-10 rounded-full bg-[var(--primary-subtle)] flex items-center justify-center flex-shrink-0">
+                  <span className="text-sm font-bold text-[var(--primary)]">2</span>
+                </div>
+                <div>
+                  <p className="text-sm font-semibold">Populate Database</p>
+                  <p className="text-xs text-[var(--text-muted)] mt-0.5">
+                    Syncs stock list, holidays, and sample OHLCV for first 20 active stocks.
+                  </p>
+                </div>
               </div>
-              <div>
-                <p className="text-sm font-semibold">Populate Database</p>
-                <p className="text-xs text-[var(--text-muted)] mt-0.5">
-                  Syncs stock list, holidays, and sample OHLCV for first 20 active stocks.
-                </p>
-              </div>
+              <Button onClick={handlePopulateFromZerodha} loading={populateLoading} data-guide-id="populate-btn">
+                <Database size={14} /> Populate From Zerodha
+              </Button>
             </div>
-            <Button onClick={handlePopulateFromZerodha} loading={populateLoading} data-guide-id="populate-btn">
-              <Database size={14} /> Populate From Zerodha
-            </Button>
-          </div>
         </div>
       </Card>
 

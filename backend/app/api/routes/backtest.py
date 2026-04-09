@@ -166,10 +166,38 @@ async def run_backtest(
         adv_values=adv_values,
     )
 
-    # 5. Persist backtest record
+    # 5. Persist backtest record — resolve the true model_id if caller did not send one
+    resolved_model_id = req.model_id
+    if not resolved_model_id:
+        # Auto-resolve: use the latest model of the given type so the record
+        # always carries a real FK-compatible id which the delete cascade can match.
+        try:
+            if req.model_type == "knn":
+                from app.db.models import KNNModel as _KNN
+                _r = await db.execute(select(_KNN).order_by(_KNN.created_at.desc()).limit(1))
+                _m = _r.scalar_one_or_none()
+                resolved_model_id = _m.id if _m else 0
+            elif req.model_type == "lstm":
+                from app.db.models import LSTMModel as _LSTM
+                _r = await db.execute(select(_LSTM).order_by(_LSTM.created_at.desc()).limit(1))
+                _m = _r.scalar_one_or_none()
+                resolved_model_id = _m.id if _m else 0
+            elif req.model_type == "ensemble":
+                from app.db.models import EnsembleConfig as _EC
+                _r = await db.execute(select(_EC).order_by(_EC.created_at.desc()).limit(1))
+                _m = _r.scalar_one_or_none()
+                resolved_model_id = _m.id if _m else 0
+            elif req.model_type == "rl":
+                from app.db.models import RLModel as _RL
+                _r = await db.execute(select(_RL).order_by(_RL.created_at.desc()).limit(1))
+                _m = _r.scalar_one_or_none()
+                resolved_model_id = _m.id if _m else 0
+        except Exception:
+            resolved_model_id = 0
+
     record = BacktestResultModel(
         model_type=req.model_type,
-        model_id=req.model_id or 0,
+        model_id=resolved_model_id or 0,
         stock_id=stock_id,
         interval=req.interval,
         start_date=start_d,
@@ -407,6 +435,12 @@ async def _run_live_inference(
         # Normalise to a plain date object
         if hasattr(d, "date"):
             d = d.date()
+        elif isinstance(d, str):
+            from datetime import datetime
+            try:
+                d = datetime.strptime(d, "%Y-%m-%d").date()
+            except:
+                pass
         if d not in target_date_set:
             continue
         raw_action = p["action"]  # 0=HOLD, 1=BUY, 2=SELL

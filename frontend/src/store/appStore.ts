@@ -169,6 +169,10 @@ interface AppState {
   activePipelineJobId: string | null;
   setActivePipelineJobId: (id: string | null) => void;
 
+  isZerodhaAuthenticated: boolean;
+  setIsZerodhaAuthenticated: (v: boolean) => void;
+  isAuthRefreshing: boolean;
+
   // Initialization
   isInitialized: boolean;
   initialize: () => Promise<void>;
@@ -264,19 +268,55 @@ export const useAppStore = create<AppState>((set) => ({
     set({ stockSelectorSelection: createEmptyStockSelectorSelection() });
   },
 
+  isZerodhaAuthenticated: false,
+  setIsZerodhaAuthenticated: (isZerodhaAuthenticated) => set({ isZerodhaAuthenticated }),
+  isAuthRefreshing: false,
+
   isInitialized: true,
   error: null,
   initialize: async () => {
-    // health check runs in the background — never blocks app render
+    // health check + auth check — never blocks app render
     try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 5000);
-      const res = await fetch('/api/health', { signal: controller.signal });
-      clearTimeout(timer);
-      if (!res.ok) throw new Error(`Health check returned ${res.status}`);
+      const { getHealth, getAuthStatus, getLoginUrl } = await import('../services/api');
+      
+      // 1. Backend Health Check
+      const healthRes = await getHealth();
+      if (healthRes.status !== 200) throw new Error(`Health check returned ${healthRes.status}`);
       set({ error: null });
-    } catch {
-      set({ error: 'Backend is not reachable. Some features may not work.' });
+
+      // 2. Zerodha Auth Check + Silent Refresh
+      const authRes = await getAuthStatus();
+      const authenticated = authRes.data.authenticated;
+      set({ isZerodhaAuthenticated: authenticated });
+
+      if (!authenticated) {
+        // Attempt Silent Refresh
+        const REFRESH_KEY = 'aitrade-last-refresh';
+        const now = Date.now();
+        const lastRefresh = sessionStorage.getItem(REFRESH_KEY);
+        
+        // Prevent infinite loops: only try auto-refreshing once every 5 minutes in this tab
+        if (!lastRefresh || (now - parseInt(lastRefresh)) > 300000) {
+          sessionStorage.setItem(REFRESH_KEY, now.toString());
+          console.log('Zerodha session expired. Attempting silent refresh...');
+          
+          try {
+            const loginRes = await getLoginUrl();
+            const loginUrl = loginRes.data.login_url;
+            if (loginUrl) {
+              // Append state=currentURL so backend knows to redirect back
+              const redirectUrl = `${loginUrl}&state=${encodeURIComponent(window.location.href)}`;
+              set({ isAuthRefreshing: true });
+              window.location.assign(redirectUrl);
+            }
+          } catch (err) {
+            console.error('Failed to trigger auto-refresh:', err);
+          }
+        }
+      }
+    } catch (err) {
+      console.error('Initialization failed:', err);
+      set({ error: 'Backend is not reachable or session could not be refreshed.' });
     }
   },
 }));

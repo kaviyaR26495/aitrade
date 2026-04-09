@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from datetime import date, datetime
 from typing import Any
 
 import numpy as np
@@ -479,13 +480,18 @@ def _compute_metrics(
         )
 
     # Trade log
+    def _fmt_date(d: Any) -> str:
+        if isinstance(d, (date, datetime)):
+            return d.strftime("%Y-%m-%d")
+        return str(d)
+
     result.trade_log = [
         {
-            "entry_date": str(t.entry_date),
-            "exit_date": str(t.exit_date),
-            "entry_price": round(t.entry_price, 2),
-            "exit_price": round(t.exit_price, 2),
-            "quantity": t.quantity,
+            "entry_date": _fmt_date(t.entry_date),
+            "exit_date": _fmt_date(t.exit_date),
+            "entry_price": round(float(t.entry_price), 2),
+            "exit_price": round(float(t.exit_price), 2),
+            "quantity": int(t.quantity),
             "pnl": round(t.pnl, 2),
             "pnl_pct": round(t.pnl_pct, 4),
             "regime_id": t.regime_id,

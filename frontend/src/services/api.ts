@@ -55,8 +55,8 @@ api.interceptors.response.use(
 // ── Auth ──
 export const getLoginUrl = () => api.get('/auth/login-url');
 export const getAuthStatus = () => api.get('/auth/status');
-export const zerodhaCallback = (requestToken: string) =>
-  api.get('/auth/callback', { params: { request_token: requestToken } });
+export const zerodhaCallback = (requestToken: string, state?: string) =>
+  api.get('/auth/callback', { params: { request_token: requestToken, state } });
 
 // ── Config ──
 export const getConfig = () => api.get('/config/');
