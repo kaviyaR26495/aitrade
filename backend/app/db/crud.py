@@ -21,6 +21,7 @@ from app.db.models import (
     EnsembleConfig,
     EnsemblePrediction,
     GoldenPattern,
+    IndexOHLCV,
     KNNModel,
     KNNPrediction,
     LSTMModel,
@@ -188,6 +189,50 @@ async def get_ohlcv_max_date(db: AsyncSession, stock_id: int, interval: str) -> 
         )
     )
     return result.scalar_one_or_none()
+
+
+# ── Index OHLCV CRUD ───────────────────────────────────────────────────
+
+async def get_index_ohlcv(
+    db: AsyncSession,
+    symbol: str,
+    interval: str = "day",
+    start_date: date | None = None,
+    end_date: date | None = None,
+) -> list[IndexOHLCV]:
+    """Return IndexOHLCV rows for *symbol* within the optional date range."""
+    q = select(IndexOHLCV).where(
+        IndexOHLCV.symbol == symbol,
+        IndexOHLCV.interval == interval,
+    )
+    if start_date:
+        q = q.where(IndexOHLCV.date >= start_date)
+    if end_date:
+        q = q.where(IndexOHLCV.date <= end_date)
+    q = q.order_by(IndexOHLCV.date)
+    result = await db.execute(q)
+    return list(result.scalars().all())
+
+
+async def upsert_index_ohlcv(db: AsyncSession, rows: list[dict]) -> int:
+    """Bulk-upsert index OHLCV rows (ON DUPLICATE KEY UPDATE close=VALUES(close))."""
+    if not rows:
+        return 0
+    total = 0
+    for i in range(0, len(rows), OHLCV_BATCH_SIZE):
+        batch = rows[i : i + OHLCV_BATCH_SIZE]
+        stmt = mysql_insert(IndexOHLCV).values(batch)
+        stmt = stmt.on_duplicate_key_update(
+            open=stmt.inserted.open,
+            high=stmt.inserted.high,
+            low=stmt.inserted.low,
+            close=stmt.inserted.close,
+            volume=stmt.inserted.volume,
+        )
+        await db.execute(stmt)
+        total += len(batch)
+    await db.commit()
+    return total
 
 
 # ── Indicators CRUD ────────────────────────────────────────────────────

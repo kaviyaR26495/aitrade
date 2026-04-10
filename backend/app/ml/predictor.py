@@ -17,7 +17,7 @@ from app.config import settings
 from app.core.data_service import get_model_ready_data
 from app.core.normalizer import prepare_model_input
 from app.db import crud
-from app.db.models import KNNModel, LSTMModel, EnsembleConfig
+from app.db.models import KNNModel, LSTMModel, EnsembleConfig, EnsemblePrediction
 from app.db.database import async_session_factory
 from app.ml.knn_distiller import load_knn_model, predict_knn, load_knn_norm_params
 from app.ml.lstm_distiller import load_lstm_model, predict_lstm
@@ -27,6 +27,12 @@ from app.core.regime_classifier import classify_regimes
 logger = logging.getLogger(__name__)
 
 ACTION_MAP = {0: "HOLD", 1: "BUY", 2: "SELL"}
+
+# How often to open a secondary DB session to check for job cancellation.
+# Opening a new connection on every stock causes excessive overhead at scale.
+_CANCEL_CHECK_INTERVAL = 10
+# Predictions are flushed to DB in chunks; avoids per-row commit round-trips.
+_COMMIT_BATCH_SIZE = 50
 
 # ── Model Cache ─────────────────────────────────────────────────────────
 # Avoids re-loading heavy KNN/LSTM files from disk on every prediction run.
@@ -201,11 +207,11 @@ async def run_daily_predictions(
     seq_len = settings.DEFAULT_SEQ_LEN_DAILY if interval == "day" else settings.DEFAULT_SEQ_LEN_WEEKLY
 
     processed_count = 0
+    pending_predictions: list[EnsemblePrediction] = []
     for i, stock in enumerate(stocks):
         try:
-            # Check for cancellation if part of a job
-            if job_id:
-                # Use a FRESH session for the check to avoid transaction isolation/locks
+            # Check for cancellation every N stocks to avoid per-stock session overhead
+            if job_id and i % _CANCEL_CHECK_INTERVAL == 0:
                 async with async_session_factory() as check_db:
                     job = await crud.get_prediction_job(check_db, job_id)
                     if job and job.status == "cancelled":
@@ -276,11 +282,13 @@ async def run_daily_predictions(
                     "regime_id": regime_id,
                 }
                 
-                # Dynamic population: Add row to list and flush to DB immediately
-                from app.db.models import EnsemblePrediction
-                db.add(EnsemblePrediction(**pred_row))
-                await db.commit() # Individual commit for real-time feel
-                
+                pending_predictions.append(EnsemblePrediction(**pred_row))
+                # Batch-commit to avoid per-row transaction overhead
+                if len(pending_predictions) >= _COMMIT_BATCH_SIZE:
+                    db.add_all(pending_predictions)
+                    await db.commit()
+                    pending_predictions.clear()
+
                 results.append(pred_row)
 
         finally:
@@ -296,6 +304,12 @@ async def run_daily_predictions(
                 )
 
         
+    # Flush any remaining predictions that didn't fill a full batch
+    if pending_predictions:
+        db.add_all(pending_predictions)
+        await db.commit()
+        pending_predictions.clear()
+
     # Finalize job status
     if job_id:
         is_cancelled = False

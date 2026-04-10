@@ -54,6 +54,10 @@ class Settings(BaseSettings):
     DEFAULT_QUALITY_THRESHOLD: float = 0.8
     DEFAULT_MIN_PROFIT_THRESHOLD: float = 1.2
 
+    # Benchmark index
+    BENCHMARK_SYMBOL: str = "NIFTY 50"
+    BENCHMARK_KITE_TOKEN: int = 256265  # NSE NIFTY 50 instrument token
+
     # Intervals
     SUPPORTED_INTERVALS: tuple[str, ...] = ("day", "week")
 

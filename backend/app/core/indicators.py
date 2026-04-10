@@ -289,15 +289,30 @@ def compute_all_indicators(
     if missing:
         raise ValueError(f"Missing columns: {missing}")
 
-    # Fill NaN with forward-fill then 1 (pytrade pattern)
-    df = df.ffill().fillna(1)
+    # Forward-fill mid-series gaps (e.g. holidays, stale ticks).
+    # For leading NaN on short-history / recently-listed stocks, back-fill
+    # OHLC from the first real bar — avoids the artificial close=1 artefact
+    # that inflates ROC and distance-SMA features during the IPO era.
+    # Volume is zeroed rather than back-filled (no traded volume is correct).
+    df = df.ffill()
+    for col in ("open", "high", "low", "close"):
+        df[col] = df[col].bfill()
+    df["volume"] = df["volume"].fillna(0)
 
-    # Add date features
+    # Add date features — sin/cos cyclical encoding so the network sees
+    # Monday and Friday as adjacent in circular space (not 0.0 vs 0.4),
+    # and January/December as adjacent (not 0.01 vs 0.12).
     if "date" in df.columns:
         dt = pd.to_datetime(df["date"])
-        df["dow"] = dt.dt.dayofweek / 10
-        df["month"] = dt.dt.month / 100
-        df["day"] = dt.dt.day / 100
+        dow   = dt.dt.dayofweek        # 0=Mon … 4=Fri
+        month = dt.dt.month            # 1–12
+        day   = dt.dt.day              # 1–31
+        df["dow_sin"]   = np.sin(2 * np.pi * dow / 5)
+        df["dow_cos"]   = np.cos(2 * np.pi * dow / 5)
+        df["month_sin"] = np.sin(2 * np.pi * (month - 1) / 12)
+        df["month_cos"] = np.cos(2 * np.pi * (month - 1) / 12)
+        df["day_sin"]   = np.sin(2 * np.pi * (day - 1) / 31)
+        df["day_cos"]   = np.cos(2 * np.pi * (day - 1) / 31)
 
     # Copy raw OHLCV to n-prefixed columns (for normalization later)
     df["n_open"] = df["open"]

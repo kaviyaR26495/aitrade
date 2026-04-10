@@ -392,12 +392,21 @@ async def _run_distillation_background(
                 "dataset_filepath": p.dataset_filepath,
                 "row_index": p.row_index,
                 "label": p.label,
+                "pnl_percent": p.pnl_percent,
             }
             for p in db_patterns
         ]
         X, y = await loop.run_in_executor(
             _training_executor,
             lambda: patterns_to_training_data(db_patterns_list, include_hold=True, seq_len=seq_len),
+        )
+        # Build continuous return targets for LSTM pre-training.
+        # pnl_percent is forward P&L from pattern_extractor; divide by 100 to
+        # convert from percentage to fractional return (MSELoss-friendly scale).
+        import numpy as _np_roc
+        roc5_targets = _np_roc.array(
+            [float(p.get("pnl_percent") or 0) / 100.0 for p in db_patterns_list],
+            dtype=_np_roc.float32,
         )
     except Exception as exc:
         _dlog(knn_model_id, f"ERROR  Failed to build training arrays: {exc}")
@@ -464,6 +473,8 @@ async def _run_distillation_background(
                 num_layers=lstm_num_layers,
                 dropout=lstm_dropout,
                 max_epochs=lstm_max_epochs,
+                roc5_targets=roc5_targets,
+                pretrain_epochs=10,
                 log_fn=lambda msg: _dlog(knn_model_id, msg),
             )
 

@@ -113,10 +113,27 @@ class StockOHLCV(Base):
     volume: Mapped[float] = mapped_column(Float, nullable=False)
     interval: Mapped[IntervalEnum] = mapped_column(Enum(IntervalEnum), nullable=False)
 
+
+class IndexOHLCV(Base):
+    """OHLCV cache for market indices (NIFTY 50, BANK NIFTY, etc.).
+
+    Separate from StockOHLCV: indices have no stock_id FK and are identified
+    only by their symbol string (e.g. "NIFTY 50").
+    """
+    __tablename__ = "index_ohlcv"
     __table_args__ = (
-        UniqueConstraint("stock_id", "date", "interval", name="uq_ohlcv"),
-        Index("ix_ohlcv_stock_date", "stock_id", "date", "interval"),
+        UniqueConstraint("symbol", "date", "interval", name="uq_index_ohlcv"),
     )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(20), nullable=False)
+    date: Mapped[date] = mapped_column(Date, nullable=False)
+    interval: Mapped[str] = mapped_column(String(10), nullable=False, default="day")
+    open: Mapped[float | None] = mapped_column(Float, nullable=True)
+    high: Mapped[float | None] = mapped_column(Float, nullable=True)
+    low: Mapped[float | None] = mapped_column(Float, nullable=True)
+    close: Mapped[float | None] = mapped_column(Float, nullable=True)
+    volume: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 # ── Indicators Cache ───────────────────────────────────────────────────

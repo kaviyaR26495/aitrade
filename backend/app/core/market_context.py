@@ -18,6 +18,7 @@ import httpx
 import numpy as np
 import pandas as pd
 
+from app.config import settings
 from app.db import crud
 
 if TYPE_CHECKING:
@@ -189,6 +190,9 @@ async def enrich_with_market_context(
     df["fii_net_norm"] = 0.0
     df["dii_net_norm"] = 0.0
     df["sector_breadth_pct"] = 0.5
+    df["rs_5d"] = 0.0
+    df["sector_roc_avg"] = 0.0
+    df["market_above_sma200"] = 0.5
 
     date_col = pd.to_datetime(df["date"]).dt.date
     if date_col.empty:
@@ -246,4 +250,178 @@ async def enrich_with_market_context(
             logger.warning("Sector breadth enrichment failed (%s); using 0.5.", exc)
             df = df.drop(columns=["_date_dt"], errors="ignore")
 
+    # ── Relative Strength to benchmark ────────────────────────────────
+    try:
+        rs = await compute_rs_5d(db, df, settings.BENCHMARK_SYMBOL)
+        df["rs_5d"] = pd.Series(rs, index=df.index).fillna(0.0).values
+    except Exception as exc:
+        logger.warning("rs_5d enrichment failed (%s); using 0.0.", exc)
+
+    # ── Sector average ROC ─────────────────────────────────────────────
+    sector = getattr(stock, "sector", None)
+    if sector:
+        try:
+            sroc_df = await compute_sector_roc_avg(db, sector, start_date, end_date)
+            if not sroc_df.empty:
+                sroc_df["date"] = pd.to_datetime(sroc_df["date"])
+                df["_date_dt"] = pd.to_datetime(df["date"])
+                merged = df.merge(sroc_df[["date", "sector_roc_avg"]], left_on="_date_dt", right_on="date", how="left", suffixes=("", "_sr"))
+                src = "sector_roc_avg_sr" if "sector_roc_avg_sr" in merged.columns else "sector_roc_avg"
+                if src in merged.columns:
+                    df["sector_roc_avg"] = merged[src].fillna(0.0).values
+                df = df.drop(columns=["_date_dt"], errors="ignore")
+        except Exception as exc:
+            logger.warning("sector_roc_avg enrichment failed (%s); using 0.0.", exc)
+            df = df.drop(columns=["_date_dt"], errors="ignore")
+
+    # ── Market regime flag (index above 200-SMA) ───────────────────────
+    try:
+        mrf_df = await compute_market_regime_flag(db, start_date, end_date, settings.BENCHMARK_SYMBOL)
+        if not mrf_df.empty:
+            mrf_df["date"] = pd.to_datetime(mrf_df["date"])
+            df["_date_dt"] = pd.to_datetime(df["date"])
+            merged = df.merge(mrf_df[["date", "market_above_sma200"]], left_on="_date_dt", right_on="date", how="left", suffixes=("", "_mrf"))
+            src = "market_above_sma200_mrf" if "market_above_sma200_mrf" in merged.columns else "market_above_sma200"
+            if src in merged.columns:
+                df["market_above_sma200"] = merged[src].fillna(0.5).values
+            df = df.drop(columns=["_date_dt"], errors="ignore")
+    except Exception as exc:
+        logger.warning("market_above_sma200 enrichment failed (%s); using 0.5.", exc)
+        df = df.drop(columns=["_date_dt"], errors="ignore")
+
     return df
+
+
+# ── New contextual features ────────────────────────────────────────────
+
+async def compute_rs_5d(
+    db: "AsyncSession",
+    df: pd.DataFrame,
+    benchmark_symbol: str,
+) -> pd.Series:
+    """Relative Strength vs benchmark over 5 trading days.
+
+    ``rs_5d = stock_roc_5 - benchmark_roc_5``
+
+    Measures whether a stock is generating alpha independent of the market
+    tide.  Clipped to ±20 to cap influence of extreme one-day gaps.
+
+    Requires 'roc_5' column in *df* (computed by indicators.py).
+    Returns a Series aligned to df.index; falls back to 0.0 when data
+    is unavailable.
+    """
+    if "roc_5" not in df.columns:
+        return pd.Series(0.0, index=df.index)
+
+    date_col = pd.to_datetime(df["date"]).dt.date
+    start_date = date_col.min()
+    end_date = date_col.max()
+
+    try:
+        rows = await crud.get_index_ohlcv(db, benchmark_symbol, "day", start_date, end_date)
+        if len(rows) < 6:
+            return pd.Series(0.0, index=df.index)
+
+        bdf = pd.DataFrame([{"date": r.date, "close": r.close} for r in rows])
+        bdf = bdf.sort_values("date").reset_index(drop=True)
+        bdf["bench_roc_5"] = bdf["close"].pct_change(5) * 100
+
+        bdf["date"] = pd.to_datetime(bdf["date"])
+        df_dt = pd.to_datetime(df["date"])
+        merged = pd.Series(df.index).map(dict(zip(df_dt, df.index)))  # identity
+        tmp = pd.DataFrame({"date": df_dt, "roc_5": df["roc_5"].values}).merge(
+            bdf[["date", "bench_roc_5"]], on="date", how="left"
+        )
+        rs = (tmp["roc_5"] - tmp["bench_roc_5"].fillna(0.0)).clip(-20, 20)
+        return rs.values
+    except Exception as exc:
+        logger.warning("rs_5d computation failed (%s); using 0.0.", exc)
+        return pd.Series(0.0, index=df.index)
+
+
+async def compute_sector_roc_avg(
+    db: "AsyncSession",
+    sector: str,
+    start_date: date,
+    end_date: date,
+) -> pd.DataFrame:
+    """Average 5-day ROC across all sector peers per trading day.
+
+    Captures sector-level momentum: a stock inside a rising sector has
+    tailwind even if its own ROC_5 is temporarily flat.
+
+    Returns DataFrame with columns: date, sector_roc_avg.
+    Fallback: 0.0 when fewer than 3 sector stocks are available or on error.
+    """
+    fallback_df = pd.DataFrame({
+        "date": pd.bdate_range(start=start_date, end=end_date).date,
+        "sector_roc_avg": 0.0,
+    })
+
+    stocks = await crud.get_stocks_by_sector(db, sector)
+    if len(stocks) < 3:
+        return fallback_df
+
+    date_vals: dict[date, list[float]] = {}
+    for stock in stocks:
+        try:
+            ind_rows = await crud.get_indicators(db, stock.id, "day", start_date, end_date)
+            for row in ind_rows:
+                d = row.date if isinstance(row.date, date) else row.date.date()
+                val = getattr(row, "roc_5", None)
+                if val is not None and not pd.isna(val):
+                    date_vals.setdefault(d, []).append(float(val))
+        except Exception as exc:
+            logger.debug("Skipping stock %s for sector_roc_avg: %s", stock.symbol, exc)
+
+    if not date_vals:
+        return fallback_df
+
+    dates_sorted = sorted(date_vals.keys())
+    avgs = [sum(date_vals[d]) / len(date_vals[d]) for d in dates_sorted]
+    out = pd.DataFrame({"date": dates_sorted, "sector_roc_avg": avgs})
+    out["sector_roc_avg"] = out["sector_roc_avg"].rolling(5, min_periods=1).mean()
+    return out.reset_index(drop=True)
+
+
+async def compute_market_regime_flag(
+    db: "AsyncSession",
+    start_date: date,
+    end_date: date,
+    benchmark_symbol: str,
+) -> pd.DataFrame:
+    """Binary flag: 1.0 when benchmark close > its 200-day SMA, else 0.0.
+
+    A stock-picking model should know whether it is operating in a bull market
+    (index above 200-SMA) or a bear market — independent of the individual
+    stock's own trend indicators.
+
+    Returns DataFrame with columns: date, market_above_sma200.
+    Fallback: 0.5 (neutral / unknown) when fewer than 200 bars are available.
+    """
+    bdate_index = pd.bdate_range(start=start_date, end=end_date)
+    fallback_df = pd.DataFrame({
+        "date": bdate_index.date,
+        "market_above_sma200": 0.5,
+    })
+
+    try:
+        # Fetch extra history so the 200-SMA is warm by start_date
+        from datetime import timedelta
+        fetch_start = start_date - timedelta(days=300)
+        rows = await crud.get_index_ohlcv(db, benchmark_symbol, "day", fetch_start, end_date)
+        if len(rows) < 201:
+            return fallback_df
+
+        bdf = pd.DataFrame([{"date": r.date, "close": r.close} for r in rows])
+        bdf = bdf.sort_values("date").reset_index(drop=True)
+        bdf["sma_200"] = bdf["close"].rolling(200, min_periods=200).mean()
+        bdf["market_above_sma200"] = np.where(bdf["close"] > bdf["sma_200"], 1.0, 0.0)
+        # NaN rows (before 200 bars) → neutral 0.5
+        bdf.loc[bdf["sma_200"].isna(), "market_above_sma200"] = 0.5
+
+        out = bdf[bdf["date"] >= start_date][["date", "market_above_sma200"]].reset_index(drop=True)
+        return out
+    except Exception as exc:
+        logger.warning("market_above_sma200 computation failed (%s); using 0.5.", exc)
+        return fallback_df

@@ -37,6 +37,7 @@ class SwingTradingEnv(BaseTradingEnv):
         drawdown_asymmetry: float = 2.0,
         slippage_bps: float = 5.0,
         vol_slippage_scale: float = 0.5,
+        t1_penalty: float = 0.005,
     ):
         super().__init__(
             data=data,
@@ -57,6 +58,7 @@ class SwingTradingEnv(BaseTradingEnv):
             vol_slippage_scale=vol_slippage_scale,
         )
         self.max_holding_days = max_holding_days
+        self._t1_penalty = t1_penalty
         # FIFO queue of (quantity, buy_step) tuples.
         # One entry per buy lot; the oldest lot (index 0) governs T+1 eligibility.
         # Pyramiding is blocked at the _execute_action level (holdings == 0 guard),
@@ -68,6 +70,27 @@ class SwingTradingEnv(BaseTradingEnv):
         obs, info = super().reset(seed=seed, options=options)
         self._holding_lots = deque()
         return obs, info
+
+    def step(self, action: int) -> tuple[np.ndarray, float, bool, bool, dict]:
+        """Execute one step, adding a penalty when a SELL is blocked by T+1.
+
+        The base env silently ignores the SELL action when settlement has not
+        completed.  Without an explicit negative signal the RL agent wastes
+        capacity trying to re-issue the same invalid action.  The penalty
+        (default 0.005, ~0.5 % of capital-normalised reward scale) teaches the
+        model to stop generating SELL signals on T+0.
+        """
+        mapped_action = self._map_action(action)
+        t1_blocked = (
+            mapped_action == -1
+            and self.portfolio.holdings > 0
+            and bool(self._holding_lots)
+            and self._holding_lots[0][1] >= self.current_step  # bought this very step
+        )
+        obs, reward, terminated, truncated, info = super().step(action)
+        if t1_blocked:
+            reward -= self._t1_penalty
+        return obs, reward, terminated, truncated, info
 
     def _execute_action(self, action: int, price: float, regime_id: int | None):
         if action == 1:  # BUY

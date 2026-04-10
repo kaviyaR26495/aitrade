@@ -35,6 +35,21 @@ ML_DAILY_FEATURES: list[str] = [
     "rsi", "macd_hist_norm",
     # Trend strength (0-1 normalised via /100)
     "adx_norm", "adx_pos_norm", "adx_neg_norm",
+    # ── Market context (computed by market_context.py) ────────────────
+    # Institutional flow — pre-normalised z-scores, pass through
+    "fii_net_norm", "dii_net_norm",
+    # Sector breadth — fraction of sector stocks above SMA-50 (0-1)
+    "sector_breadth_pct",
+    # Relative strength vs NIFTY 50 over 5 days (clipped ±20)
+    "rs_5d",
+    # Sector-average 5-day ROC (smoothed)
+    "sector_roc_avg",
+    # Binary: 1.0 if broadmarket index is above its 200-SMA, else 0.0
+    "market_above_sma200",
+    # ── Cyclical date encoding (sin/cos, bounded [-1, +1]) ────────────
+    "dow_sin", "dow_cos",
+    "month_sin", "month_cos",
+    "day_sin", "day_cos",
 ]
 
 ML_WEEKLY_FEATURES: list[str] = [
@@ -45,7 +60,7 @@ ML_WEEKLY_FEATURES: list[str] = [
 ]
 
 # Combined list — used by get_feature_columns() and as the final model input filter.
-ML_FEATURES: list[str] = ML_DAILY_FEATURES + ML_WEEKLY_FEATURES  # 26 total
+ML_FEATURES: list[str] = ML_DAILY_FEATURES + ML_WEEKLY_FEATURES  # 38 total
 
 
 # Columns excluded from normalization (already scaled or categorical)
@@ -56,13 +71,15 @@ EXCLUDE_COLS = {
     "adx", "adx_neg", "adx_pos",
     "rsi",
     "tgrb_top", "tgrb_green", "tgrb_red", "tgrb_bottom",
-    "dow", "day", "month",
+    # Cyclical date features — already bounded [-1, +1], pass through
+    "dow_sin", "dow_cos", "month_sin", "month_cos", "day_sin", "day_cos",
     # Regime features are pre-scaled (0/1 binary or 0-1 float); skip log-return treatment
     "regime_trend_bullish", "regime_trend_bearish", "regime_trend_neutral",
     "regime_vol_high", "regime_confidence",
     "trend", "volatility", "regime_id", "quality_score", "is_transition",
     # Market context features — pre-normalized, pass through as-is
     "fii_net_norm", "dii_net_norm", "sector_breadth_pct",
+    "rs_5d", "sector_roc_avg", "market_above_sma200",
     # ── Weekly stationary ML features (all bounded, pass through) ────────
     "weekly_rsi",
     "weekly_macd_hist_norm",
