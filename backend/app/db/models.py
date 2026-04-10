@@ -64,10 +64,13 @@ class ModelStatus(str, enum.Enum):
 
 class OrderStatus(str, enum.Enum):
     pending = "pending"
-    placed = "placed"
-    completed = "completed"
+    placed = "placed"        # legacy alias — prefer submitted
+    completed = "completed"  # legacy alias — prefer filled
     cancelled = "cancelled"
     rejected = "rejected"
+    submitted = "submitted"   # sent to broker, awaiting confirmation
+    partial_fill = "partial_fill"  # partially filled
+    filled = "filled"         # fully filled & confirmed
 
 
 # ── Stocks & Calendar ──────────────────────────────────────────────────
@@ -485,6 +488,9 @@ class TradeOrder(Base):
     zerodha_order_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
     tag: Mapped[str | None] = mapped_column(String(20), nullable=True)
     timestamp: Mapped[datetime] = mapped_column(DateTime, default=now_ist)
+    filled_quantity: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    avg_fill_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    last_reconciled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 # ── App Settings ───────────────────────────────────────────────────────

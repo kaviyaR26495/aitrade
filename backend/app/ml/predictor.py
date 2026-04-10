@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import logging
 from datetime import date
 from pathlib import Path
@@ -208,6 +209,16 @@ async def run_daily_predictions(
 
     processed_count = 0
     pending_predictions: list[EnsemblePrediction] = []
+
+    # Reconcile any open orders against Zerodha before generating new signals.
+    # Wrapped in try/except so a broker outage never blocks the prediction run.
+    try:
+        from app.core.oms import reconcile_open_orders
+        reconciled = await reconcile_open_orders(db)
+        logger.info("OMS reconciliation: %d orders updated before prediction run", reconciled)
+    except Exception as oms_exc:
+        logger.warning("OMS reconciliation failed (non-fatal): %s", oms_exc)
+
     for i, stock in enumerate(stocks):
         try:
             # Check for cancellation every N stocks to avoid per-stock session overhead
@@ -235,6 +246,7 @@ async def run_daily_predictions(
 
             # Use the last window only (most recent)
             X_last = X[-1:].copy()
+            del df  # release per-stock DataFrame — reduces peak RSS at scale
 
             # Resolve per-stock calibrated weights (fall back to global defaults)
             stock_knn_w, stock_lstm_w = knn_weight, lstm_weight
@@ -288,6 +300,7 @@ async def run_daily_predictions(
                     db.add_all(pending_predictions)
                     await db.commit()
                     pending_predictions.clear()
+                    gc.collect()  # free cyclic garbage at existing periodic boundary
 
                 results.append(pred_row)
 

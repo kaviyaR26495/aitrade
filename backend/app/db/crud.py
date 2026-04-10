@@ -35,6 +35,7 @@ from app.db.models import (
     StockIndicator,
     StockOHLCV,
     StockRegime,
+    TradeOrder,
     PipelineJob,
     PredictionJob,
     IntervalEnum,
@@ -821,6 +822,64 @@ async def get_stock_ensemble_weight(
     )
     result = await db.execute(q)
     return result.scalar_one_or_none()
+
+
+# ── Trade Order CRUD ──────────────────────────────────────────────────
+
+async def get_open_trade_orders(db: AsyncSession) -> Sequence[TradeOrder]:
+    """Return all orders in an open/unresolved state for OMS reconciliation."""
+    result = await db.execute(
+        select(TradeOrder).where(
+            TradeOrder.status.in_(["placed", "submitted", "partial_fill"])
+        )
+    )
+    return result.scalars().all()
+
+
+async def update_trade_order_fill(
+    db: AsyncSession,
+    order_id: int,
+    status: str,
+    filled_quantity: int | None = None,
+    avg_fill_price: float | None = None,
+) -> None:
+    """Update an order's status and fill details after OMS reconciliation."""
+    values: dict = {"status": status, "last_reconciled_at": datetime.utcnow()}
+    if filled_quantity is not None:
+        values["filled_quantity"] = filled_quantity
+    if avg_fill_price is not None:
+        values["avg_fill_price"] = avg_fill_price
+    await db.execute(update(TradeOrder).where(TradeOrder.id == order_id).values(**values))
+    await db.commit()
+
+
+# ── Trade Order CRUD ───────────────────────────────────────────────────
+
+async def get_open_trade_orders(db: AsyncSession) -> Sequence[TradeOrder]:
+    """Return all orders in an open/unresolved state for OMS reconciliation."""
+    result = await db.execute(
+        select(TradeOrder).where(
+            TradeOrder.status.in_(["placed", "submitted", "partial_fill"])
+        )
+    )
+    return result.scalars().all()
+
+
+async def update_trade_order_fill(
+    db: AsyncSession,
+    order_id: int,
+    status: str,
+    filled_quantity: int | None = None,
+    avg_fill_price: float | None = None,
+) -> None:
+    """Update an order's status and fill details after OMS reconciliation."""
+    values: dict = {"status": status, "last_reconciled_at": datetime.utcnow()}
+    if filled_quantity is not None:
+        values["filled_quantity"] = filled_quantity
+    if avg_fill_price is not None:
+        values["avg_fill_price"] = avg_fill_price
+    await db.execute(update(TradeOrder).where(TradeOrder.id == order_id).values(**values))
+    await db.commit()
 
 
 # ── Settings CRUD ──────────────────────────────────────────────────────

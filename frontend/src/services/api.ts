@@ -247,3 +247,20 @@ export const getPipelineStatus = (jobId: string) =>
 
 export const terminatePipeline = (jobId: string, purge = false) =>
   api.delete<PipelineTerminateResult>(`/pipeline/${jobId}`, { params: { purge } });
+
+// ── Training (CT Pipeline) ────────────────────────────────────────────────────
+
+export interface RetrainStatus {
+  last_retrain_at: string | null;
+  days_since_retrain: number | null;
+  needs_retrain: boolean;
+}
+
+export const getRetrainStatus = () =>
+  api.get<RetrainStatus>('/training/retrain-status');
+
+export const triggerAutoRetrain = (lookbackYears = 2) =>
+  api.post<{ message: string; lookback_years: number }>(
+    '/training/auto-retrain',
+    { lookback_years: lookbackYears },
+  );

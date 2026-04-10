@@ -243,7 +243,7 @@ async def place_order(
         price=req.price,
         sl_price=req.sl_price,
         target_price=req.target_price,
-        status="placed",
+        status="submitted",
         zerodha_order_id=str(order_id) if order_id else None,
         tag=req.tag,
     )
@@ -254,7 +254,7 @@ async def place_order(
     return {
         "order_id": order.id,
         "zerodha_order_id": order.zerodha_order_id,
-        "status": "placed",
+        "status": "submitted",
     }
 
 
@@ -364,7 +364,7 @@ async def execute_signal(
         transaction_type="BUY",
         quantity=req.quantity,
         price=fill_price,
-        status="complete",
+        status="filled",
         zerodha_order_id=chase_order_id,
     )
     db.add(chase_record)
@@ -421,7 +421,7 @@ async def execute_signal(
         transaction_type="SELL",
         quantity=req.quantity,
         price=fill_price,
-        status="placed",
+        status="submitted",
         zerodha_order_id=str(gtt_id) if gtt_id else None,
     )
     db.add(gtt_record)
