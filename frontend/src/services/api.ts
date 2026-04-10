@@ -141,14 +141,24 @@ export const getTradePatterns = (backtestId: number, tradeIdx: number) =>
   api.get(`/backtest/${backtestId}/trades/${tradeIdx}/patterns`);
 
 // ── Trading ──
-export const getPredictions = (params?: Record<string, unknown>) =>
+export const getPredictions = (params?: { target_date?: string; batch_id?: string; interval?: string; min_confidence?: number; agreement_only?: boolean }) =>
   api.get('/trading/predictions', { params });
+export const getPredictionJob = (jobId: string) =>
+  api.get(`/trading/predictions/jobs/${jobId}`);
+export const cancelPredictionJob = (jobId: string) =>
+  api.delete(`/trading/predictions/jobs/${jobId}`);
+export const getBatches = (interval: string = 'day') =>
+  api.get('/trading/batches', { params: { interval } });
+export const deleteBatch = (batchId: string) =>
+  api.delete(`/trading/batches/${batchId}`);
 export const runPredictions = (params: Record<string, unknown>) =>
   api.post('/trading/run-predictions', params);
 export const placeOrder = (params: Record<string, unknown>) =>
   api.post('/trading/order', params);
 export const listOrders = (limit?: number) =>
   api.get('/trading/orders', { params: { limit } });
+export const getForwardLook = (params: { stock_id: number; after_date: string; interval?: string }) =>
+  api.get('/trading/predictions/forward-look', { params });
 
 // ── Portfolio ──
 export const getHoldings = () => api.get('/portfolio/holdings');

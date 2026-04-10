@@ -1,16 +1,17 @@
 from __future__ import annotations
-
 import asyncio
 from datetime import date
-
-from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
-
+import logging
 from app.api.deps import get_db
 from app.db import crud
 from app.core import zerodha
+from app.ml.predictor import ACTION_MAP
+from app.ml import predictor
+from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
@@ -26,72 +27,175 @@ class OrderRequest(BaseModel):
     tag: str | None = None
 
 
+class RunPredictionsRequest(BaseModel):
+    interval: str = "day"
+    agreement_required: bool = True
+    stock_ids: list[int] | None = None
+    target_date: date | None = None
+
+
 @router.get("/predictions")
 async def get_predictions(
     db: AsyncSession = Depends(get_db),
     target_date: date | None = Query(None),
+    batch_id: str | None = Query(None),
     interval: str = Query("day"),
     min_confidence: float = Query(0.65),
     agreement_only: bool = Query(True),
 ):
-    """Get ensemble predictions from DB."""
-    if target_date is None:
-        target_date = date.today()
-
+    """Get ensemble predictions from DB with bulk stock resolution."""
     predictions = await crud.get_ensemble_predictions_for_date(
-        db, target_date, interval, min_confidence, agreement_only
+        db, 
+        target_date=target_date, 
+        batch_id=batch_id, 
+        interval=interval, 
+        min_confidence=min_confidence, 
+        agreement_only=agreement_only
     )
+    
+    if not predictions:
+        return []
+
+    # Optimize: Bulk fetch all required stocks in one query instead of sequentially
+    from app.db.models import Stock
+    from sqlalchemy import select as sqla_select
+    stock_ids = list({p.stock_id for p in predictions})
+    stock_res = await db.execute(sqla_select(Stock).where(Stock.id.in_(stock_ids)))
+    stocks_map = {s.id: s for s in stock_res.scalars().all()}
 
     results = []
     for p in predictions:
-        stock = await crud.get_stock_by_id(db, p.stock_id)
+        stock = stocks_map.get(p.stock_id)
         results.append({
             "id": p.id,
             "stock_id": p.stock_id,
-            "symbol": stock.symbol if stock else "?",
+            "symbol": stock.symbol if stock else f"#{p.stock_id}",
             "date": str(p.date),
-            "action": p.action,
+            "interval": p.interval,
+            "action": ACTION_MAP.get(p.action, "HOLD"),
             "confidence": p.confidence,
-            "knn_action": p.knn_action,
+            "knn_action": ACTION_MAP.get(p.knn_action, "HOLD"),
             "knn_confidence": p.knn_confidence,
-            "lstm_action": p.lstm_action,
+            "lstm_action": ACTION_MAP.get(p.lstm_action, "HOLD"),
             "lstm_confidence": p.lstm_confidence,
             "agreement": p.agreement,
             "regime_id": p.regime_id,
         })
-
     return results
 
 
-class RunPredictionsRequest(BaseModel):
-    knn_name: str = "latest"
-    lstm_name: str = "latest"
-    knn_weight: float = 0.5
-    lstm_weight: float = 0.5
-    agreement_required: bool = True
-    stock_ids: list[int] | None = None
-    interval: str = "day"
+@router.get("/predictions/forward-look")
+async def get_forward_look(
+    stock_id: int,
+    after_date: date,
+    interval: str = Query("day"),
+    count: int = Query(5),
+    db: AsyncSession = Depends(get_db),
+):
+    """Fetch consecutive OHLCV rows starting after after_date (for performance visualization)."""
+    from sqlalchemy import select
+    from app.db.models import StockOHLCV
+    
+    stmt = (
+        select(StockOHLCV)
+        .where(
+            StockOHLCV.stock_id == stock_id,
+            StockOHLCV.interval == interval,
+            StockOHLCV.date > after_date
+        )
+        .order_by(StockOHLCV.date.asc())
+        .limit(count)
+    )
+    
+    result = await db.execute(stmt)
+    rows = result.scalars().all()
+    
+    return [
+        {
+            "date": str(r.date),
+            "open": r.open,
+            "high": r.high,
+            "low": r.low,
+            "close": r.close,
+            "volume": r.volume
+        }
+        for r in rows
+    ]
+
+
+@router.get("/predictions/jobs/{job_id}")
+async def get_prediction_job(
+    job_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Get status of an async prediction run."""
+    job = await crud.get_prediction_job(db, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
+
+
+@router.delete("/predictions/jobs/{job_id}")
+async def cancel_prediction_job(
+    job_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Mark a prediction run for cancellation."""
+    await crud.update_prediction_job(db, job_id, status="cancelled")
+    return {"status": "requesting_cancellation", "job_id": job_id}
 
 
 @router.post("/run-predictions")
 async def run_predictions(
+    background_tasks: BackgroundTasks,
     req: RunPredictionsRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    """Run ensemble predictions for all active stocks (or specified subset)."""
-    from app.ml.predictor import run_daily_predictions
+    """Kick off ensemble predictions as a background task."""
+    from app.db.database import async_session_factory
+    from app.core import data_service
+    import uuid
+    
+    # 1. Resolve stocks to be predicted (from request or universe) — bulk fetch
+    if req.stock_ids:
+        from app.db.models import Stock
+        from sqlalchemy import select as sqla_select
+        result = await db.execute(sqla_select(Stock).where(Stock.id.in_(req.stock_ids)))
+        stocks = result.scalars().all()
+    else:
+        stocks = await data_service.get_universe_stocks(db)
+    
+    if not stocks:
+        raise HTTPException(status_code=400, detail="No stocks identified for prediction")
 
-    result = await run_daily_predictions(
-        db=db,
-        knn_name=req.knn_name,
-        lstm_name=req.lstm_name,
-        knn_weight=req.knn_weight,
-        lstm_weight=req.lstm_weight,
-        agreement_required=req.agreement_required,
-        interval=req.interval,
-        stock_ids=req.stock_ids,
-    )
-    return result
+    # 2. Create Job record
+    job_id = str(uuid.uuid4())
+    batch_id = str(uuid.uuid4())
+    await crud.create_prediction_job(db, job_id, total_stocks=len(stocks), batch_id=batch_id)
+
+    # 3. Define background task wrapper
+    async def prediction_wrapper(jid, b_id, s_ids):
+        async with async_session_factory() as b_db:
+            try:
+                await predictor.run_daily_predictions(
+                    b_db,
+                    stock_ids=s_ids,
+                    interval=req.interval,
+                    agreement_required=req.agreement_required,
+                    target_date=req.target_date,
+                    job_id=jid,
+                    batch_id=b_id
+                )
+            except Exception as e:
+                logger.error(f"Background prediction job {jid} failed: {e}")
+                await crud.update_prediction_job(b_db, jid, status="failed", error=str(e))
+
+    # 4. Launch!
+    stock_ids = [s.id for s in stocks]
+    background_tasks.add_task(prediction_wrapper, job_id, batch_id, stock_ids)
+
+    return {"job_id": job_id, "batch_id": batch_id, "total_stocks": len(stocks)}
+
 
 
 @router.post("/order")
@@ -359,3 +463,23 @@ async def list_orders(
         }
         for o in orders
     ]
+@router.get("/batches")
+async def get_batches(
+    interval: str = Query("day"),
+    db: AsyncSession = Depends(get_db),
+):
+    """List unique prediction runs for the given interval."""
+    batches = await crud.get_prediction_batches(db, interval)
+    return batches
+
+
+@router.delete("/batches/{batch_id}")
+async def delete_batch(
+    batch_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete a specific prediction session."""
+    await crud.delete_prediction_batch(db, batch_id)
+    return {"status": "deleted", "batch_id": batch_id}
+
+

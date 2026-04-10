@@ -35,6 +35,7 @@ from app.db.models import (
     StockOHLCV,
     StockRegime,
     PipelineJob,
+    PredictionJob,
     IntervalEnum,
 )
 
@@ -271,6 +272,20 @@ async def get_regimes(
     return result.scalars().all()
 
 
+async def get_latest_regime(db: AsyncSession, stock_id: int, interval: str) -> StockRegime | None:
+    q = (
+        select(StockRegime)
+        .where(
+            StockRegime.stock_id == stock_id,
+            StockRegime.interval == interval,
+        )
+        .order_by(StockRegime.date.desc())
+        .limit(1)
+    )
+    result = await db.execute(q)
+    return result.scalar_one_or_none()
+
+
 async def get_full_stock_features(
     db: AsyncSession,
     stock_id: int,
@@ -481,11 +496,25 @@ async def bulk_save_training_runs(db: AsyncSession, entries: list[dict]) -> int:
 # ── Golden Pattern CRUD ────────────────────────────────────────────────
 
 async def bulk_insert_patterns(db: AsyncSession, patterns: list[dict]) -> int:
+    """Bulk insert patterns with batching and ignore-on-duplicate to prevent failures."""
     if not patterns:
         return 0
-    db.add_all([GoldenPattern(**p) for p in patterns])
+    
+    # Use mysql_insert to allow for ON DUPLICATE KEY IGNORE/UPDATE
+    # and batch to prevent server-side memory/timeout issues
+    total = 0
+    batch_size = 2000
+    for i in range(0, len(patterns), batch_size):
+        batch = patterns[i : i + batch_size]
+        stmt = mysql_insert(GoldenPattern).values(batch)
+        # Use ON DUPLICATE KEY UPDATE with a no-op update to effectively 'IGNORE' 
+        # existing patterns from previous partial runs without crashing.
+        stmt = stmt.on_duplicate_key_update(id=GoldenPattern.id)
+        await db.execute(stmt)
+        total += len(batch)
+    
     await db.commit()
-    return len(patterns)
+    return total
 
 
 async def get_patterns_by_rl_model(
@@ -636,22 +665,62 @@ async def bulk_upsert_ensemble_predictions(db: AsyncSession, rows: list[dict]) -
 
 async def get_ensemble_predictions_for_date(
     db: AsyncSession,
-    target_date: date,
+    target_date: date | None = None,
+    batch_id: str | None = None,
     interval: str = "day",
     min_confidence: float = 0.65,
     agreement_only: bool = True,
 ) -> Sequence[EnsemblePrediction]:
-    """Primary trading query — get ensemble predictions from DB."""
+    """Primary trading query — get ensemble predictions from DB.
+    
+    If batch_id is provided, filters by that specific run.
+    Otherwise, filters by target_date. If both are missing, fetches the latest batch.
+    """
     q = select(EnsemblePrediction).where(
-        EnsemblePrediction.date == target_date,
         EnsemblePrediction.interval == interval,
         EnsemblePrediction.confidence >= min_confidence,
     )
+    
+    if batch_id:
+        q = q.where(EnsemblePrediction.batch_id == batch_id)
+    elif target_date:
+        q = q.where(EnsemblePrediction.date == target_date)
+    else:
+        # Default to latest batch overall if no filters provided
+        latest_stmt = select(EnsemblePrediction.batch_id).order_by(EnsemblePrediction.run_at.desc()).limit(1)
+        latest_res = await db.execute(latest_stmt)
+        batch_id = latest_res.scalar()
+        if not batch_id:
+            return []
+        q = q.where(EnsemblePrediction.batch_id == batch_id)
+
     if agreement_only:
         q = q.where(EnsemblePrediction.agreement == True)
     q = q.order_by(EnsemblePrediction.confidence.desc())
     result = await db.execute(q)
     return result.scalars().all()
+
+
+async def get_prediction_batches(db: AsyncSession, interval: str = "day") -> list[dict]:
+    """Retrieve unique prediction sessions sorted by run time."""
+    from sqlalchemy import func
+    q = select(
+        EnsemblePrediction.batch_id,
+        func.min(EnsemblePrediction.run_at).label("run_at"),
+        func.count(EnsemblePrediction.id).label("stock_count"),
+        func.min(EnsemblePrediction.date).label("target_date"),
+    ).where(EnsemblePrediction.interval == interval).group_by(
+        EnsemblePrediction.batch_id
+    ).order_by(text("run_at DESC"))
+    
+    result = await db.execute(q)
+    return [dict(row) for row in result.mappings().all()]
+
+
+async def delete_prediction_batch(db: AsyncSession, batch_id: str):
+    """Remove all records for a prediction run."""
+    await db.execute(delete(EnsemblePrediction).where(EnsemblePrediction.batch_id == batch_id))
+    await db.commit()
 
 
 # ── Per-Stock Ensemble Weights CRUD ──────────────────────────────────
@@ -873,3 +942,20 @@ async def update_pipeline_job(
     await db.execute(stmt)
     await db.commit()
     return await get_pipeline_job(db, job_id)
+
+# ── Prediction Job CRUD ───────────────────────────────────────────────
+
+async def create_prediction_job(db: AsyncSession, job_id: str, total_stocks: int, batch_id: str | None = None) -> PredictionJob:
+    job = PredictionJob(id=job_id, total_stocks=total_stocks, status="running", batch_id=batch_id)
+    db.add(job)
+    await db.commit()
+    await db.refresh(job)
+    return job
+
+async def get_prediction_job(db: AsyncSession, job_id: str) -> PredictionJob | None:
+    result = await db.execute(select(PredictionJob).where(PredictionJob.id == job_id))
+    return result.scalars().first()
+
+async def update_prediction_job(db: AsyncSession, job_id: str, **kwargs) -> None:
+    await db.execute(update(PredictionJob).where(PredictionJob.id == job_id).values(**kwargs))
+    await db.commit()

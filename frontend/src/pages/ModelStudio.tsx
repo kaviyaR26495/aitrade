@@ -386,13 +386,15 @@ export default function ModelStudio() {
                                   </button>
                                 </>
                               )}
-                              {!isControllable && (
-                                confirmingDelete ? (
+                              {confirmingDelete ? (
                                   <>
                                     <span className="text-xs text-[var(--text-dim)] mr-1">Delete?</span>
                                     <button
                                       className="px-2 py-0.5 rounded text-xs bg-red-500/20 text-red-400 hover:bg-red-500/30 transition-colors"
-                                      onClick={() => { deleteMutation.mutate(m.id); setDeleteConfirmId(null); }}
+                                      onClick={() => deleteMutation.mutate(m.id, {
+                                        onSuccess: () => { setDeleteConfirmId(null); addNotification({ type: 'success', message: 'RL model deleted.' }); },
+                                        onError: () => { setDeleteConfirmId(null); addNotification({ type: 'error', message: 'Failed to delete RL model.' }); },
+                                      })}
                                       disabled={deleteMutation.isPending}
                                     >
                                       Yes
@@ -412,8 +414,7 @@ export default function ModelStudio() {
                                   >
                                     <Trash2 size={11} /> Delete
                                   </button>
-                                )
-                              )}
+                                )}
                             </div>
                           </div>
                         }
@@ -489,7 +490,10 @@ export default function ModelStudio() {
                             <div className="flex items-center gap-1">
                               <button
                                 className="px-2 py-0.5 rounded-[var(--radius-sm)] text-xs bg-red-500/20 text-red-400 hover:bg-red-500/30 transition-colors font-medium border border-transparent"
-                                onClick={() => { deleteKnnMutation.mutate(m.id); setDeleteConfirmKnnId(null); }}
+                                onClick={() => deleteKnnMutation.mutate(m.id, {
+                                  onSuccess: () => { setDeleteConfirmKnnId(null); addNotification({ type: 'success', message: 'KNN model deleted.' }); },
+                                  onError: () => { setDeleteConfirmKnnId(null); addNotification({ type: 'error', message: 'Failed to delete KNN model.' }); },
+                                })}
                                 disabled={deleteKnnMutation.isPending}
                               >
                                 Yes
@@ -541,7 +545,10 @@ export default function ModelStudio() {
                             <div className="flex items-center gap-1">
                               <button
                                 className="px-2 py-0.5 rounded-[var(--radius-sm)] text-xs bg-red-500/20 text-red-400 hover:bg-red-500/30 transition-colors font-medium border border-transparent"
-                                onClick={() => { deleteLstmMutation.mutate(m.id); setDeleteConfirmLstmId(null); }}
+                                onClick={() => deleteLstmMutation.mutate(m.id, {
+                                  onSuccess: () => { setDeleteConfirmLstmId(null); addNotification({ type: 'success', message: 'LSTM model deleted.' }); },
+                                  onError: () => { setDeleteConfirmLstmId(null); addNotification({ type: 'error', message: 'Failed to delete LSTM model.' }); },
+                                })}
                                 disabled={deleteLstmMutation.isPending}
                               >
                                 Yes

@@ -5,7 +5,9 @@ from __future__ import annotations
 import logging
 from datetime import date
 from pathlib import Path
-from typing import Any
+import uuid
+from datetime import datetime
+from typing import Any, Sequence
 
 import numpy as np
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,13 +18,39 @@ from app.core.data_service import get_model_ready_data
 from app.core.normalizer import prepare_model_input
 from app.db import crud
 from app.db.models import KNNModel, LSTMModel, EnsembleConfig
+from app.db.database import async_session_factory
 from app.ml.knn_distiller import load_knn_model, predict_knn, load_knn_norm_params
 from app.ml.lstm_distiller import load_lstm_model, predict_lstm
 from app.ml.ensemble import ensemble_predict
+from app.core.regime_classifier import classify_regimes
 
 logger = logging.getLogger(__name__)
 
 ACTION_MAP = {0: "HOLD", 1: "BUY", 2: "SELL"}
+
+# ── Model Cache ─────────────────────────────────────────────────────────
+# Avoids re-loading heavy KNN/LSTM files from disk on every prediction run.
+# Cache is keyed by file path so it auto-refreshes if a new model is trained.
+_knn_cache: dict[str, Any] = {}   # path -> (model, norm_params)
+_lstm_cache: dict[str, Any] = {}  # path -> model
+
+def _load_knn_cached(path: str, norm_dir: Path):
+    if path not in _knn_cache:
+        logger.info(f"Loading KNN model from disk: {path}")
+        _knn_cache[path] = (load_knn_model(path), load_knn_norm_params(norm_dir))
+    return _knn_cache[path]
+
+def _load_lstm_cached(path: str):
+    if path not in _lstm_cache:
+        logger.info(f"Loading LSTM model from disk: {path}")
+        _lstm_cache[path] = load_lstm_model(path)
+    return _lstm_cache[path]
+
+def clear_model_cache():
+    """Call after training a new model to force a fresh load on next run."""
+    _knn_cache.clear()
+    _lstm_cache.clear()
+    logger.info("Model cache cleared.")
 
 
 def _latest_artifact(directory: Path, glob_pattern: str, legacy_name: str) -> str:
@@ -58,6 +86,8 @@ async def run_daily_predictions(
     ensemble_config_id: int | None = None,
     knn_model_id: int | None = None,
     lstm_model_id: int | None = None,
+    job_id: str | None = None,
+    batch_id: str | None = None,
 ) -> dict[str, Any]:
     """Run ensemble predictions for all active stocks and store results.
 
@@ -81,8 +111,7 @@ async def run_daily_predictions(
         knn_db = await crud.get_knn_model(db, knn_model_id)
         if knn_db is None or not knn_db.model_path:
             raise ValueError(f"KNN model id={knn_model_id} has no saved artifact in DB")
-        knn_model = load_knn_model(knn_db.model_path)
-        knn_norm_params = load_knn_norm_params(Path(knn_db.model_path).parent)
+        knn_model, knn_norm_params = _load_knn_cached(knn_db.model_path, Path(knn_db.model_path).parent)
     else:
         # Resolve 'latest' via DB
         q = select(KNNModel).where(KNNModel.status == "completed").order_by(desc(KNNModel.created_at)).limit(1)
@@ -90,22 +119,19 @@ async def run_daily_predictions(
         knn_db = res.scalar_one_or_none()
         
         if knn_db and knn_db.model_path:
-            knn_model = load_knn_model(knn_db.model_path)
-            knn_norm_params = load_knn_norm_params(Path(knn_db.model_path).parent)
+            knn_model, knn_norm_params = _load_knn_cached(knn_db.model_path, Path(knn_db.model_path).parent)
         else:
             # Fallback legacy path
             knn_model_dir = model_path / "knn" / knn_name
-            knn_model = load_knn_model(
-                _latest_artifact(knn_model_dir, "knn_model_*.joblib", "knn_model.joblib")
-            )
-            knn_norm_params = load_knn_norm_params(knn_model_dir)
+            knn_path = _latest_artifact(knn_model_dir, "knn_model_*.joblib", "knn_model.joblib")
+            knn_model, knn_norm_params = _load_knn_cached(knn_path, knn_model_dir)
 
     # ── Load LSTM model ───────────────────────────────────────────────
     if lstm_model_id is not None:
         lstm_db = await crud.get_lstm_model(db, lstm_model_id)
         if lstm_db is None or not lstm_db.model_path:
             raise ValueError(f"LSTM model id={lstm_model_id} has no saved artifact in DB")
-        lstm_model = load_lstm_model(lstm_db.model_path)
+        lstm_model = _load_lstm_cached(lstm_db.model_path)
     else:
         # Resolve 'latest' via DB
         q = select(LSTMModel).where(LSTMModel.status == "completed").order_by(desc(LSTMModel.created_at)).limit(1)
@@ -113,13 +139,12 @@ async def run_daily_predictions(
         lstm_db = res.scalar_one_or_none()
         
         if lstm_db and lstm_db.model_path:
-            lstm_model = load_lstm_model(lstm_db.model_path)
+            lstm_model = _load_lstm_cached(lstm_db.model_path)
         else:
             # Fallback legacy path
             lstm_model_dir = model_path / "lstm" / lstm_name
-            lstm_model = load_lstm_model(
-                _latest_artifact(lstm_model_dir, "lstm_model_*.pt", "lstm_model.pt")
-            )
+            lstm_path = _latest_artifact(lstm_model_dir, "lstm_model_*.pt", "lstm_model.pt")
+            lstm_model = _load_lstm_cached(lstm_path)
 
     # ── Resolve Ensemble Config ──────────────────────────────────────────
     try:
@@ -152,22 +177,45 @@ async def run_daily_predictions(
         logger.error(f"Failed to resolve EnsembleConfig: {e}", exc_info=True)
         raise
 
-    # Get stocks to predict
+    # Get stocks to predict — bulk fetch to avoid N+1 queries
     if stock_ids:
-        stocks = [await crud.get_stock_by_id(db, sid) for sid in stock_ids]
-        stocks = [s for s in stocks if s is not None]
+        from app.db.models import Stock
+        res = await db.execute(select(Stock).where(Stock.id.in_(stock_ids)))
+        stocks_map = {s.id: s for s in res.scalars().all()}
+        stocks = [stocks_map[sid] for sid in stock_ids if sid in stocks_map]
     else:
-        stocks = await crud.get_all_active_stocks(db)
+        from app.core import data_service
+        stocks = await data_service.get_universe_stocks(db)
+
+    # Prepare batch metadata
+    if not batch_id:
+        batch_id = str(uuid.uuid4())
+    run_at = datetime.now()
+    
+    # Associate batch with job immediately if not already done
+    if job_id:
+        await crud.update_prediction_job(db, job_id, batch_id=batch_id)
 
     results = []
     errors = []
     seq_len = settings.DEFAULT_SEQ_LEN_DAILY if interval == "day" else settings.DEFAULT_SEQ_LEN_WEEKLY
 
-    for stock in stocks:
+    processed_count = 0
+    for i, stock in enumerate(stocks):
         try:
+            # Check for cancellation if part of a job
+            if job_id:
+                # Use a FRESH session for the check to avoid transaction isolation/locks
+                async with async_session_factory() as check_db:
+                    job = await crud.get_prediction_job(check_db, job_id)
+                    if job and job.status == "cancelled":
+                        logger.info(f"Prediction job {job_id} cancelled by user.")
+                        break
+
             # Get model-ready data
             df, feature_cols = await get_model_ready_data(
-                db, stock.id, interval=interval, seq_len=seq_len
+                db, stock.id, interval=interval, seq_len=seq_len,
+                end_date=target_date
             )
 
             if df is None or len(df) < seq_len:
@@ -195,6 +243,14 @@ async def run_daily_predictions(
             knn_preds, knn_probs = predict_knn(knn_model, X_last, norm_params=knn_norm_params)
             lstm_preds, lstm_probs = predict_lstm(lstm_model, X_last)
 
+            # Fail-safe regime classification: compute on-the-fly to ensure it is never null/missing
+            try:
+                df_regime = classify_regimes(df.iloc[-1:])
+                regime_id = int(df_regime["regime_id"].iloc[0])
+            except Exception as reg_exc:
+                logger.warning(f"On-the-fly regime classification failed for {stock.symbol}: {reg_exc}")
+                regime_id = int(df["regime_id"].iloc[-1]) if "regime_id" in df.columns else 0
+
             preds = ensemble_predict(
                 knn_preds, knn_probs, lstm_preds, lstm_probs,
                 knn_weight=stock_knn_w, lstm_weight=stock_lstm_w,
@@ -203,69 +259,65 @@ async def run_daily_predictions(
 
             if preds:
                 p = preds[0]
-                results.append({
+                pred_row = {
+                    "batch_id": batch_id,
+                    "run_at": run_at,
+                    "ensemble_config_id": ensemble_config_id,
                     "stock_id": stock.id,
-                    "symbol": stock.symbol,
                     "date": target_date,
                     "interval": interval,
-                    "action": ACTION_MAP.get(p["action"], "HOLD"),
-                    "action_id": int(p["action"]),
+                    "action": int(p["action"]),
                     "confidence": float(p["confidence"]),
-                    "knn_action": ACTION_MAP.get(p["knn_action"], "HOLD"),
-                    "knn_action_id": int(p["knn_action"]),
+                    "knn_action": int(p["knn_action"]),
                     "knn_confidence": float(p["combined_probs"][ACTION_MAP[p["knn_action"]].lower()]),
-                    "lstm_action": ACTION_MAP.get(p["lstm_action"], "HOLD"),
-                    "lstm_action_id": int(p["lstm_action"]),
+                    "lstm_action": int(p["lstm_action"]),
                     "lstm_confidence": float(p["combined_probs"][ACTION_MAP[p["lstm_action"]].lower()]),
                     "agreement": p["agreement"],
-                    "regime_id": None,  # filled below if available
-                })
+                    "regime_id": regime_id,
+                }
+                
+                # Dynamic population: Add row to list and flush to DB immediately
+                from app.db.models import EnsemblePrediction
+                db.add(EnsemblePrediction(**pred_row))
+                await db.commit() # Individual commit for real-time feel
+                
+                results.append(pred_row)
 
-        except Exception as e:
-            logger.error(f"Prediction failed for {stock.symbol}: {e}")
-            errors.append({"stock_id": stock.id, "symbol": stock.symbol, "error": str(e)})
+        finally:
+            processed_count += 1
+            # Progressive throttling: update every stock for first 10, then every 5
+            is_last = processed_count == len(stocks)
+            if job_id and (processed_count <= 10 or processed_count % 5 == 0 or is_last):
+                progress = int((processed_count / len(stocks)) * 100)
+                await crud.update_prediction_job(
+                    db, job_id, 
+                    completed_stocks=processed_count, 
+                    progress=progress
+                )
 
-    # Store predictions in DB
-    if results:
-        from app.db.models import EnsemblePrediction
-        from sqlalchemy import delete
         
-        # Make operation idempotent — clear existing predictions for this config/date/interval
-        await db.execute(
-            delete(EnsemblePrediction).where(
-                EnsemblePrediction.ensemble_config_id == ensemble_config_id,
-                EnsemblePrediction.date == target_date,
-                EnsemblePrediction.interval == interval
-            )
+    # Finalize job status
+    if job_id:
+        is_cancelled = False
+        job = await crud.get_prediction_job(db, job_id)
+        if job and job.status == "cancelled":
+            is_cancelled = True
+        
+        await crud.update_prediction_job(
+            db, job_id, 
+            status="cancelled" if is_cancelled else "completed",
+            batch_id=batch_id,
+            progress=100
         )
-        
-        rows = []
-        for r in results:
-            rows.append(EnsemblePrediction(
-                ensemble_config_id=ensemble_config_id,
-                stock_id=r["stock_id"],
-                date=r["date"],
-                interval=r["interval"],
-                action=r["action_id"],
-                confidence=r["confidence"],
-                knn_action=r["knn_action_id"],
-                knn_confidence=r["knn_confidence"],
-                lstm_action=r["lstm_action_id"],
-                lstm_confidence=r["lstm_confidence"],
-                agreement=r["agreement"],
-                regime_id=r["regime_id"],
-            ))
-        db.add_all(rows)
-        await db.commit()
 
     return {
         "date": str(target_date),
         "total_stocks": len(stocks),
         "predictions_made": len(results),
         "errors": len(errors),
-        "buy_signals": sum(1 for r in results if r["action"] == "BUY"),
-        "sell_signals": sum(1 for r in results if r["action"] == "SELL"),
-        "hold_signals": sum(1 for r in results if r["action"] == "HOLD"),
+        "buy_signals": sum(1 for r in results if r["action"] == 1),
+        "sell_signals": sum(1 for r in results if r["action"] == 2),
+        "hold_signals": sum(1 for r in results if r["action"] == 0),
         "results": results,
         "error_details": errors,
     }

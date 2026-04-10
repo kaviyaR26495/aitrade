@@ -492,8 +492,10 @@ def save_lstm_model(
     }
 
 
-def load_lstm_model(model_path: str, device: str = "cpu") -> TradeLSTM:
-    """Load a saved LSTM model."""
+def load_lstm_model(model_path: str, device: str | None = None) -> TradeLSTM:
+    """Load a saved LSTM model onto the best available device (GPU if present)."""
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
     checkpoint = torch.load(model_path, map_location=device, weights_only=True)
     model = TradeLSTM(
         input_size=checkpoint["input_size"],
@@ -502,22 +504,30 @@ def load_lstm_model(model_path: str, device: str = "cpu") -> TradeLSTM:
         num_classes=checkpoint["num_classes"],
     )
     model.load_state_dict(checkpoint["state_dict"])
+    model.to(device)
     model.eval()
+    logger.info("Loaded LSTM model from %s onto %s", model_path, device)
     return model
 
 
 def predict_lstm(
     model: TradeLSTM,
     X: np.ndarray,
-    device: str = "cpu",
+    device: str | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Predict with LSTM. Returns (predictions, probabilities).
     X: (n_samples, seq_len, n_features).
+    Uses the device the model is already on (avoids redundant .to() calls).
     """
-    model.eval()
-    model = model.to(device)
+    # Infer device from the model itself — avoids a redundant .to() every call
+    if device is None:
+        try:
+            device = next(model.parameters()).device.type
+        except StopIteration:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
 
+    model.eval()
     with torch.no_grad():
         X_tensor = torch.tensor(X, dtype=torch.float32).to(device)
         logits = model(X_tensor)

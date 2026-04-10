@@ -353,11 +353,15 @@ class LSTMPrediction(Base):
 class EnsemblePrediction(Base):
     __tablename__ = "ensemble_predictions"
     __table_args__ = (
-        UniqueConstraint("ensemble_config_id", "stock_id", "date", "interval", name="uq_ensemble_pred"),
+        UniqueConstraint("batch_id", "stock_id", name="uq_ensemble_batch_stock"),
+        Index("ix_ensemble_pred_batch", "batch_id"),
         Index("ix_ensemble_pred_date_conf", "date", "interval", "confidence"),
+        Index("ix_ensemble_pred_run_at", "run_at"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    batch_id: Mapped[str] = mapped_column(String(50), nullable=False)
+    run_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist)
     ensemble_config_id: Mapped[int] = mapped_column(Integer, ForeignKey("ensemble_configs.id"), nullable=False)
     stock_id: Mapped[int] = mapped_column(Integer, ForeignKey("stocks_list.id"), nullable=False)
     date: Mapped[date] = mapped_column(Date, nullable=False)
@@ -510,3 +514,19 @@ class CorporateActionBlock(Base):
     blocked_until: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     reason: Mapped[str | None] = mapped_column(String(200), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist)
+
+
+# ── Prediction Jobs (Async Tracking) ──────────────────────────────────
+
+class PredictionJob(Base):
+    __tablename__ = "prediction_jobs"
+
+    id: Mapped[str] = mapped_column(String(50), primary_key=True)  # UUID
+    status: Mapped[str] = mapped_column(String(20), default="running")
+    progress: Mapped[int] = mapped_column(Integer, default=0)
+    total_stocks: Mapped[int] = mapped_column(Integer, default=0)
+    completed_stocks: Mapped[int] = mapped_column(Integer, default=0)
+    batch_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist, onupdate=now_ist)

@@ -478,11 +478,14 @@ export function Checkbox({ checked, onChange, label, description, className = ''
 export interface TableColumn<T = any> {
   key: string;
   label: string;
+  tooltip?: string;
+  tooltipSide?: 'top' | 'right' | 'bottom' | 'left';
   align?: 'left' | 'center' | 'right';
   width?: string;
   render?: (row: T, index: number) => ReactNode;
   mono?: boolean;
   sortable?: boolean;
+  stopPropagation?: boolean;
 }
 
 interface TableProps<T = any> {
@@ -547,7 +550,11 @@ export function Table<T extends Record<string, any>>({ columns, data, onRowClick
                 style={col.width ? { width: col.width } : undefined}
               >
                 <span className="inline-flex items-center gap-0.5">
-                  {col.label}
+                  {col.tooltip ? (
+                    <Tooltip content={col.tooltip} side={col.tooltipSide || 'bottom'}>{col.label}</Tooltip>
+                  ) : (
+                    col.label
+                  )}
                   {col.sortable && <SortIcon colKey={col.key} />}
                 </span>
               </th>
@@ -569,6 +576,7 @@ export function Table<T extends Record<string, any>>({ columns, data, onRowClick
                 <td
                   key={col.key}
                   className={`${cellPad} ${alignClass(col.align)} ${col.mono ? 'font-[var(--font-mono)] tabular-nums' : ''}`}
+                  onClick={col.stopPropagation ? (e) => e.stopPropagation() : undefined}
                 >
                   {col.render ? col.render(row, i) : row[col.key]}
                 </td>
