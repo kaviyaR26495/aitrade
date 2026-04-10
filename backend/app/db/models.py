@@ -169,6 +169,29 @@ class StockIndicator(Base):
     tgrb_bottom: Mapped[float | None] = mapped_column(Float, nullable=True)
     # ATR (for regime classifier)
     atr: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # ── New stationary ML features (additive) ─────────────────────────────
+    # Stationary trend distance
+    dist_sma_50: Mapped[float | None] = mapped_column(Float, nullable=True)
+    dist_sma_200: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Rate of change (momentum)
+    roc_1: Mapped[float | None] = mapped_column(Float, nullable=True)
+    roc_5: Mapped[float | None] = mapped_column(Float, nullable=True)
+    roc_20: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Volatility regime
+    atr_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    realized_vol_20: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Bollinger Band position & width
+    bb_pctb: Mapped[float | None] = mapped_column(Float, nullable=True)
+    bb_width: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Institutional flow & liquidity
+    cmf_20: Mapped[float | None] = mapped_column(Float, nullable=True)
+    dist_vwap_5: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Normalised signals
+    macd_hist_norm: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # ADX normalised to 0-1 (raw adx/adx_pos/adx_neg kept for regime_classifier)
+    adx_norm: Mapped[float | None] = mapped_column(Float, nullable=True)
+    adx_pos_norm: Mapped[float | None] = mapped_column(Float, nullable=True)
+    adx_neg_norm: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
 # ── Regime Classification ──────────────────────────────────────────────

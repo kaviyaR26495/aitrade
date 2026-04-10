@@ -368,6 +368,16 @@ async def get_full_stock_features(
                 "tgrb_top": ind.tgrb_top, "tgrb_green": ind.tgrb_green,
                 "tgrb_red": ind.tgrb_red, "tgrb_bottom": ind.tgrb_bottom,
                 "atr": ind.atr,
+                # New stationary ML features
+                "dist_sma_50": ind.dist_sma_50, "dist_sma_200": ind.dist_sma_200,
+                "roc_1": ind.roc_1, "roc_5": ind.roc_5, "roc_20": ind.roc_20,
+                "atr_pct": ind.atr_pct, "realized_vol_20": ind.realized_vol_20,
+                "bb_pctb": ind.bb_pctb, "bb_width": ind.bb_width,
+                "cmf_20": ind.cmf_20, "dist_vwap_5": ind.dist_vwap_5,
+                "macd_hist_norm": ind.macd_hist_norm,
+                "adx_norm": ind.adx_norm,
+                "adx_pos_norm": ind.adx_pos_norm,
+                "adx_neg_norm": ind.adx_neg_norm,
             })
         if reg is not None:
             trend_val = reg.trend.value if hasattr(reg.trend, "value") else str(reg.trend)

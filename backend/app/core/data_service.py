@@ -131,6 +131,22 @@ INDICATOR_COL_MAP = {
     "tgrb_bottom": "tgrb_bottom",
     "ema_20": "ema_20",
     "atr": "atr",
+    # New stationary ML features
+    "dist_sma_50": "dist_sma_50",
+    "dist_sma_200": "dist_sma_200",
+    "roc_1": "roc_1",
+    "roc_5": "roc_5",
+    "roc_20": "roc_20",
+    "atr_pct": "atr_pct",
+    "realized_vol_20": "realized_vol_20",
+    "bb_pctb": "bb_pctb",
+    "bb_width": "bb_width",
+    "cmf_20": "cmf_20",
+    "dist_vwap_5": "dist_vwap_5",
+    "macd_hist_norm": "macd_hist_norm",
+    "adx_norm": "adx_norm",
+    "adx_pos_norm": "adx_pos_norm",
+    "adx_neg_norm": "adx_neg_norm",
 }
 
 

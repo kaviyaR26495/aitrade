@@ -323,6 +323,7 @@ async def _run_distillation_background(
             close_prices = df_prep["close"].values.astype("float32")
             dates = df_prep["date"].tolist() if "date" in df_prep.columns else [r.date for r in ohlcv_rows]
             regime_ids_arr = df_prep["regime_id"].values.astype(int) if "regime_id" in df_prep.columns else None
+            atr_pct_arr = df_prep["atr_pct"].values.astype("float32") if "atr_pct" in df_prep.columns else None
 
             patterns = await loop.run_in_executor(
                 _training_executor,
@@ -332,6 +333,7 @@ async def _run_distillation_background(
                     close_prices=close_prices,
                     dates=dates,
                     regime_ids=regime_ids_arr,
+                    atr_pct_values=atr_pct_arr,
                     seq_len=seq_len,
                     obs_mode=obs_mode,
                     reward_function=reward_function,

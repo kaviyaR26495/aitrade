@@ -5,13 +5,47 @@ Ported from pytrade's df_creator.py normalization logic.
 Three normalization strategies applied per column category:
 1. Log-return z-score  — price-like columns (nOpen, nHigh, nClose, nLow, kama, vwkama, srsi, sma_5/12/24/100/200)
 2. MinMax scaling       — volume (n_volume), obv (can be negative — not safe for log)
-3. Pct-change from close — sma_50, bbl_h, bbl_l, bbl
-4. Excluded (kept as-is) — rsi, TGRB, macd*, adx*, dow, month, day, regime features
+3. Pct-change from close — bb_upper, bb_lower, bb_mid (no longer weekly_sma_50)
+4. Excluded (kept as-is) — rsi, TGRB, macd*, adx*, dow, month, day, regime features,
+                           and all new stationary ML features (already bounded)
 """
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+
+
+# ── ML feature lists ────────────────────────────────────────────────────────
+# These are the ONLY columns passed to ML models (RL env, KNN, LSTM).
+# All are stationary (bounded ratios, percentages, or 0-1 scaled).
+ML_DAILY_FEATURES: list[str] = [
+    # Candle body structure (already normalised ratios)
+    "tgrb_top", "tgrb_green", "tgrb_red", "tgrb_bottom",
+    # Stationary trend distance
+    "dist_sma_50", "dist_sma_200",
+    # Short / medium / long momentum (% returns)
+    "roc_1", "roc_5", "roc_20",
+    # Volatility regime
+    "atr_pct", "realized_vol_20",
+    # Bollinger Band position & width (0-1 bounded)
+    "bb_pctb", "bb_width",
+    # Institutional flow & liquidity
+    "cmf_20", "dist_vwap_5",
+    # Bounded oscillators / normalised signals
+    "rsi", "macd_hist_norm",
+    # Trend strength (0-1 normalised via /100)
+    "adx_norm", "adx_pos_norm", "adx_neg_norm",
+]
+
+ML_WEEKLY_FEATURES: list[str] = [
+    "weekly_rsi",
+    "weekly_macd_hist_norm",
+    "weekly_roc_1",
+    "weekly_adx_norm", "weekly_adx_pos_norm", "weekly_adx_neg_norm",
+]
+
+# Combined list — used by get_feature_columns() and as the final model input filter.
+ML_FEATURES: list[str] = ML_DAILY_FEATURES + ML_WEEKLY_FEATURES  # 26 total
 
 
 # Columns excluded from normalization (already scaled or categorical)
@@ -29,19 +63,26 @@ EXCLUDE_COLS = {
     "trend", "volatility", "regime_id", "quality_score", "is_transition",
     # Market context features — pre-normalized, pass through as-is
     "fii_net_norm", "dii_net_norm", "sector_breadth_pct",
-    # ── Weekly multi-timeframe features ───────────────────────────────────
-    # Treated the same as their daily equivalents (already 0-1 scaled or raw values
-    # that should not be log-return normalised).
+    # ── Weekly stationary ML features (all bounded, pass through) ────────
     "weekly_rsi",
-    "weekly_macd", "weekly_macd_signal", "weekly_macd_hist",
-    "weekly_adx", "weekly_adx_pos", "weekly_adx_neg",
+    "weekly_macd_hist_norm",
+    "weekly_roc_1",
+    "weekly_adx_norm", "weekly_adx_pos_norm", "weekly_adx_neg_norm",
+    # ── New daily stationary ML features (bounded ratios, pass through) ──
+    "dist_sma_50", "dist_sma_200",
+    "roc_1", "roc_5", "roc_20",
+    "atr_pct", "realized_vol_20",
+    "bb_pctb", "bb_width",
+    "cmf_20", "dist_vwap_5",
+    "macd_hist_norm",
+    "adx_norm", "adx_pos_norm", "adx_neg_norm",
 }
 
 # MinMax-scaled columns (obv can be negative → cannot use log-return)
 MINMAX_COLS = {"n_volume", "obv"}
 
 # Percentage-change-from-close columns
-PCTCHG_COLS = {"sma_50", "bb_upper", "bb_lower", "bb_mid", "weekly_sma_50"}
+PCTCHG_COLS = {"bb_upper", "bb_lower", "bb_mid"}
 
 # Reference window for z-score normalization
 ZSCORE_WINDOW = 100
@@ -157,9 +198,11 @@ def prepare_model_input(
 
 
 def get_feature_columns(df: pd.DataFrame) -> list[str]:
-    """Return the list of feature columns (post-normalization) suitable for model input."""
-    exclude = {"open", "high", "low", "close", "volume", "adj_close", "date", "stock_id"}
-    return [
-        col for col in df.select_dtypes(include=[np.number]).columns
-        if col not in exclude
-    ]
+    """Return the ML feature columns present in df.
+
+    Returns only columns from ML_FEATURES (the 26 stationary, bounded features)
+    that actually exist in df.  This acts as the filter between the full
+    indicator DataFrame (which retains legacy raw columns for UI charts and
+    regime classification) and the model observation space.
+    """
+    return [f for f in ML_FEATURES if f in df.columns]
