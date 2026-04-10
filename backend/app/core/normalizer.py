@@ -168,9 +168,10 @@ def normalize_dataframe(
 
     # --- Step 5: Pct-change from close ---
     if "close" in df.columns:
+        safe_close = df["close"].replace(0, np.nan)
         for col in PCTCHG_COLS:
             if col in df.columns:
-                df[col] = ((df["close"] - df[col]) / df["close"]) * 100
+                df[col] = ((df["close"] - df[col]) / safe_close).fillna(0) * 100
 
     # --- Step 6: Final cleanup ---
     df = df.fillna(0)
