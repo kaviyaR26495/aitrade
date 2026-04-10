@@ -1514,3 +1514,107 @@ async def get_pattern_ohlcv(
         "seq_len": seq_len,
         "candles": candles,
     }
+
+
+# ── Model Export / Import ──────────────────────────────────────────────
+
+@router.get("/export")
+async def export_model_bundle(
+    knn_model_id: int = Query(..., description="KNN model DB id to export"),
+    lstm_model_id: int = Query(..., description="LSTM model DB id to export"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Export a trained KNN + LSTM ensemble as a portable .zip bundle.
+
+    The archive contains the model weights, norm params, metadata, and a
+    manifest so the bundle can be imported on any compatible AItrade instance
+    for live prediction or backtesting.
+
+    Query params
+    ------------
+    knn_model_id  : id from knn_models table
+    lstm_model_id : id from lstm_models table
+    """
+    import io
+    from fastapi.responses import StreamingResponse
+    from app.ml.model_io import export_ensemble_to_bytes
+
+    try:
+        buf, filename = await export_ensemble_to_bytes(db, knn_model_id, lstm_model_id)
+    except (ValueError, FileNotFoundError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception as exc:
+        logger.exception("Model export failed: knn=%d lstm=%d", knn_model_id, lstm_model_id)
+        raise HTTPException(status_code=500, detail=f"Export failed: {exc}")
+
+    return StreamingResponse(
+        buf,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.post("/import")
+async def import_model_bundle(
+    db: AsyncSession = Depends(get_db),
+    file: "UploadFile" = None,
+):
+    """Import a model bundle ZIP and register the models in the DB.
+
+    Accepts a multipart file upload (field name: ``file``).
+
+    On success returns the new DB IDs so the caller can immediately use the
+    models for live prediction or backtesting:
+
+    ```json
+    {
+      "knn_model_id": 5,
+      "lstm_model_id": 6,
+      "ensemble_config_id": 3,
+      "stub_rl_model_id": 4
+    }
+    ```
+    """
+    import tempfile
+    from fastapi import UploadFile
+    from app.ml.model_io import import_ensemble
+
+    if file is None:
+        raise HTTPException(
+            status_code=422,
+            detail="Multipart field 'file' is required. Send the .zip bundle as form-data.",
+        )
+
+    # Validate content type
+    if file.content_type not in (
+        "application/zip",
+        "application/x-zip-compressed",
+        "application/octet-stream",
+    ):
+        logger.warning("Import received unexpected content-type: %s", file.content_type)
+
+    # Stream upload to a temp file to avoid holding the entire payload in memory
+    with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+        tmp_path = Path(tmp.name)
+        chunk_size = 1024 * 1024  # 1 MB chunks
+        while True:
+            chunk = await file.read(chunk_size)
+            if not chunk:
+                break
+            tmp.write(chunk)
+
+    try:
+        result = await import_ensemble(db, tmp_path)
+    except (ValueError, FileNotFoundError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except Exception as exc:
+        logger.exception("Model import failed")
+        raise HTTPException(status_code=500, detail=f"Import failed: {exc}")
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+    return result
+
+
+# Export endpoint needs UploadFile imported at route parse time
+from fastapi import UploadFile  # noqa: E402  (kept at bottom to avoid circular at module load)

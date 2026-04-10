@@ -4,10 +4,12 @@ import {
   useAlgorithms, useRlModels, useKnnModels, useLstmModels,
   useUniverseStocks, useTrainModel, useDistillModel, useDistillLog, useRlModelLogs, useDeviceInfo,
   useStopTraining, usePauseTraining, useResumeTraining, useDeleteRlModel,
-  useDeleteKnnModel, useDeleteLstmModel, useEnsembleConfigs, useUpdateEnsemble, useDeleteEnsemble
+  useDeleteKnnModel, useDeleteLstmModel, useEnsembleConfigs, useUpdateEnsemble, useDeleteEnsemble,
+  useImportModel
 } from '../hooks/useApi';
 import { useAppStore } from '../store/appStore';
-import { Brain, Cpu, Layers, ChevronDown, ChevronUp, Zap, Square, Pause, Play, Trash2, ToggleLeft, ToggleRight } from 'lucide-react';
+import { exportModelBundle } from '../services/api';
+import { Brain, Cpu, Layers, ChevronDown, ChevronUp, Zap, Square, Pause, Play, Trash2, ToggleLeft, ToggleRight, Download, Upload } from 'lucide-react';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
 } from 'recharts';
@@ -77,6 +79,9 @@ export default function ModelStudio() {
     }
   }, [distillLogData?.content]);
 
+  const importFileRef = useRef<HTMLInputElement>(null);
+  const importMutation = useImportModel();
+
   const algoOptions = algorithms && Array.isArray(algorithms)
     ? algorithms.map((a: any) => ({ value: a.name, label: a.name }))
     : [{ value: 'PPO', label: 'PPO' }];
@@ -121,6 +126,22 @@ export default function ModelStudio() {
         },
       }
     );
+  };
+
+  const handleImportBundle = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    importMutation.mutate(file, {
+      onSuccess: (res: any) => {
+        const d = res.data;
+        addNotification({ type: 'success', message: `Bundle imported — KNN #${d.knn_model_id}, LSTM #${d.lstm_model_id}, Ensemble #${d.ensemble_config_id}` });
+        if (importFileRef.current) importFileRef.current.value = '';
+      },
+      onError: (err: any) => {
+        addNotification({ type: 'error', message: err?.response?.data?.detail ?? 'Import failed' });
+        if (importFileRef.current) importFileRef.current.value = '';
+      },
+    });
   };
 
   const handleDistill = () => {
@@ -474,7 +495,20 @@ export default function ModelStudio() {
           </Card>
 
           <div className="space-y-4">
-            <Card title="KNN Models">
+            <Card
+              title="KNN Models"
+              action={
+                <button
+                  onClick={() => importFileRef.current?.click()}
+                  disabled={importMutation.isPending}
+                  className="flex items-center gap-1 text-xs text-[var(--text-dim)] hover:text-[var(--text)] transition-colors px-2 py-1 rounded border border-[var(--border)] hover:border-[var(--primary)]"
+                  title="Import a previously exported model bundle (.zip)"
+                >
+                  <Upload size={12} />
+                  <span>{importMutation.isPending ? 'Importing…' : 'Import Bundle'}</span>
+                </button>
+              }
+            >
               {knnModels && knnModels.length > 0 ? (
                 <div className="space-y-2">
                   {knnModels.map((m: any) => (
@@ -585,6 +619,15 @@ export default function ModelStudio() {
             </Card>
           </div>
 
+          {/* Hidden file input for bundle import */}
+          <input
+            ref={importFileRef}
+            type="file"
+            accept=".zip"
+            className="hidden"
+            onChange={handleImportBundle}
+          />
+
           {/* Distillation Log Panel */}
           {(activeDistillKnnId || distillLogData) && (
             <Card title={
@@ -641,6 +684,27 @@ function EnsembleTab({ knnModels, lstmModels }: { knnModels: any[]; lstmModels: 
   const updateMutation = useUpdateEnsemble();
   const deleteMutation = useDeleteEnsemble();
   const { addNotification } = useAppStore();
+
+  const [exportingId, setExportingId] = useState<number | null>(null);
+
+  const handleExport = async (ensId: number, knnId: number, lstmId: number, name: string) => {
+    setExportingId(ensId);
+    try {
+      const res = await exportModelBundle(knnId, lstmId);
+      const url = URL.createObjectURL(new Blob([res.data], { type: 'application/zip' }));
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${name.replace(/\s+/g, '_')}_bundle.zip`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch {
+      addNotification({ type: 'error', message: 'Export failed' });
+    } finally {
+      setExportingId(null);
+    }
+  };
 
   // per-ensemble local edit state
   const [editState, setEditState] = useState<Record<number, { knn_weight: string; lstm_weight: string; agreement_required: boolean }>>({});
@@ -840,9 +904,19 @@ function EnsembleTab({ knnModels, lstmModels }: { knnModels: any[]; lstmModels: 
                       <Button size="sm" variant="ghost" onClick={() => setDeleteConfirmId(null)}>No</Button>
                     </>
                   ) : (
-                    <Button size="sm" variant="ghost" onClick={() => setDeleteConfirmId(ens.id)}>
-                      <Trash2 size={13} className="mr-1" />Delete
-                    </Button>
+                    <>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        loading={exportingId === ens.id}
+                        onClick={() => handleExport(ens.id, ens.knn_model_id, ens.lstm_model_id, ens.name)}
+                      >
+                        <Download size={13} className="mr-1" />Export
+                      </Button>
+                      <Button size="sm" variant="ghost" onClick={() => setDeleteConfirmId(ens.id)}>
+                        <Trash2 size={13} className="mr-1" />Delete
+                      </Button>
+                    </>
                   )}
                   <Button size="sm" loading={updateMutation.isPending} onClick={handleSave} disabled={!weightsValid}>
                     Save

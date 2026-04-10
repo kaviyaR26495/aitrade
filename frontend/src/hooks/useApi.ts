@@ -352,6 +352,18 @@ export const useDeleteEnsemble = () => {
   });
 };
 
+export const useImportModel = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (file: File) => api.importModelBundle(file),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['knn-models'] });
+      qc.invalidateQueries({ queryKey: ['lstm-models'] });
+      qc.invalidateQueries({ queryKey: ['ensemble-configs'] });
+    },
+  });
+};
+
 // ── Backtest hooks ──
 export const useBacktestResults = () =>
   useQuery({ queryKey: ['backtests'], queryFn: () => api.listBacktestResults().then(r => r.data) });
