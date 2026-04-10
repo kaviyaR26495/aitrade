@@ -27,6 +27,7 @@ ALL_INDICATOR_GROUPS = [
     "cmf",            # self-contained
     "vwap_dist",      # self-contained
     "adx_norm",       # depends on: adx (raw 0-100 kept for regime_classifier)
+    "time_cyclical",  # sin/cos encoding of dow, month, day — always appended
 ]
 
 # Stationary weekly indicators.  Non-stationary weekly_sma_50 is dropped;
@@ -422,5 +423,7 @@ def get_indicator_columns(groups: list[str] | None = None) -> list[str]:
         cols.append("dist_vwap_5")
     if "adx_norm" in selected:
         cols.extend(["adx_norm", "adx_pos_norm", "adx_neg_norm"])
+    if "time_cyclical" in selected:
+        cols.extend(["dow_sin", "dow_cos", "month_sin", "month_cos", "day_sin", "day_cos"])
 
     return cols
