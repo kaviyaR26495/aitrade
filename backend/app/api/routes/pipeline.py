@@ -421,30 +421,30 @@ async def _run_pipeline(job_id: str, symbols: list[str], skip_sync: bool = False
     async with async_session_factory() as db:
         await crud.update_pipeline_job(db, job_id, status="running")
 
-    # Resume Logic: Find the most recent job with SAME symbols
-    # to reuse its RL models and skip data sync.
+    # Resume Logic: Only active when user explicitly skips sync (skip_sync=True).
+    # When skip_sync=False the user wants a fully fresh run — no resume shortcuts.
     resume_from_prev = None
-    async with async_session_factory() as db:
-        from sqlalchemy import select as sqla_select, and_, or_
-        from app.db.models import PipelineJob, RLModel
-        
-        # Look for ANY previous job with the same symbols, preferring more recent ones.
-        # We don't restrict to 'failed' because if a user restarts, the previous one 
-        # might be 'running' or 'cancelled' or even 'failed'.
-        q = sqla_select(PipelineJob).where(
-            PipelineJob.id != job_id
-        ).order_by(PipelineJob.created_at.desc())
-        
-        res = await db.execute(q)
-        all_prev = res.scalars().all()
-        
-        # Check for first job in history with matching symbols
-        target_symbols_set = set(symbols)
-        for prev in all_prev:
-            if set(prev.symbols or []) == target_symbols_set:
-                resume_from_prev = prev
-                logger.info("Pipeline %s found candidate resume job %s", job_id, prev.id)
-                break
+    if skip_sync:
+        async with async_session_factory() as db:
+            from sqlalchemy import select as sqla_select, and_, or_
+            from app.db.models import PipelineJob, RLModel
+
+            q = sqla_select(PipelineJob).where(
+                PipelineJob.id != job_id
+            ).order_by(PipelineJob.created_at.desc())
+
+            res = await db.execute(q)
+            all_prev = res.scalars().all()
+
+            target_symbols_set = set(symbols)
+            for prev in all_prev:
+                if set(prev.symbols or []) == target_symbols_set:
+                    resume_from_prev = prev
+                    logger.info("Pipeline %s found candidate resume job %s", job_id, prev.id)
+                    break
+    else:
+        from sqlalchemy import select as sqla_select
+        from app.db.models import RLModel
 
     try:
         # Resolve stock IDs for the given symbols
@@ -456,24 +456,26 @@ async def _run_pipeline(job_id: str, symbols: list[str], skip_sync: bool = False
             )
 
         # Stage 0 — Data Sync
-        # Skip sync if we resume and the previous job completed it
+        # Only skip when user explicitly opted out (skip_sync=True) and prev sync succeeded.
         prev_sync_ok = False
-        if resume_from_prev:
+        if skip_sync and resume_from_prev:
             sync_stage = next((s for s in (resume_from_prev.stages or []) if s["name"] == "data_sync"), None)
             if sync_stage and sync_stage["status"] == "completed":
                 prev_sync_ok = True
 
-        if skip_sync or prev_sync_ok:
-            await _update_stage(job_id, 0, status="completed", progress=100, message="Data sync skipped (already completed/resumed).")
+        if skip_sync and prev_sync_ok:
+            await _update_stage(job_id, 0, status="completed", progress=100, message="Data sync skipped (user opted out — using previous sync).")
         else:
+            # Run data sync: either fresh run (skip_sync=False) or skip_sync=True but no prev sync
             if await _is_cancelled(job_id):
                 raise asyncio.CancelledError()
             await _stage_data_sync(job_id, stock_ids, symbols)
 
-        # Stage 3 — PPO Fine-tuning
-        # REUSE: Check if a successful RL model exists from the previous job
+        # Stages 1–3 — CQL / BC / PPO
+        # Only reuse a previous RL model when user is explicitly skipping sync
+        # (i.e. intentionally resuming). A fresh run always retrains from scratch.
         existing_rl_id = None
-        if resume_from_prev:
+        if skip_sync and resume_from_prev:
             async with async_session_factory() as db:
                 rl_res = await db.execute(
                     sqla_select(RLModel).where(
@@ -489,10 +491,10 @@ async def _run_pipeline(job_id: str, symbols: list[str], skip_sync: bool = False
         if existing_rl_id:
             rl_model_id = existing_rl_id
             await _update_stage(job_id, 3, status="completed", progress=100, message=f"Resumed: using existing RL model #{rl_model_id}")
-            await _update_stage(job_id, 1, status="completed", progress=100, message="Resumed: logic skipped.")
-            await _update_stage(job_id, 2, status="completed", progress=100, message="Resumed: logic skipped.")
+            await _update_stage(job_id, 1, status="completed", progress=100, message="Resumed: CQL skipped.")
+            await _update_stage(job_id, 2, status="completed", progress=100, message="Resumed: BC warmup skipped.")
         else:
-            # Normal flow
+            # Normal flow — always runs on fresh run (skip_sync=False)
             # Stage 1 — CQL Pre-training
             if await _is_cancelled(job_id):
                 raise asyncio.CancelledError()
@@ -609,20 +611,25 @@ async def _stage_data_sync(job_id: str, stock_ids: list[int], symbols: list[str]
     total = len(stock_ids)
     synced = 0
 
-    # FIX: Moved db session INSIDE the loop to isolate transactions
     for i, stock_id in enumerate(stock_ids):
+        # Check cancellation before each stock so termination takes effect promptly
+        if await _is_cancelled(job_id):
+            raise asyncio.CancelledError()
+
         sym = symbols[i] if i < len(symbols) else f"#{stock_id}"
-        
+
         for interval in ["day", "week"]:
+            if await _is_cancelled(job_id):
+                raise asyncio.CancelledError()
+
             pct = int(i / total * 90) + (5 if interval == "week" else 0)
             await _update_stage(
-                job_id, 0, status="running", progress=min(95, pct), 
+                job_id, 0, status="running", progress=min(95, pct),
                 message=f"Syncing & Classifying {sym} ({interval.capitalize()})…"
             )
-            
+
             async with async_session_factory() as db:
                 try:
-                    # Compute and commit immediately per stock/interval
                     res = await data_service.sync_and_compute(db, stock_id, interval=interval)
                     if res.get("ohlcv_synced", 0) >= 0 and interval == "day":
                         synced += 1

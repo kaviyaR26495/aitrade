@@ -6,15 +6,17 @@ GET  /api/training/retrain-status — check staleness and last retrain date
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from fastapi import APIRouter, BackgroundTasks, Depends
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db
 from app.db import crud
 from app.db.database import async_session_factory
+from app.db.models import EnsembleConfig
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -56,7 +58,7 @@ async def trigger_auto_retrain(
 
 @router.get("/retrain-status")
 async def get_retrain_status(db: AsyncSession = Depends(get_db)):
-    """Return when the last auto-retrain ran and whether a new one is recommended.
+    """Return when the ensemble was last refreshed and whether a new retrain is recommended.
 
     Response:
       last_retrain_at   ISO-8601 string or null
@@ -64,18 +66,30 @@ async def get_retrain_status(db: AsyncSession = Depends(get_db)):
       needs_retrain       bool (true if > 30 days or never run)
     """
     last_str = await crud.get_setting(db, "last_auto_retrain_at")
+    last_dt: datetime | None = None
 
     if last_str:
         try:
             last_dt = datetime.fromisoformat(last_str)
-            days_since = (datetime.utcnow() - last_dt).days
-            return {
-                "last_retrain_at": last_str,
-                "days_since_retrain": days_since,
-                "needs_retrain": days_since >= _STALE_AFTER_DAYS,
-            }
         except ValueError:
-            pass  # malformed date — fall through to needs_retrain=True
+            last_dt = None
+
+    latest_ensemble_result = await db.execute(
+        select(EnsembleConfig.created_at).order_by(EnsembleConfig.created_at.desc()).limit(1)
+    )
+    latest_ensemble_dt = latest_ensemble_result.scalar_one_or_none()
+
+    if latest_ensemble_dt and (last_dt is None or latest_ensemble_dt > last_dt):
+        last_dt = latest_ensemble_dt
+        last_str = latest_ensemble_dt.isoformat()
+
+    if last_dt is not None:
+        days_since = max(0, (datetime.now().date() - last_dt.date()).days)
+        return {
+            "last_retrain_at": last_str,
+            "days_since_retrain": days_since,
+            "needs_retrain": days_since >= _STALE_AFTER_DAYS,
+        }
 
     return {
         "last_retrain_at": None,

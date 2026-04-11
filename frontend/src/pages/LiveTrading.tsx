@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Card, Button, Badge, StatCard, Select, EmptyState, PageHeader, Table, Modal, Checkbox, Tooltip, SkeletonTable, type TableColumn } from '../components/ui';
 import { usePredictions, useOrders, useRunPredictions, usePlaceOrder, useUniverseStocks, useOhlcv, useIndicators, useBatches, useDeleteBatch, usePredictionJob, useCancelPredictionJob, useForwardLook } from '../hooks/useApi';
 import { useAppStore } from '../store/appStore';
@@ -6,14 +6,32 @@ import { Crosshair, Play, Shield, ShieldAlert, Trash2, XCircle, Loader2 } from '
 import { useEffect } from 'react';
 import LightweightCandleChart, { type IndicatorSeries } from '../components/LightweightCandleChart';
 
+const REGIME_HELP: Record<number, string> = {
+  0: 'Bull trend, low volatility',
+  1: 'Bull trend, high volatility',
+  2: 'Bear trend, low volatility',
+  3: 'Bear trend, high volatility',
+  4: 'Neutral trend, low volatility',
+  5: 'Neutral trend, high volatility',
+};
+
+type SignalFilter = 'ALL' | 'BUY' | 'SELL' | 'HOLD';
+type RegimeFilter = 'ALL' | 'UNKNOWN' | '0' | '1' | '2' | '3' | '4' | '5';
+type ConfidenceOperator = '>' | '>=' | '<' | '<=' | '=' | '!=';
+
 export default function LiveTrading() {
   const { addNotification } = useAppStore();
   const [interval, setInterval] = useState('day');
-  const [minConfidence, setMinConfidence] = useState(0.65);
+  const minConfidence = 0;
   const [agreementOnly, setAgreementOnly] = useState(true);
   const [targetDate, setTargetDate] = useState<string>(new Date().toISOString().split('T')[0]);
   const [forwardLookTarget, setForwardLookTarget] = useState<{stockId: number, symbol: string, date: string} | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [signalFilter, setSignalFilter] = useState<SignalFilter>('ALL');
+  const [regimeFilter, setRegimeFilter] = useState<RegimeFilter>('ALL');
+  const [confidenceOperator, setConfidenceOperator] = useState<ConfidenceOperator>('>=');
+  const [confidenceValue, setConfidenceValue] = useState('65');
+  const [symbolQuery, setSymbolQuery] = useState('');
 
   const { data: batches } = useBatches(interval);
   const [selectedBatchId, setSelectedBatchId] = useState<string | null>(null);
@@ -66,8 +84,37 @@ export default function LiveTrading() {
   const [orderConfirm, setOrderConfirm] = useState<any>(null);
   const [selectedStock, setSelectedStock] = useState<{ id: number; symbol: string; date: string; action: string } | null>(null);
 
-  const buyPreds = predictions?.filter((p: any) => p.action === 'BUY') ?? [];
-  const sellPreds = predictions?.filter((p: any) => p.action === 'SELL') ?? [];
+  const filteredPredictions = useMemo(() => {
+    const all = predictions ?? [];
+    const q = symbolQuery.trim().toLowerCase();
+    const parsedConfidence = Number(confidenceValue);
+    const hasConfidenceFilter = confidenceValue.trim().length > 0 && Number.isFinite(parsedConfidence);
+    const threshold = hasConfidenceFilter
+      ? Math.max(0, Math.min(1, parsedConfidence > 1 ? parsedConfidence / 100 : parsedConfidence))
+      : 0;
+
+    return all.filter((p: any) => {
+      const action = String(p.action ?? '').toUpperCase();
+      const regimeId = Number.isInteger(p.regime_id) ? String(Number(p.regime_id)) : 'UNKNOWN';
+      const confidence = Number(p.confidence ?? 0);
+      const matchesSignal = signalFilter === 'ALL' || action === signalFilter;
+      const matchesRegime = regimeFilter === 'ALL' || regimeId === regimeFilter;
+      const matchesConfidence = !hasConfidenceFilter || (
+        confidenceOperator === '>' ? confidence > threshold :
+        confidenceOperator === '>=' ? confidence >= threshold :
+        confidenceOperator === '<' ? confidence < threshold :
+        confidenceOperator === '<=' ? confidence <= threshold :
+        confidenceOperator === '=' ? confidence === threshold :
+        confidence !== threshold
+      );
+      const matchesSymbol = !q || String(p.symbol ?? '').toLowerCase().includes(q);
+      return matchesSignal && matchesRegime && matchesConfidence && matchesSymbol;
+    });
+  }, [predictions, signalFilter, regimeFilter, confidenceOperator, confidenceValue, symbolQuery]);
+
+  const buyPreds = filteredPredictions.filter((p: any) => String(p.action).toUpperCase() === 'BUY');
+  const sellPreds = filteredPredictions.filter((p: any) => String(p.action).toUpperCase() === 'SELL');
+  const holdPreds = filteredPredictions.filter((p: any) => String(p.action).toUpperCase() === 'HOLD');
 
   const predictionColumns: TableColumn<any>[] = [
     {
@@ -139,13 +186,21 @@ export default function LiveTrading() {
       tooltip: 'Detected market regime ID at prediction time',
       align: 'center',
       mono: true,
-      render: (p) => (
-        <Tooltip content={`Market Regime #${p.regime_id ?? '?'}`} side="bottom">
+      render: (p) => {
+        const regimeId = Number.isInteger(p.regime_id) ? Number(p.regime_id) : null;
+        const regimeCode = regimeId === null ? 'R?' : `R${regimeId}`;
+        const regimeText = regimeId === null
+          ? 'Regime unavailable for this prediction'
+          : (REGIME_HELP[regimeId] ?? 'Unknown regime mapping');
+
+        return (
+        <Tooltip content={`${regimeCode}: ${regimeText}`} side="bottom">
           <span className="text-xs text-[var(--text-dim)] cursor-help border-b border-dotted border-[var(--border)]">
             R{p.regime_id ?? '—'}
           </span>
         </Tooltip>
-      )
+        );
+      }
     },
     {
       key: 'pattern',
@@ -328,13 +383,93 @@ export default function LiveTrading() {
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-5">
         <StatCard label="BUY Signals" value={buyPreds.length} color="var(--success)" />
         <StatCard label="SELL Signals" value={sellPreds.length} color="var(--danger)" />
-        <StatCard label="Total Predictions" value={predictions?.length ?? 0} color="var(--primary)" />
-        <StatCard label="Min Confidence" value={`${(minConfidence * 100).toFixed(0)}%`} color="var(--info)" />
+        <StatCard label="HOLD Signals" value={holdPreds.length} color="var(--warning)" />
+        <StatCard label="Total Predictions" value={filteredPredictions.length} color="var(--primary)" />
+        <StatCard label="Confidence Rule" value={`${confidenceOperator} ${confidenceValue || '—'}%`} color="var(--info)" />
       </div>
+
+      <Card title="Signal Filters" className="p-4">
+        <div className="flex flex-col lg:flex-row lg:items-center gap-3">
+          <div className="flex items-center gap-2">
+            {(['ALL', 'BUY', 'SELL', 'HOLD'] as SignalFilter[]).map((signal) => {
+              const isActive = signalFilter === signal;
+              return (
+                <Button
+                  key={signal}
+                  size="sm"
+                  variant={isActive ? 'primary' : 'ghost'}
+                  onClick={() => setSignalFilter(signal)}
+                  className={isActive ? '' : 'text-[var(--text-dim)]'}
+                >
+                  {signal}
+                </Button>
+              );
+            })}
+          </div>
+
+          <div className="flex items-center gap-2 w-full lg:w-auto">
+            <span className="text-xs text-[var(--text-dim)] font-medium uppercase tracking-wider">Confidence</span>
+            <Select
+              value={confidenceOperator}
+              onChange={(v) => setConfidenceOperator(v as ConfidenceOperator)}
+              options={[
+                { value: '>', label: '>' },
+                { value: '>=', label: '>=' },
+                { value: '<', label: '<' },
+                { value: '<=', label: '<=' },
+                { value: '=', label: '=' },
+                { value: '!=', label: '!=' },
+              ]}
+              className="w-[90px]"
+            />
+            <input
+              type="number"
+              min="0"
+              max="100"
+              step="1"
+              value={confidenceValue}
+              onChange={(e) => setConfidenceValue(e.target.value)}
+              placeholder="e.g. 65"
+              className="h-9 w-[120px] rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--bg-input)] px-3 text-sm text-[var(--text)] placeholder:text-[var(--text-dim)] focus:outline-none focus:ring-2 focus:ring-[var(--primary)]/40"
+              aria-label="Confidence threshold percent"
+            />
+            <span className="text-xs text-[var(--text-dim)]">%</span>
+          </div>
+
+          <div className="flex items-center gap-2 w-full lg:w-auto">
+            <span className="text-xs text-[var(--text-dim)] font-medium uppercase tracking-wider">Regime</span>
+            <Select
+              value={regimeFilter}
+              onChange={(v) => setRegimeFilter(v as RegimeFilter)}
+              options={[
+                { value: 'ALL', label: 'All Regimes' },
+                { value: '0', label: 'R0 - Bull trend, low volatility' },
+                { value: '1', label: 'R1 - Bull trend, high volatility' },
+                { value: '2', label: 'R2 - Bear trend, low volatility' },
+                { value: '3', label: 'R3 - Bear trend, high volatility' },
+                { value: '4', label: 'R4 - Neutral trend, low volatility' },
+                { value: '5', label: 'R5 - Neutral trend, high volatility' },
+                { value: 'UNKNOWN', label: 'Unknown Regime' },
+              ]}
+              className="w-full lg:w-[280px]"
+            />
+          </div>
+
+          <div className="lg:ml-auto w-full lg:w-[280px]">
+            <input
+              type="text"
+              value={symbolQuery}
+              onChange={(e) => setSymbolQuery(e.target.value)}
+              placeholder="Search stock symbol..."
+              className="w-full h-9 rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--bg-input)] px-3 text-sm text-[var(--text)] placeholder:text-[var(--text-dim)] focus:outline-none focus:ring-2 focus:ring-[var(--primary)]/40"
+            />
+          </div>
+        </div>
+      </Card>
 
       <Card title="Today's Predictions" noPadding data-guide-id="predictions-table" action={
         <span className="text-[11px] text-[var(--text-dim)] font-medium uppercase tracking-wider">
-          {isLoading ? 'Loading...' : `${predictions?.length ?? 0} results`}
+          {isLoading ? 'Loading...' : `${filteredPredictions.length} results`}
         </span>
       }>
         {isLoading ? (
@@ -342,7 +477,7 @@ export default function LiveTrading() {
         ) : (
           <Table<any>
             columns={predictionColumns}
-            data={predictions ?? []}
+            data={filteredPredictions}
             isLoading={isLoading}
             onRowClick={(p) => setSelectedStock({ id: p.stock_id, symbol: p.symbol, date: p.date, action: p.action })}
             emptyState={

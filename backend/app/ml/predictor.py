@@ -245,6 +245,7 @@ async def run_daily_predictions(
                 continue
 
             # Use the last window only (most recent)
+            latest_row = df.iloc[-1:].copy()
             X_last = X[-1:].copy()
             del df  # release per-stock DataFrame — reduces peak RSS at scale
 
@@ -263,11 +264,11 @@ async def run_daily_predictions(
 
             # Fail-safe regime classification: compute on-the-fly to ensure it is never null/missing
             try:
-                df_regime = classify_regimes(df.iloc[-1:])
+                df_regime = classify_regimes(latest_row)
                 regime_id = int(df_regime["regime_id"].iloc[0])
             except Exception as reg_exc:
                 logger.warning(f"On-the-fly regime classification failed for {stock.symbol}: {reg_exc}")
-                regime_id = int(df["regime_id"].iloc[-1]) if "regime_id" in df.columns else 0
+                regime_id = int(latest_row["regime_id"].iloc[-1]) if "regime_id" in latest_row.columns else 0
 
             preds = ensemble_predict(
                 knn_preds, knn_probs, lstm_preds, lstm_probs,
