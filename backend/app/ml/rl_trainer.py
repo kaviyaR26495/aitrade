@@ -245,6 +245,7 @@ def train_rl_model(
     # don't bleed across stock boundaries.
     if multi_ohlcv_dfs:
         stock_datasets: list[tuple[np.ndarray, np.ndarray]] = []
+        feature_cols: list[str] = []
         for idx, sdf in enumerate(multi_ohlcv_dfs):
             # Get the matching weekly DataFrame if supplied (None falls through gracefully)
             wdf = weekly_ohlcv_dfs[idx] if (weekly_ohlcv_dfs and idx < len(weekly_ohlcv_dfs)) else weekly_df
@@ -252,18 +253,15 @@ def train_rl_model(
                 prep_df, feat_cols = prepare_training_data(
                     sdf, min_quality=min_quality, regime_ids=regime_ids, weekly_df=wdf,
                 )
+                if not feature_cols:
+                    feature_cols = feat_cols  # capture from first successful stock
                 fd = prep_df[feat_cols].values.astype(np.float32)
                 cp = prep_df.get("adj_close", prep_df["close"]).fillna(prep_df["close"]).values.astype(np.float32)
                 stock_datasets.append((fd, cp))
             except Exception as exc:
-                logger.warning("Multi-stock prep: skipping a stock — %s", exc)
+                logger.warning("Multi-stock prep: skipping stock %d — %s", idx, exc)
         if not stock_datasets:
             raise ValueError("All stocks failed data preparation — cannot train")
-        # Use the first stock's feature_cols for shape reference
-        wdf0 = weekly_ohlcv_dfs[0] if (weekly_ohlcv_dfs and len(weekly_ohlcv_dfs) > 0) else weekly_df
-        prep_df, feature_cols = prepare_training_data(
-            multi_ohlcv_dfs[0], min_quality=min_quality, regime_ids=regime_ids, weekly_df=wdf0,
-        )
         # feature_data / close_prices not used directly — envs use stock_datasets
         feature_data = stock_datasets[0][0]
         close_prices = stock_datasets[0][1]

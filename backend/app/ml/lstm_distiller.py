@@ -48,12 +48,18 @@ class TradeLSTM(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(64, num_classes),
         )
+        # Auxiliary regression head used during pre-training only.
+        # Predicts the continuous forward P&L (roc_5 equivalent) so the LSTM
+        # hidden states encode real price physics before classification.
+        self.pretrain_head = nn.Linear(hidden_size, 1)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, pretrain: bool = False) -> torch.Tensor:
         # x: (batch, seq_len, features)
         lstm_out, (h_n, c_n) = self.lstm(x)
         # Use final hidden state from last layer
         final_hidden = h_n[-1]  # (batch, hidden_size)
+        if pretrain:
+            return self.pretrain_head(final_hidden)  # (batch, 1) — regression
         logits = self.classifier(final_hidden)
         return logits
 
@@ -74,12 +80,22 @@ def train_lstm(
     jitter_copies: int = 1,
     device: str | None = None,
     log_fn: Any = None,
+    roc5_targets: np.ndarray | None = None,
+    pretrain_epochs: int = 10,
+    pretrain_lr: float = 1e-3,
 ) -> tuple[TradeLSTM, dict[str, Any]]:
     """
     Train LSTM on golden patterns.
 
     X: (n_samples, seq_len, n_features)
     y: (n_samples,) — 0=HOLD, 1=BUY, 2=SELL
+
+    roc5_targets: (n_samples,) float32 — continuous forward P&L values used
+        to pre-train the LSTM hidden states via MSELoss before the
+        classification phase begins.  When provided the LSTM first learns
+        to predict real price physics (pretrain_epochs epochs), then the
+        regression head is frozen and classification training proceeds
+        normally.  Pass None to skip pre-training.
 
     augment_jitter: if True, Gaussian jitter is applied *only* to the training
         split after the chronological split, so the validation set remains
@@ -147,6 +163,42 @@ def train_lstm(
         num_layers=num_layers,
         dropout=dropout,
     ).to(device)
+
+    # ── Optional auxiliary pre-training ──────────────────────────────
+    # Phase 0: teach the LSTM to predict continuous forward P&L via MSELoss.
+    # This forces hidden states to learn real price physics (momentum, mean-
+    # reversion) before the model is asked to maximise a harder classification
+    # objective.  The regression head is frozen afterwards so it does not
+    # interfere with the classification training.
+    if roc5_targets is not None and len(roc5_targets) == len(X):
+        _log(f"INFO   Pre-training LSTM on continuous return targets ({pretrain_epochs} epochs)...")
+        pre_X_t = torch.tensor(X[:split_idx], dtype=torch.float32)
+        pre_y_t = torch.tensor(roc5_targets[:split_idx], dtype=torch.float32).unsqueeze(1)
+        pre_loader = DataLoader(
+            TensorDataset(pre_X_t, pre_y_t),
+            batch_size=batch_size,
+            shuffle=True,
+        )
+        pre_opt = torch.optim.Adam(model.parameters(), lr=pretrain_lr)
+        mse_loss = nn.MSELoss()
+        model.train()
+        for ep in range(pretrain_epochs):
+            ep_loss = 0.0
+            for xb, yb in pre_loader:
+                xb, yb = xb.to(device), yb.to(device)
+                pre_opt.zero_grad()
+                loss = mse_loss(model(xb, pretrain=True), yb)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                pre_opt.step()
+                ep_loss += loss.item() * len(xb)
+            if ep % 5 == 0:
+                _log(f"INFO   Pre-train epoch {ep}/{pretrain_epochs}: mse={ep_loss / len(pre_X_t):.6f}")
+        # Freeze regression head — classification training uses classifier only
+        for param in model.pretrain_head.parameters():
+            param.requires_grad = False
+        _log("INFO   Pre-training complete. Regression head frozen.")
+    # ─────────────────────────────────────────────────────────────────
 
     criterion = nn.CrossEntropyLoss(weight=class_weights)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
@@ -492,8 +544,10 @@ def save_lstm_model(
     }
 
 
-def load_lstm_model(model_path: str, device: str = "cpu") -> TradeLSTM:
-    """Load a saved LSTM model."""
+def load_lstm_model(model_path: str, device: str | None = None) -> TradeLSTM:
+    """Load a saved LSTM model onto the best available device (GPU if present)."""
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
     checkpoint = torch.load(model_path, map_location=device, weights_only=True)
     model = TradeLSTM(
         input_size=checkpoint["input_size"],
@@ -502,22 +556,30 @@ def load_lstm_model(model_path: str, device: str = "cpu") -> TradeLSTM:
         num_classes=checkpoint["num_classes"],
     )
     model.load_state_dict(checkpoint["state_dict"])
+    model.to(device)
     model.eval()
+    logger.info("Loaded LSTM model from %s onto %s", model_path, device)
     return model
 
 
 def predict_lstm(
     model: TradeLSTM,
     X: np.ndarray,
-    device: str = "cpu",
+    device: str | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Predict with LSTM. Returns (predictions, probabilities).
     X: (n_samples, seq_len, n_features).
+    Uses the device the model is already on (avoids redundant .to() calls).
     """
-    model.eval()
-    model = model.to(device)
+    # Infer device from the model itself — avoids a redundant .to() every call
+    if device is None:
+        try:
+            device = next(model.parameters()).device.type
+        except StopIteration:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
 
+    model.eval()
     with torch.no_grad():
         X_tensor = torch.tensor(X, dtype=torch.float32).to(device)
         logits = model(X_tensor)

@@ -123,6 +123,28 @@ async def start_pipeline(req: PipelineStartRequest, background_tasks: Background
     if not req.symbols:
         raise HTTPException(status_code=422, detail="symbols must not be empty")
 
+    # Check for existing pending/failed job for the same symbols
+    async with async_session_factory() as db:
+        from sqlalchemy import select as sqla_select, and_
+        from app.db.models import PipelineJob
+        
+        # Look for a failed or manual-retry job with the same symbols
+        q = sqla_select(PipelineJob).where(
+            and_(
+                PipelineJob.status.in_(["failed", "cancelled"]),
+                # Symbols match exactly
+            )
+        ).order_by(PipelineJob.created_at.desc()).limit(1)
+        
+        # For simplicity in this fix, we'll check if the user is asking to resume
+        # by looking for the last job if it failed.
+        result = await db.execute(q)
+        existing_job = result.scalar_one_or_none()
+        
+        # If the last job failed and has matching symbols, we can theoretically resume.
+        # However, to avoid complexity with UUIDs and frontend expectations, 
+        # we will create a NEW job but skip stages that were already completed.
+    
     job_id = str(uuid.uuid4())
     async with async_session_factory() as db:
         await crud.create_pipeline_job(
@@ -399,6 +421,31 @@ async def _run_pipeline(job_id: str, symbols: list[str], skip_sync: bool = False
     async with async_session_factory() as db:
         await crud.update_pipeline_job(db, job_id, status="running")
 
+    # Resume Logic: Only active when user explicitly skips sync (skip_sync=True).
+    # When skip_sync=False the user wants a fully fresh run — no resume shortcuts.
+    resume_from_prev = None
+    if skip_sync:
+        async with async_session_factory() as db:
+            from sqlalchemy import select as sqla_select, and_, or_
+            from app.db.models import PipelineJob, RLModel
+
+            q = sqla_select(PipelineJob).where(
+                PipelineJob.id != job_id
+            ).order_by(PipelineJob.created_at.desc())
+
+            res = await db.execute(q)
+            all_prev = res.scalars().all()
+
+            target_symbols_set = set(symbols)
+            for prev in all_prev:
+                if set(prev.symbols or []) == target_symbols_set:
+                    resume_from_prev = prev
+                    logger.info("Pipeline %s found candidate resume job %s", job_id, prev.id)
+                    break
+    else:
+        from sqlalchemy import select as sqla_select
+        from app.db.models import RLModel
+
     try:
         # Resolve stock IDs for the given symbols
         stock_ids = await _resolve_stock_ids(symbols)
@@ -409,32 +456,80 @@ async def _run_pipeline(job_id: str, symbols: list[str], skip_sync: bool = False
             )
 
         # Stage 0 — Data Sync
-        if skip_sync:
-            await _update_stage(job_id, 0, status="completed", progress=100, message="Data sync skipped per user request.")
+        # Only skip when user explicitly opted out (skip_sync=True) and prev sync succeeded.
+        prev_sync_ok = False
+        if skip_sync and resume_from_prev:
+            sync_stage = next((s for s in (resume_from_prev.stages or []) if s["name"] == "data_sync"), None)
+            if sync_stage and sync_stage["status"] == "completed":
+                prev_sync_ok = True
+
+        if skip_sync and prev_sync_ok:
+            await _update_stage(job_id, 0, status="completed", progress=100, message="Data sync skipped (user opted out — using previous sync).")
         else:
+            # Run data sync: either fresh run (skip_sync=False) or skip_sync=True but no prev sync
             if await _is_cancelled(job_id):
                 raise asyncio.CancelledError()
             await _stage_data_sync(job_id, stock_ids, symbols)
 
-        # Stage 1 — CQL Pre-training
-        if await _is_cancelled(job_id):
-            raise asyncio.CancelledError()
-        cql_path = await _stage_cql_pretrain(job_id, stock_ids, use_regime_pooling)
+        # Stages 1–3 — CQL / BC / PPO
+        # Only reuse a previous RL model when user is explicitly skipping sync
+        # (i.e. intentionally resuming). A fresh run always retrains from scratch.
+        existing_rl_id = None
+        if skip_sync and resume_from_prev:
+            async with async_session_factory() as db:
+                rl_res = await db.execute(
+                    sqla_select(RLModel).where(
+                        (RLModel.training_config["pipeline_job_id"].as_string() == resume_from_prev.id),
+                        (RLModel.status == "completed")
+                    ).order_by(RLModel.created_at.desc())
+                )
+                m = rl_res.scalars().first()
+                if m:
+                    existing_rl_id = m.id
+                    logger.info("Resuming: using existing RL model #%s from job %s", existing_rl_id, resume_from_prev.id)
 
-        # Stage 2 — BC Warmup
-        if await _is_cancelled(job_id):
-            raise asyncio.CancelledError()
-        warmup_path = await _stage_bc_warmup(job_id, cql_path, stock_ids, use_regime_pooling)
+        if existing_rl_id:
+            rl_model_id = existing_rl_id
+            await _update_stage(job_id, 3, status="completed", progress=100, message=f"Resumed: using existing RL model #{rl_model_id}")
+            await _update_stage(job_id, 1, status="completed", progress=100, message="Resumed: CQL skipped.")
+            await _update_stage(job_id, 2, status="completed", progress=100, message="Resumed: BC warmup skipped.")
+        else:
+            # Normal flow — always runs on fresh run (skip_sync=False)
+            # Stage 1 — CQL Pre-training
+            if await _is_cancelled(job_id):
+                raise asyncio.CancelledError()
+            cql_path = await _stage_cql_pretrain(job_id, stock_ids, use_regime_pooling)
 
-        # Stage 3 — PPO Fine-tuning
-        if await _is_cancelled(job_id):
-            raise asyncio.CancelledError()
-        rl_model_id = await _stage_ppo_finetune(job_id, stock_ids, warmup_path)
+            # Stage 2 — BC Warmup
+            if await _is_cancelled(job_id):
+                raise asyncio.CancelledError()
+            warmup_path = await _stage_bc_warmup(job_id, cql_path, stock_ids, use_regime_pooling)
+
+            # Stage 3 — PPO Fine-tuning
+            if await _is_cancelled(job_id):
+                raise asyncio.CancelledError()
+            rl_model_id = await _stage_ppo_finetune(job_id, stock_ids, warmup_path)
 
         # Stage 4 — Ensemble Distillation
         if await _is_cancelled(job_id):
             raise asyncio.CancelledError()
         knn_model_id, lstm_model_id = await _stage_ensemble_distill(job_id, rl_model_id, stock_ids)
+
+        # NEW: Automatically trigger a prediction run once models are distilled.
+        # This populates the "Live Trading" dashboard signals automatically.
+        try:
+            from app.ml.predictor import run_daily_predictions
+            async with async_session_factory() as db:
+                await run_daily_predictions(
+                    db,
+                    stock_ids=stock_ids,
+                    knn_model_id=knn_model_id,
+                    lstm_model_id=lstm_model_id,
+                    interval="day"
+                )
+            logger.info("Pipeline %s: Automatically triggered predictions after Stage 4", job_id)
+        except Exception as pred_exc:
+            logger.error("Pipeline %s: Failed to trigger auto-predictions: %s", job_id, pred_exc)
 
         # Stage 5 — Backtest
         if await _is_cancelled(job_id):
@@ -509,20 +604,25 @@ async def _stage_data_sync(job_id: str, stock_ids: list[int], symbols: list[str]
     total = len(stock_ids)
     synced = 0
 
-    # FIX: Moved db session INSIDE the loop to isolate transactions
     for i, stock_id in enumerate(stock_ids):
+        # Check cancellation before each stock so termination takes effect promptly
+        if await _is_cancelled(job_id):
+            raise asyncio.CancelledError()
+
         sym = symbols[i] if i < len(symbols) else f"#{stock_id}"
-        
+
         for interval in ["day", "week"]:
+            if await _is_cancelled(job_id):
+                raise asyncio.CancelledError()
+
             pct = int(i / total * 90) + (5 if interval == "week" else 0)
             await _update_stage(
-                job_id, 0, status="running", progress=min(95, pct), 
+                job_id, 0, status="running", progress=min(95, pct),
                 message=f"Syncing & Classifying {sym} ({interval.capitalize()})…"
             )
-            
+
             async with async_session_factory() as db:
                 try:
-                    # Compute and commit immediately per stock/interval
                     res = await data_service.sync_and_compute(db, stock_id, interval=interval)
                     if res.get("ohlcv_synced", 0) >= 0 and interval == "day":
                         synced += 1
@@ -700,7 +800,7 @@ async def _stage_ppo_finetune(job_id: str, stock_ids: list[int], pretrained_path
     """
     from app.db.database import async_session_factory
     from app.db import crud as _crud
-    from app.ml.algorithms import ALGORITHM_CONFIGS
+    from app.ml.algorithms import ALGORITHM_CONFIGS, get_default_hyperparams
 
     await _update_stage(job_id, 3, status="running", progress=0, message="Creating RL model record…")
 
@@ -708,7 +808,7 @@ async def _stage_ppo_finetune(job_id: str, stock_ids: list[int], pretrained_path
     if algorithm not in ALGORITHM_CONFIGS:
         algorithm = "PPO"  # fallback if AttentionPPO not registered
 
-    hyperparams = dict(ALGORITHM_CONFIGS[algorithm]["defaults"])
+    hyperparams = get_default_hyperparams(algorithm)
     # Scale timesteps by universe size — 150k minimum, +15k per stock.
     # 100k was fine for 1 stock but starves the agent when 50+ stocks are used.
     total_timesteps = max(150_000, len(stock_ids) * 15_000)
@@ -889,6 +989,18 @@ async def _stage_ensemble_distill(job_id: str, rl_model_id: int, stock_ids: list
             num_layers=2,
             dropout=0.3,
             status="pending",
+        )
+        
+        # Create ensemble config to bind them so they appear in Model Studio
+        await _crud.create_ensemble_config(
+            db,
+            name=f"Ensemble_{job_id[:8]}",
+            knn_model_id=knn_model.id,
+            lstm_model_id=lstm_model.id,
+            knn_weight=0.5,
+            lstm_weight=0.5,
+            agreement_required=True,
+            interval=interval,
         )
 
     knn_model_id = knn_model.id

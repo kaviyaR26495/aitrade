@@ -39,6 +39,7 @@ interface Props {
   trades?: TradeMarker[];
   height?: number;
   className?: string;
+  verticalLineDate?: string;
 }
 
 function resolveCssVar(varName: string, fallback: string): string {
@@ -55,9 +56,11 @@ export default function LightweightCandleChart({
   trades = [],
   height = 500,
   className,
+  verticalLineDate,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
+  const vertLineRef = useRef<HTMLDivElement>(null);
   const [legendData, setLegendData] = useState<any>(null);
 
   useEffect(() => {
@@ -137,7 +140,7 @@ export default function LightweightCandleChart({
     indicators.forEach((ind) => {
       const lineSeries = chart.addSeries(LineSeries, {
         color: ind.color,
-        lineWidth: 1.5,
+        lineWidth: 2,
         priceLineVisible: false,
         lastValueVisible: true,
         title: ind.name,
@@ -191,19 +194,53 @@ export default function LightweightCandleChart({
     chart.timeScale().fitContent();
     chartRef.current = chart;
 
+    const updateVertLine = () => {
+      if (verticalLineDate && vertLineRef.current && chart) {
+        const x = chart.timeScale().timeToCoordinate(verticalLineDate as Time);
+        if (x !== null && x > 0 && x < el.clientWidth) {
+          vertLineRef.current.style.display = 'block';
+          vertLineRef.current.style.left = `${x}px`;
+        } else {
+          vertLineRef.current.style.display = 'none';
+        }
+      }
+    };
+
     const handleResize = () => {
-      chart.applyOptions({ width: el.clientWidth });
+      if (chart && el) {
+        chart.applyOptions({ width: el.clientWidth });
+        updateVertLine();
+      }
     };
     window.addEventListener('resize', handleResize);
 
+    if (verticalLineDate) {
+      chart.timeScale().subscribeVisibleTimeRangeChange(updateVertLine);
+      chart.timeScale().subscribeVisibleLogicalRangeChange(updateVertLine);
+      setTimeout(updateVertLine, 50);
+    }
+
     return () => {
       window.removeEventListener('resize', handleResize);
+      if (verticalLineDate) {
+        chart.timeScale().unsubscribeVisibleTimeRangeChange(updateVertLine);
+        chart.timeScale().unsubscribeVisibleLogicalRangeChange(updateVertLine);
+      }
       chart.remove();
     };
-  }, [ohlcv, indicators, trades, height]);
+  }, [ohlcv, indicators, trades, height, verticalLineDate]);
 
   return (
     <div ref={containerRef} className={`relative ${className}`} style={{ width: '100%', minHeight: height }}>
+      {verticalLineDate && (
+        <div 
+          ref={vertLineRef}
+          className="absolute top-0 bottom-0 w-[1px] bg-[var(--primary)] z-0 hidden pointer-events-none"
+          style={{ mixBlendMode: 'screen', opacity: 0.5, borderLeft: '1px dashed var(--primary)' }}
+        >
+          <div className="absolute top-0 left-2 text-[10px] text-[var(--primary)] font-mono font-bold whitespace-nowrap bg-[var(--bg-card)]/50 px-1 rounded">Prediction</div>
+        </div>
+      )}
       {legendData && (
         <div className="absolute top-4 left-4 z-10 p-3 bg-[var(--bg-card)]/80 backdrop-blur-md rounded-lg border border-[var(--border)] text-[10px] space-y-1 pointer-events-none shadow-xl">
           <div className="flex gap-3 font-mono">

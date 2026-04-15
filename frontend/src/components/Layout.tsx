@@ -1,11 +1,11 @@
 import { Outlet, useLocation } from 'react-router-dom';
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import Sidebar from './Sidebar';
 import ChatBot from './ChatBot';
 import ApiConsole from './ApiConsole';
 import TrainingConsole from './TrainingConsole';
 import { useAppStore } from '../store/appStore';
-import { X, CheckCircle, AlertCircle, AlertTriangle, Info } from 'lucide-react';
+import { X, CheckCircle, AlertCircle, AlertTriangle, Info, RefreshCw } from 'lucide-react';
 
 const NOTIFICATION_STYLES = {
   success: { bg: 'bg-emerald-500/10 border-emerald-500/30', icon: CheckCircle, iconColor: 'text-emerald-400' },
@@ -15,9 +15,10 @@ const NOTIFICATION_STYLES = {
 };
 
 export default function Layout() {
-  const { notifications, removeNotification } = useAppStore();
+  const { notifications, removeNotification, retrainAlert, setRetrainAlert, addNotification } = useAppStore();
   const location = useLocation();
   const mainRef = useRef<HTMLElement>(null);
+  const [retrainLoading, setRetrainLoading] = useState(false);
 
   // Scroll to top on route change
   useEffect(() => {
@@ -37,6 +38,44 @@ export default function Layout() {
       <Sidebar />
 
       <div className="flex-1 flex flex-col overflow-hidden">
+        {/* Retrain alert banner — shown when models are stale (> 30 days) */}
+        {retrainAlert && (
+          <div className="flex items-center gap-3 px-4 py-2.5 bg-amber-500/10 border-b border-amber-500/30 text-[13px] text-[var(--text)] shrink-0">
+            <AlertTriangle size={15} className="flex-shrink-0 text-amber-400" />
+            <span className="flex-1">
+              Model ensemble may be stale — it has been over 30 days since the last auto-retrain.
+              Training on fresh patterns improves signal quality as market regimes evolve.
+            </span>
+            <button
+              disabled={retrainLoading}
+              onClick={async () => {
+                setRetrainLoading(true);
+                try {
+                  const { triggerAutoRetrain } = await import('../services/api');
+                  await triggerAutoRetrain(2);
+                  setRetrainAlert(false);
+                  addNotification({ type: 'success', message: 'Auto-retrain started in background. New models will appear in Model Studio when complete.' });
+                } catch {
+                  addNotification({ type: 'error', message: 'Failed to start auto-retrain — check server logs.' });
+                } finally {
+                  setRetrainLoading(false);
+                }
+              }}
+              className="flex items-center gap-1.5 px-3 py-1 rounded border border-amber-500/40 bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 transition-colors disabled:opacity-50"
+            >
+              <RefreshCw size={12} className={retrainLoading ? 'animate-spin' : ''} />
+              {retrainLoading ? 'Starting…' : 'Start Auto-retrain'}
+            </button>
+            <button
+              onClick={() => setRetrainAlert(false)}
+              className="flex-shrink-0 p-0.5 rounded hover:bg-white/5 text-[var(--text-muted)]"
+              aria-label="Dismiss retrain alert"
+            >
+              <X size={13} />
+            </button>
+          </div>
+        )}
+
         <main ref={mainRef} className="flex-1 overflow-y-auto">
           <div className="max-w-[1400px] mx-auto px-6 py-7 lg:px-8 lg:py-8 page-enter relative z-[1]">
             <Outlet />

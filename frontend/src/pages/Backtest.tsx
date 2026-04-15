@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
-import { Card, Button, Select, SearchableSelect, Input, Badge, StatCard, EmptyState, PageHeader, Table, Modal } from '../components/ui';
+import { Card, Button, Select, SearchableSelect, Input, Badge, StatCard, EmptyState, PageHeader, Table, Modal, Checkbox } from '../components/ui';
 import { useUniverseStocks, useBacktestResults, useBacktestDetail, useRunBacktest, useOhlcv, useIndicators } from '../hooks/useApi';
 import { useAppStore } from '../store/appStore';
 import LightweightCandleChart from '../components/LightweightCandleChart';
@@ -26,6 +26,7 @@ export default function Backtest() {
   // ── Table filters ──
   const [btSearch, setBtSearch] = useState('');
   const [btModelFilter, setBtModelFilter] = useState('');
+  const [showZeroTrades, setShowZeroTrades] = useState(false);
 
   // ── Detail modal ──
   const [btDetailId, setBtDetailId] = useState<number | null>(null);
@@ -65,11 +66,21 @@ export default function Backtest() {
   const filteredBacktests = useMemo(() => {
     if (!backtests) return [];
     return (backtests as any[]).filter(bt => {
-      const matchSearch = !btSearch || (bt.symbol ?? '').toLowerCase().includes(btSearch.toLowerCase());
+      // Hide 0-trade results by default
+      if (!showZeroTrades && (bt.trades_count === 0 || bt.trades_count == null)) {
+        return false;
+      }
+
+      const searchLower = btSearch.toLowerCase();
+      const matchSearch = !btSearch || (
+        (bt.symbol ?? '').toLowerCase().includes(searchLower) ||
+        (bt.model_type ?? '').toLowerCase().includes(searchLower) ||
+        (bt.interval ?? '').toLowerCase().includes(searchLower)
+      );
       const matchModel = !btModelFilter || bt.model_type === btModelFilter;
       return matchSearch && matchModel;
     });
-  }, [backtests, btSearch, btModelFilter]);
+  }, [backtests, btSearch, btModelFilter, showZeroTrades]);
 
   // Modal chart indicators
   const btModalChartIndicators = useMemo(() => {
@@ -264,7 +275,12 @@ export default function Backtest() {
           </span>
         }
         action={
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-4">
+            <Checkbox
+              label="Show 0 trades"
+              checked={showZeroTrades}
+              onChange={setShowZeroTrades}
+            />
             <div className="relative">
               <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--text-dim)] pointer-events-none" />
               <input
@@ -320,7 +336,7 @@ export default function Backtest() {
               render: (row: any) => <Badge color={modelColorMap[row.model_type] ?? 'gray'}>{row.model_type}</Badge>,
             },
             {
-              key: 'interval', label: 'Interval',
+              key: 'interval', label: 'Interval', sortable: true,
               render: (row: any) => <span className="text-[var(--text-muted)] text-xs uppercase">{row.interval ?? '—'}</span>,
             },
             {

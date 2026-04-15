@@ -187,7 +187,16 @@ export const useDeleteRlModel = () => {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (id: number) => api.deleteRlModel(id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['rl-models'] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['rl-models'] });
+      qc.invalidateQueries({ queryKey: ['knn-models'] });
+      qc.invalidateQueries({ queryKey: ['lstm-models'] });
+      qc.invalidateQueries({ queryKey: ['ensemble-configs'] });
+    },
+    onError: (e: any) => {
+      const msg = e?.response?.data?.detail ?? 'Failed to delete RL model.';
+      console.error('[useDeleteRlModel]', msg);
+    },
   });
 };
 
@@ -298,6 +307,10 @@ export const useDeleteKnnModel = () => {
       qc.invalidateQueries({ queryKey: ['knn-models'] });
       qc.invalidateQueries({ queryKey: ['ensemble-configs'] });
     },
+    onError: (e: any) => {
+      const msg = e?.response?.data?.detail ?? 'Failed to delete KNN model.';
+      console.error('[useDeleteKnnModel]', msg);
+    },
   });
 };
 
@@ -308,6 +321,10 @@ export const useDeleteLstmModel = () => {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['lstm-models'] });
       qc.invalidateQueries({ queryKey: ['ensemble-configs'] });
+    },
+    onError: (e: any) => {
+      const msg = e?.response?.data?.detail ?? 'Failed to delete LSTM model.';
+      console.error('[useDeleteLstmModel]', msg);
     },
   });
 };
@@ -332,6 +349,18 @@ export const useDeleteEnsemble = () => {
   return useMutation({
     mutationFn: (id: number) => api.deleteEnsembleConfig(id),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['ensemble-configs'] }),
+  });
+};
+
+export const useImportModel = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (file: File) => api.importModelBundle(file),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['knn-models'] });
+      qc.invalidateQueries({ queryKey: ['lstm-models'] });
+      qc.invalidateQueries({ queryKey: ['ensemble-configs'] });
+    },
   });
 };
 
@@ -363,17 +392,62 @@ export const useRunBacktest = () => {
 };
 
 // ── Trading hooks ──
-export const usePredictions = (params?: Record<string, unknown>) =>
+export const usePredictions = (params?: Record<string, unknown>, options: any = {}) =>
   useQuery({
     queryKey: ['predictions', params],
     queryFn: () => api.getPredictions(params).then(r => r.data),
+    ...options
   });
 
 export const useRunPredictions = () => {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (params: Record<string, unknown>) => api.runPredictions(params),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['predictions'] }),
+    mutationFn: (params: Record<string, unknown>) => api.runPredictions(params).then(r => r.data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['prediction-batches'] });
+    },
+  });
+};
+
+export const usePredictionJob = (jobId: string | null) =>
+  useQuery({
+    queryKey: ['prediction-job', jobId],
+    queryFn: () => api.getPredictionJob(jobId!).then(r => r.data),
+    enabled: !!jobId,
+    refetchInterval: (query) => {
+      const data = query.state.data;
+      if (!data) return 2000;
+      if (data.status === 'completed' || data.status === 'cancelled' || data.status === 'failed') {
+        return false;
+      }
+      return 2000;
+    },
+  });
+
+export const useCancelPredictionJob = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (jobId: string) => api.cancelPredictionJob(jobId),
+    onSuccess: (_, jobId) => {
+      qc.invalidateQueries({ queryKey: ['prediction-job', jobId] });
+    },
+  });
+};
+
+export const useBatches = (interval = 'day') =>
+  useQuery({
+    queryKey: ['prediction-batches', interval],
+    queryFn: () => api.getBatches(interval).then(r => r.data),
+  });
+
+export const useDeleteBatch = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (batchId: string) => api.deleteBatch(batchId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['prediction-batches'] });
+      qc.invalidateQueries({ queryKey: ['predictions'] });
+    },
   });
 };
 
@@ -382,6 +456,13 @@ export const usePlaceOrder = () =>
 
 export const useOrders = (limit = 50) =>
   useQuery({ queryKey: ['orders', limit], queryFn: () => api.listOrders(limit).then(r => r.data) });
+
+export const useForwardLook = (params: { stock_id: number; after_date: string; interval?: string }) =>
+  useQuery({
+    queryKey: ['forward-look', params.stock_id, params.after_date, params.interval],
+    queryFn: () => api.getForwardLook(params).then(r => r.data),
+    enabled: !!params.stock_id && !!params.after_date
+  });
 
 // ── Portfolio hooks ──
 export const useHoldings = () =>

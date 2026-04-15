@@ -132,6 +132,15 @@ export const listEnsembleConfigs = () => api.get('/models/ensemble');
 export const updateEnsembleConfig = (id: number, data: { knn_weight: number; lstm_weight: number; agreement_required: boolean }) =>
   api.put(`/models/ensemble/${id}`, data);
 export const deleteEnsembleConfig = (id: number) => api.delete(`/models/ensemble/${id}`);
+export const exportModelBundle = (knnModelId: number, lstmModelId: number) =>
+  api.get('/models/export', { params: { knn_model_id: knnModelId, lstm_model_id: lstmModelId }, responseType: 'blob' });
+export const importModelBundle = (file: File) => {
+  const form = new FormData();
+  form.append('file', file);
+  return api.post<{ knn_model_id: number; lstm_model_id: number; ensemble_config_id: number; stub_rl_model_id: number }>(
+    '/models/import', form
+  );
+};
 export const listAllModels = () => api.get('/models/all');
 
 // ── Backtest ──
@@ -143,14 +152,24 @@ export const getTradePatterns = (backtestId: number, tradeIdx: number) =>
   api.get(`/backtest/${backtestId}/trades/${tradeIdx}/patterns`);
 
 // ── Trading ──
-export const getPredictions = (params?: Record<string, unknown>) =>
+export const getPredictions = (params?: { target_date?: string; batch_id?: string; interval?: string; min_confidence?: number; agreement_only?: boolean }) =>
   api.get('/trading/predictions', { params });
+export const getPredictionJob = (jobId: string) =>
+  api.get(`/trading/predictions/jobs/${jobId}`);
+export const cancelPredictionJob = (jobId: string) =>
+  api.delete(`/trading/predictions/jobs/${jobId}`);
+export const getBatches = (interval: string = 'day') =>
+  api.get('/trading/batches', { params: { interval } });
+export const deleteBatch = (batchId: string) =>
+  api.delete(`/trading/batches/${batchId}`);
 export const runPredictions = (params: Record<string, unknown>) =>
   api.post('/trading/run-predictions', params);
 export const placeOrder = (params: Record<string, unknown>) =>
   api.post('/trading/order', params);
 export const listOrders = (limit?: number) =>
   api.get('/trading/orders', { params: { limit } });
+export const getForwardLook = (params: { stock_id: number; after_date: string; interval?: string }) =>
+  api.get('/trading/predictions/forward-look', { params });
 
 // ── Portfolio ──
 export const getHoldings = () => api.get('/portfolio/holdings');
@@ -230,3 +249,20 @@ export const getPipelineStatus = (jobId: string) =>
 
 export const terminatePipeline = (jobId: string, purge = false) =>
   api.delete<PipelineTerminateResult>(`/pipeline/${jobId}`, { params: { purge } });
+
+// ── Training (CT Pipeline) ────────────────────────────────────────────────────
+
+export interface RetrainStatus {
+  last_retrain_at: string | null;
+  days_since_retrain: number | null;
+  needs_retrain: boolean;
+}
+
+export const getRetrainStatus = () =>
+  api.get<RetrainStatus>('/training/retrain-status');
+
+export const triggerAutoRetrain = (lookbackYears = 2) =>
+  api.post<{ message: string; lookback_years: number }>(
+    '/training/auto-retrain',
+    { lookback_years: lookbackYears },
+  );

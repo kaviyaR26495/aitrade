@@ -20,87 +20,7 @@ from app.core import zerodha as _zerodha
 
 router = APIRouter()
 
-_NSE_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Accept": "application/json, text/plain, */*",
-    "Referer": "https://www.nseindia.com/",
-}
-
-_NSE_PRESET_ENDPOINTS: dict[str, tuple[str, str | None]] = {
-    "nifty_50": ("index", "NIFTY 50"),
-    "nifty_100": ("index", "NIFTY 100"),
-    "nifty_500": ("index", "NIFTY 500"),
-    "nifty_bank": ("index", "NIFTY BANK"),
-    "nifty_it": ("index", "NIFTY IT"),
-    "nifty_pharma": ("index", "NIFTY PHARMA"),
-    "nifty_auto": ("index", "NIFTY AUTO"),
-    "nifty_fmcg": ("index", "NIFTY FMCG"),
-    "nifty_metal": ("index", "NIFTY METAL"),
-    "nifty_psu_bank": ("index", "NIFTY PSU BANK"),
-    "nifty_financial": ("index", "NIFTY FINANCIAL SERVICES"),
-    "nifty_realty": ("index", "NIFTY REALTY"),
-    "nifty_energy": ("index", "NIFTY ENERGY"),
-    "nifty_midcap50": ("index", "NIFTY MIDCAP 50"),
-    "nse_etf": ("etf", None),
-}
-
-_NSE_PRESET_CACHE: dict[str, tuple[float, set[str]]] = {}
-_NSE_PRESET_CACHE_TTL = 15 * 60.0
-
-
-def _normalize_symbol(symbol: str | None) -> str | None:
-    if not symbol:
-        return None
-    return symbol.strip().upper() or None
-
-
-def _fetch_nse_preset_symbols(category: str) -> set[str]:
-    cached = _NSE_PRESET_CACHE.get(category)
-    now = _time.monotonic()
-    if cached and (now - cached[0]) < _NSE_PRESET_CACHE_TTL:
-        return set(cached[1])
-
-    endpoint = _NSE_PRESET_ENDPOINTS.get(category)
-    if not endpoint:
-        raise HTTPException(status_code=400, detail=f"Unsupported universe category: {category}")
-
-    kind, index_name = endpoint
-    session = requests.Session()
-    session.headers.update(_NSE_HEADERS)
-
-    try:
-        if kind == "index":
-            response = session.get(
-                "https://www.nseindia.com/api/equity-stockIndices",
-                params={"index": index_name},
-                timeout=20,
-            )
-            response.raise_for_status()
-            payload = response.json()
-            symbols = {
-                normalized
-                for item in payload.get("data", [])
-                if (normalized := _normalize_symbol(item.get("symbol")))
-                and normalized != _normalize_symbol(index_name)
-            }
-        else:
-            response = session.get("https://www.nseindia.com/api/etf", timeout=20)
-            response.raise_for_status()
-            payload = response.json()
-            symbols = {
-                normalized
-                for item in payload.get("data", [])
-                if (normalized := _normalize_symbol(item.get("symbol")))
-            }
-    except requests.RequestException as exc:
-        raise HTTPException(
-            status_code=503,
-            detail=f"Failed to fetch NSE universe for {category}: {exc}",
-        )
-
-    _NSE_PRESET_CACHE[category] = (now, symbols)
-    return set(symbols)
+from app.core.data_service import _fetch_nse_preset_symbols
 
 
 # ── Schemas ────────────────────────────────────────────────────────────
@@ -312,14 +232,7 @@ async def get_stock_features(
 # ── Stock Universe ─────────────────────────────────────────────────────
 
 
-class UniverseConfig(BaseModel):
-    """Stock universe configuration."""
-    category: str = "nifty_50"
-    # nifty_50 | nifty_100 | nifty_500
-    # nifty_bank | nifty_it | nifty_pharma | nifty_auto | nifty_fmcg
-    # nifty_metal | nifty_psu_bank | nifty_financial | nifty_realty | nifty_energy
-    # nifty_midcap50 | nse_etf | custom
-    custom_symbols: list[str] = []  # extra symbols added by user
+from app.core.data_service import UniverseConfig, resolve_universe_stocks, get_universe_stocks
 
 
 class PresetSymbolsOut(BaseModel):
@@ -349,11 +262,11 @@ async def get_universe(db: AsyncSession = Depends(get_db)):
         cfg = UniverseConfig()
 
     # Resolve count
-    count = await _resolve_universe_count(db, cfg)
+    stocks = await resolve_universe_stocks(db, cfg)
     return UniverseOut(
         category=cfg.category,
         custom_symbols=cfg.custom_symbols,
-        resolved_count=count,
+        resolved_count=len(stocks),
     )
 
 
@@ -377,17 +290,14 @@ async def set_universe(
     import json
     await crud.set_setting(db, "stock_universe", json.dumps(cfg.model_dump()))
 
-    # NEW: Ensure all custom symbols are actually in the local DB.  If missing,
-    # fetch the full Zerodha instrument list and import them automatically.
-    # Eliminates the "Saved in Selector, but missing in Model Studio" desync.
     if cfg.custom_symbols:
         await _ensure_custom_stocks_imported(db, cfg.custom_symbols)
 
-    count = await _resolve_universe_count(db, cfg)
+    stocks = await resolve_universe_stocks(db, cfg)
     return UniverseOut(
         category=cfg.category,
         custom_symbols=cfg.custom_symbols,
-        resolved_count=count,
+        resolved_count=len(stocks),
     )
 
 
@@ -440,52 +350,9 @@ async def _ensure_custom_stocks_imported(db: AsyncSession, symbols: list[str]) -
 @router.get("/stocks/universe", response_model=list[StockOut])
 async def list_universe_stocks(db: AsyncSession = Depends(get_db)):
     """List stocks filtered by the active universe."""
-    import json
-    raw = await crud.get_setting(db, "stock_universe")
-    if raw:
-        try:
-            cfg = UniverseConfig(**json.loads(raw))
-        except Exception:
-            cfg = UniverseConfig()
-    else:
-        cfg = UniverseConfig()
-
-    return await _resolve_universe_stocks(db, cfg)
+    return await get_universe_stocks(db)
 
 
-async def _get_universe_symbols(cfg: UniverseConfig) -> set[str]:
-    """Return the set of symbols for the universe."""
-    if cfg.category == "custom":
-        base = {s.upper() for s in cfg.custom_symbols if s.strip()}
-    else:
-        base = _fetch_nse_preset_symbols(cfg.category)
-
-    if cfg.custom_symbols:
-        base.update(s.upper() for s in cfg.custom_symbols if s.strip())
-
-    return base
-
-
-async def _resolve_universe_stocks(
-    db: AsyncSession, cfg: UniverseConfig
-) -> list:
-    from app.db.models import Stock
-    symbols = await _get_universe_symbols(cfg)
-    if not symbols:
-        return []
-
-    from sqlalchemy import select as sa_select
-    result = await db.execute(
-        sa_select(Stock)
-        .where(Stock.is_active == True, Stock.symbol.in_(symbols))
-        .order_by(Stock.symbol)
-    )
-    return list(result.scalars().all())
-
-
-async def _resolve_universe_count(db: AsyncSession, cfg: UniverseConfig) -> int:
-    stocks = await _resolve_universe_stocks(db, cfg)
-    return len(stocks)
 
 
 # ── Zerodha Instruments ────────────────────────────────────────────────

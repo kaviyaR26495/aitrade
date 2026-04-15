@@ -312,9 +312,10 @@ def compute_quality_scores(df: pd.DataFrame) -> pd.DataFrame:
         score[df["is_transition"]] -= 0.2
 
     # ── Extreme outlier: daily return > 3σ from 50-day rolling mean ──
-    rolling_mean = daily_return.rolling(50, min_periods=10).mean()
-    rolling_std = daily_return.rolling(50, min_periods=10).std()
-    outlier = daily_return > (rolling_mean + 3 * rolling_std)
+    # Shift by 1 so the anomaly itself is excluded from its own baseline.
+    historical_mean = daily_return.shift(1).rolling(50, min_periods=10).mean()
+    historical_std = daily_return.shift(1).rolling(50, min_periods=10).std()
+    outlier = daily_return > (historical_mean + 3 * historical_std)
     score[outlier] -= 0.1
 
     df["quality_score"] = score.clip(0.0, 1.0)

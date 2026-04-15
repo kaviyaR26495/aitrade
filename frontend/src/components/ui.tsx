@@ -1,4 +1,5 @@
 import { type ReactNode, type HTMLAttributes, useEffect, useCallback, useRef, useState, useMemo } from 'react';
+import { createPortal } from 'react-dom';
 
 /* ═══════════════════════════════════════════════════════════
    CARD — Primary content container
@@ -478,11 +479,14 @@ export function Checkbox({ checked, onChange, label, description, className = ''
 export interface TableColumn<T = any> {
   key: string;
   label: string;
+  tooltip?: string;
+  tooltipSide?: 'top' | 'right' | 'bottom' | 'left';
   align?: 'left' | 'center' | 'right';
   width?: string;
   render?: (row: T, index: number) => ReactNode;
   mono?: boolean;
   sortable?: boolean;
+  stopPropagation?: boolean;
 }
 
 interface TableProps<T = any> {
@@ -547,7 +551,11 @@ export function Table<T extends Record<string, any>>({ columns, data, onRowClick
                 style={col.width ? { width: col.width } : undefined}
               >
                 <span className="inline-flex items-center gap-0.5">
-                  {col.label}
+                  {col.tooltip ? (
+                    <Tooltip content={col.tooltip} side={col.tooltipSide || 'bottom'}>{col.label}</Tooltip>
+                  ) : (
+                    col.label
+                  )}
                   {col.sortable && <SortIcon colKey={col.key} />}
                 </span>
               </th>
@@ -569,6 +577,7 @@ export function Table<T extends Record<string, any>>({ columns, data, onRowClick
                 <td
                   key={col.key}
                   className={`${cellPad} ${alignClass(col.align)} ${col.mono ? 'font-[var(--font-mono)] tabular-nums' : ''}`}
+                  onClick={col.stopPropagation ? (e) => e.stopPropagation() : undefined}
                 >
                   {col.render ? col.render(row, i) : row[col.key]}
                 </td>
@@ -792,31 +801,73 @@ interface TooltipProps {
 
 export function Tooltip({ content, side = 'top', children }: TooltipProps) {
   const [visible, setVisible] = useState(false);
+  const [mounted, setMounted] = useState(false);
+  const [coords, setCoords] = useState<{ top: number; left: number }>({ top: 0, left: 0 });
+  const anchorRef = useRef<HTMLSpanElement>(null);
 
-  const pos = {
-    top:    'bottom-full left-1/2 -translate-x-1/2 mb-2',
-    bottom: 'top-full left-1/2 -translate-x-1/2 mt-2',
-    left:   'right-full top-1/2 -translate-y-1/2 mr-2',
-    right:  'left-full top-1/2 -translate-y-1/2 ml-2',
-  };
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  useEffect(() => {
+    if (!visible || !anchorRef.current) return;
+
+    const updatePosition = () => {
+      if (!anchorRef.current) return;
+      const rect = anchorRef.current.getBoundingClientRect();
+      const gap = 10;
+      const viewportPad = 8;
+
+      let top = rect.top;
+      let left = rect.left + rect.width / 2;
+
+      if (side === 'top') {
+        top = rect.top - gap;
+      } else if (side === 'bottom') {
+        top = rect.bottom + gap;
+      } else if (side === 'left') {
+        top = rect.top + rect.height / 2;
+        left = rect.left - gap;
+      } else {
+        top = rect.top + rect.height / 2;
+        left = rect.right + gap;
+      }
+
+      top = Math.max(viewportPad, Math.min(window.innerHeight - viewportPad, top));
+      left = Math.max(viewportPad, Math.min(window.innerWidth - viewportPad, left));
+      setCoords({ top, left });
+    };
+
+    updatePosition();
+    window.addEventListener('scroll', updatePosition, true);
+    window.addEventListener('resize', updatePosition);
+
+    return () => {
+      window.removeEventListener('scroll', updatePosition, true);
+      window.removeEventListener('resize', updatePosition);
+    };
+  }, [visible, side]);
 
   return (
     <span
-      className="relative inline-flex"
+      ref={anchorRef}
+      className="inline-flex"
       onMouseEnter={() => setVisible(true)}
       onMouseLeave={() => setVisible(false)}
     >
       {children}
-      {visible && (
-        <span className={`
-          absolute ${pos[side]} px-2.5 py-1.5 rounded-[var(--radius-sm)]
-          bg-[var(--bg-elevated)] border border-[var(--border)]
-          text-xs text-[var(--text)] whitespace-nowrap z-50
-          shadow-[var(--shadow-lg)] pointer-events-none
-          animate-[fade-in_0.1s_ease-out]
-        `}>
+      {visible && mounted && createPortal(
+        <span
+          className="fixed px-2.5 py-1.5 rounded-[var(--radius-sm)] bg-[var(--bg-elevated)] border border-[var(--border)] text-xs text-[var(--text)] whitespace-nowrap z-[9999] shadow-[var(--shadow-lg)] pointer-events-none animate-[fade-in_0.1s_ease-out]"
+          style={{
+            top: coords.top,
+            left: coords.left,
+            transform: side === 'left' || side === 'right' ? 'translateY(-50%)' : 'translateX(-50%)',
+          }}
+        >
           {content}
-        </span>
+        </span>,
+        document.body,
       )}
     </span>
   );

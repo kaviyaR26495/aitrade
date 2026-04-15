@@ -173,6 +173,10 @@ interface AppState {
   setIsZerodhaAuthenticated: (v: boolean) => void;
   isAuthRefreshing: boolean;
 
+  // Retrain alert — shown when models are stale (> 30 days since last CT run)
+  retrainAlert: boolean;
+  setRetrainAlert: (v: boolean) => void;
+
   // Initialization
   isInitialized: boolean;
   initialize: () => Promise<void>;
@@ -272,6 +276,9 @@ export const useAppStore = create<AppState>((set) => ({
   setIsZerodhaAuthenticated: (isZerodhaAuthenticated) => set({ isZerodhaAuthenticated }),
   isAuthRefreshing: false,
 
+  retrainAlert: false,
+  setRetrainAlert: (retrainAlert) => set({ retrainAlert }),
+
   isInitialized: true,
   error: null,
   initialize: async () => {
@@ -288,6 +295,17 @@ export const useAppStore = create<AppState>((set) => ({
       const authRes = await getAuthStatus();
       const authenticated = authRes.data.authenticated;
       set({ isZerodhaAuthenticated: authenticated });
+
+      // 3. Check if models are stale and a retrain is recommended
+      try {
+        const { getRetrainStatus } = await import('../services/api');
+        const retrainRes = await getRetrainStatus();
+        if (retrainRes.data.needs_retrain) {
+          set({ retrainAlert: true });
+        }
+      } catch {
+        // non-critical — ignore
+      }
 
       if (!authenticated) {
         console.log('Zerodha session not active. Application will continue without live broker features.');

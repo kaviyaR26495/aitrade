@@ -95,32 +95,31 @@ class FaissKNNClassifier:
         return distances, indices
 
     def predict(self, X: np.ndarray) -> np.ndarray:
-        distances, indices = self._query(X)
-        n = X.shape[0]
-        preds = np.empty(n, dtype=self._train_y.dtype)
-        for i in range(n):
-            neighbor_labels = self._train_y[indices[i]]
-            weights = 1.0 / (distances[i] + 1e-8)
-            class_scores: dict = {c: 0.0 for c in self._classes}
-            for label, w in zip(neighbor_labels, weights):
-                class_scores[label] += w
-            preds[i] = max(class_scores, key=class_scores.__getitem__)
-        return preds
+        probs = self.predict_proba(X)
+        # Select class with max score (weighted probability)
+        best_class_indices = np.argmax(probs, axis=1)
+        return self._classes[best_class_indices]
 
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
         distances, indices = self._query(X)
         n = X.shape[0]
         n_classes = len(self._classes)
-        class_idx = {c: j for j, c in enumerate(self._classes)}
+        
+        # Weights are inversely proportional to distance
+        weights = 1.0 / (distances + 1e-8)
+        # Shape: (n, k)
+        neighbor_labels = self._train_y[indices]
+        
+        # Vectorized weighted class score calculation
         probs = np.zeros((n, n_classes), dtype=np.float32)
-        for i in range(n):
-            neighbor_labels = self._train_y[indices[i]]
-            weights = 1.0 / (distances[i] + 1e-8)
-            for label, w in zip(neighbor_labels, weights):
-                probs[i, class_idx[label]] += w
-            total = probs[i].sum()
-            if total > 0:
-                probs[i] /= total
+        for idx, cls in enumerate(self._classes):
+            mask = (neighbor_labels == cls)
+            probs[:, idx] = (weights * mask).sum(axis=1)
+            
+        # Normalize to sum to 1.0
+        row_sums = probs.sum(axis=1, keepdims=True)
+        probs = np.divide(probs, row_sums, out=probs, where=row_sums > 0)
+        
         return probs
 
     @property

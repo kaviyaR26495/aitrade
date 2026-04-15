@@ -6,6 +6,7 @@ observation / offline-hybrid architecture used by this project.
 """
 from __future__ import annotations
 
+import copy
 from typing import Any
 
 
@@ -134,7 +135,7 @@ def get_default_hyperparams(name: str) -> dict:
     config = ALGORITHM_CONFIGS.get(name)
     if not config:
         raise ValueError(f"Unknown algorithm: {name}")
-    return config["defaults"].copy()
+    return copy.deepcopy(config["defaults"])
 
 
 def get_obs_mode(name: str) -> str:

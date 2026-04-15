@@ -33,6 +33,7 @@ def extract_patterns(
     close_prices: np.ndarray,
     dates: np.ndarray | list,
     regime_ids: np.ndarray | None = None,
+    atr_pct_values: np.ndarray | None = None,
     seq_len: int = 15,
     obs_mode: str = "flat",
     reward_function: str = "risk_adjusted_pnl",
@@ -159,15 +160,20 @@ def extract_patterns(
         # Regime at the action point
         rid = int(regime_ids[data_idx]) if regime_ids is not None and data_idx < len(regime_ids) else None
 
-        # ATR % at capture: rolling 14-bar mean of |close[t] - close[t-1]| / close[t]
-        # Using raw close_prices so the value is interpretable at inference time.
-        atr_window_start = max(1, data_idx - 13)
-        atr_closes = close_prices[atr_window_start: data_idx + 1]
-        if len(atr_closes) >= 2 and float(atr_closes[-1]) > 0:
-            daily_ranges = np.abs(np.diff(atr_closes.astype(np.float64))) / atr_closes[1:].astype(np.float64)
-            atr_pct = float(np.mean(daily_ranges) * 100)
+        # ATR % at capture: use pre-computed atr_pct (atr/close) when available,
+        # multiplied by 100 to express as a percentage.  Falls back to a rolling
+        # approximation from raw close prices if atr_pct_values was not passed.
+        if atr_pct_values is not None and data_idx < len(atr_pct_values):
+            raw = atr_pct_values[data_idx]
+            atr_pct = float(raw) * 100 if not np.isnan(raw) else None
         else:
-            atr_pct = None
+            atr_window_start = max(1, data_idx - 13)
+            atr_closes = close_prices[atr_window_start: data_idx + 1]
+            if len(atr_closes) >= 2 and float(atr_closes[-1]) > 0:
+                daily_ranges = np.abs(np.diff(atr_closes.astype(np.float64))) / atr_closes[1:].astype(np.float64)
+                atr_pct = float(np.mean(daily_ranges) * 100)
+            else:
+                atr_pct = None
 
         pattern = {
             "date": dates[data_idx] if data_idx < len(dates) else None,

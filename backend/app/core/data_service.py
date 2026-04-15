@@ -10,12 +10,98 @@ from datetime import date
 import pandas as pd
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from pydantic import BaseModel
 from app.core.indicators import compute_all_indicators, get_indicator_columns, compute_weekly_indicators, WEEKLY_INDICATOR_COLS
 from app.core.normalizer import normalize_dataframe, get_feature_columns, prepare_model_input
 from app.core.data_pipeline import ohlcv_to_dataframe, sync_stock_ohlcv, sync_all_stocks
 from app.db import crud
+import json
+import requests
+import time as _time
+from fastapi import HTTPException
 
 logger = logging.getLogger(__name__)
+
+_NSE_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept": "application/json, text/plain, */*",
+    "Referer": "https://www.nseindia.com/",
+}
+
+_NSE_PRESET_ENDPOINTS: dict[str, tuple[str, str | None]] = {
+    "nifty_50": ("index", "NIFTY 50"),
+    "nifty_100": ("index", "NIFTY 100"),
+    "nifty_500": ("index", "NIFTY 500"),
+    "nifty_bank": ("index", "NIFTY BANK"),
+    "nifty_it": ("index", "NIFTY IT"),
+    "nifty_pharma": ("index", "NIFTY PHARMA"),
+    "nifty_auto": ("index", "NIFTY AUTO"),
+    "nifty_fmcg": ("index", "NIFTY FMCG"),
+    "nifty_metal": ("index", "NIFTY METAL"),
+    "nifty_psu_bank": ("index", "NIFTY PSU BANK"),
+    "nifty_financial": ("index", "NIFTY FINANCIAL SERVICES"),
+    "nifty_realty": ("index", "NIFTY REALTY"),
+    "nifty_energy": ("index", "NIFTY ENERGY"),
+    "nifty_midcap50": ("index", "NIFTY MIDCAP 50"),
+    "nse_etf": ("etf", None),
+}
+
+_NSE_PRESET_CACHE: dict[str, tuple[float, set[str]]] = {}
+_NSE_PRESET_CACHE_TTL = 15 * 60.0
+
+
+def _normalize_symbol(symbol: str | None) -> str | None:
+    if not symbol:
+        return None
+    return symbol.strip().upper() or None
+
+
+def _fetch_nse_preset_symbols(category: str) -> set[str]:
+    cached = _NSE_PRESET_CACHE.get(category)
+    now = _time.monotonic()
+    if cached and (now - cached[0]) < _NSE_PRESET_CACHE_TTL:
+        return set(cached[1])
+
+    endpoint = _NSE_PRESET_ENDPOINTS.get(category)
+    if not endpoint:
+        raise HTTPException(status_code=400, detail=f"Unsupported universe category: {category}")
+
+    kind, index_name = endpoint
+    session = requests.Session()
+    session.headers.update(_NSE_HEADERS)
+
+    try:
+        if kind == "index":
+            response = session.get(
+                "https://www.nseindia.com/api/equity-stockIndices",
+                params={"index": index_name},
+                timeout=20,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            symbols = {
+                normalized
+                for item in payload.get("data", [])
+                if (normalized := _normalize_symbol(item.get("symbol")))
+                and normalized != _normalize_symbol(index_name)
+            }
+        else:
+            response = session.get("https://www.nseindia.com/api/etf", timeout=20)
+            response.raise_for_status()
+            payload = response.json()
+            symbols = {
+                normalized
+                for item in payload.get("data", [])
+                if (normalized := _normalize_symbol(item.get("symbol")))
+            }
+
+        _NSE_PRESET_CACHE[category] = (now, set(symbols))
+        return symbols
+    except Exception as e:
+        logger.error(f"Failed to fetch NSE symbols for {category}: {e}")
+        # Return empty on failure to avoid crashing the caller
+        return set()
 
 # Mapping from indicator DataFrame columns to DB model columns
 INDICATOR_COL_MAP = {
@@ -45,6 +131,22 @@ INDICATOR_COL_MAP = {
     "tgrb_bottom": "tgrb_bottom",
     "ema_20": "ema_20",
     "atr": "atr",
+    # New stationary ML features
+    "dist_sma_50": "dist_sma_50",
+    "dist_sma_200": "dist_sma_200",
+    "roc_1": "roc_1",
+    "roc_5": "roc_5",
+    "roc_20": "roc_20",
+    "atr_pct": "atr_pct",
+    "realized_vol_20": "realized_vol_20",
+    "bb_pctb": "bb_pctb",
+    "bb_width": "bb_width",
+    "cmf_20": "cmf_20",
+    "dist_vwap_5": "dist_vwap_5",
+    "macd_hist_norm": "macd_hist_norm",
+    "adx_norm": "adx_norm",
+    "adx_pos_norm": "adx_pos_norm",
+    "adx_neg_norm": "adx_neg_norm",
 }
 
 
@@ -294,6 +396,69 @@ async def get_stock_features(
         df = normalize_dataframe(df)
 
     return df
+
+
+async def prepare_model_input(
+    db: AsyncSession,
+    stock_id: int,
+    interval: str = "day",
+    seq_len: int = 15,
+) -> tuple[pd.DataFrame | None, list[str]]:
+    """Fetch, compute, merge, and normalize data for a single stock."""
+    df = await get_stock_features(db, stock_id, interval, normalize=True)
+    if df.empty:
+        return None, []
+    
+    feature_cols = get_feature_columns()
+    return df, feature_cols
+
+
+# ── Universe Resolution ───────────────────────────────────────────────────
+
+class UniverseConfig(BaseModel):
+    """Stock universe configuration."""
+    category: str = "nifty_50"
+    custom_symbols: list[str] = []
+
+
+async def get_universe_stocks(db: AsyncSession) -> list:
+    """Read the stock_universe setting and resolve into a list of Stock objects."""
+    raw = await crud.get_setting(db, "stock_universe")
+    if raw:
+        try:
+            cfg = UniverseConfig(**json.loads(raw))
+        except Exception:
+            cfg = UniverseConfig()
+    else:
+        cfg = UniverseConfig()
+        
+    return await resolve_universe_stocks(db, cfg)
+
+
+async def resolve_universe_stocks(db: AsyncSession, cfg: UniverseConfig) -> list:
+    """Resolve a UniverseConfig into a list of Stock objects from the DB."""
+    from app.db.models import Stock
+    from sqlalchemy import select as sa_select
+    
+    # 1. Get symbols
+    if cfg.category == "custom":
+        symbols = {s.upper() for s in cfg.custom_symbols if s.strip()}
+    else:
+        symbols = _fetch_nse_preset_symbols(cfg.category)
+
+    if cfg.custom_symbols:
+        symbols.update(s.upper() for s in cfg.custom_symbols if s.strip())
+
+    if not symbols:
+        return []
+
+    # 2. Query DB
+    result = await db.execute(
+        sa_select(Stock)
+        .where(Stock.is_active == True, Stock.symbol.in_(symbols))
+        .order_by(Stock.symbol)
+    )
+    return list(result.scalars().all())
 
 
 async def get_model_ready_data(

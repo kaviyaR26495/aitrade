@@ -64,10 +64,13 @@ class ModelStatus(str, enum.Enum):
 
 class OrderStatus(str, enum.Enum):
     pending = "pending"
-    placed = "placed"
-    completed = "completed"
+    placed = "placed"        # legacy alias — prefer submitted
+    completed = "completed"  # legacy alias — prefer filled
     cancelled = "cancelled"
     rejected = "rejected"
+    submitted = "submitted"   # sent to broker, awaiting confirmation
+    partial_fill = "partial_fill"  # partially filled
+    filled = "filled"         # fully filled & confirmed
 
 
 # ── Stocks & Calendar ──────────────────────────────────────────────────
@@ -113,10 +116,27 @@ class StockOHLCV(Base):
     volume: Mapped[float] = mapped_column(Float, nullable=False)
     interval: Mapped[IntervalEnum] = mapped_column(Enum(IntervalEnum), nullable=False)
 
+
+class IndexOHLCV(Base):
+    """OHLCV cache for market indices (NIFTY 50, BANK NIFTY, etc.).
+
+    Separate from StockOHLCV: indices have no stock_id FK and are identified
+    only by their symbol string (e.g. "NIFTY 50").
+    """
+    __tablename__ = "index_ohlcv"
     __table_args__ = (
-        UniqueConstraint("stock_id", "date", "interval", name="uq_ohlcv"),
-        Index("ix_ohlcv_stock_date", "stock_id", "date", "interval"),
+        UniqueConstraint("symbol", "date", "interval", name="uq_index_ohlcv"),
     )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(20), nullable=False)
+    date: Mapped[date] = mapped_column(Date, nullable=False)
+    interval: Mapped[str] = mapped_column(String(10), nullable=False, default="day")
+    open: Mapped[float | None] = mapped_column(Float, nullable=True)
+    high: Mapped[float | None] = mapped_column(Float, nullable=True)
+    low: Mapped[float | None] = mapped_column(Float, nullable=True)
+    close: Mapped[float | None] = mapped_column(Float, nullable=True)
+    volume: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 # ── Indicators Cache ───────────────────────────────────────────────────
@@ -169,6 +189,29 @@ class StockIndicator(Base):
     tgrb_bottom: Mapped[float | None] = mapped_column(Float, nullable=True)
     # ATR (for regime classifier)
     atr: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # ── New stationary ML features (additive) ─────────────────────────────
+    # Stationary trend distance
+    dist_sma_50: Mapped[float | None] = mapped_column(Float, nullable=True)
+    dist_sma_200: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Rate of change (momentum)
+    roc_1: Mapped[float | None] = mapped_column(Float, nullable=True)
+    roc_5: Mapped[float | None] = mapped_column(Float, nullable=True)
+    roc_20: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Volatility regime
+    atr_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    realized_vol_20: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Bollinger Band position & width
+    bb_pctb: Mapped[float | None] = mapped_column(Float, nullable=True)
+    bb_width: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Institutional flow & liquidity
+    cmf_20: Mapped[float | None] = mapped_column(Float, nullable=True)
+    dist_vwap_5: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Normalised signals
+    macd_hist_norm: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # ADX normalised to 0-1 (raw adx/adx_pos/adx_neg kept for regime_classifier)
+    adx_norm: Mapped[float | None] = mapped_column(Float, nullable=True)
+    adx_pos_norm: Mapped[float | None] = mapped_column(Float, nullable=True)
+    adx_neg_norm: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
 # ── Regime Classification ──────────────────────────────────────────────
@@ -353,11 +396,15 @@ class LSTMPrediction(Base):
 class EnsemblePrediction(Base):
     __tablename__ = "ensemble_predictions"
     __table_args__ = (
-        UniqueConstraint("ensemble_config_id", "stock_id", "date", "interval", name="uq_ensemble_pred"),
+        UniqueConstraint("batch_id", "stock_id", name="uq_ensemble_batch_stock"),
+        Index("ix_ensemble_pred_batch", "batch_id"),
         Index("ix_ensemble_pred_date_conf", "date", "interval", "confidence"),
+        Index("ix_ensemble_pred_run_at", "run_at"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    batch_id: Mapped[str] = mapped_column(String(50), nullable=False)
+    run_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist)
     ensemble_config_id: Mapped[int] = mapped_column(Integer, ForeignKey("ensemble_configs.id"), nullable=False)
     stock_id: Mapped[int] = mapped_column(Integer, ForeignKey("stocks_list.id"), nullable=False)
     date: Mapped[date] = mapped_column(Date, nullable=False)
@@ -441,6 +488,9 @@ class TradeOrder(Base):
     zerodha_order_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
     tag: Mapped[str | None] = mapped_column(String(20), nullable=True)
     timestamp: Mapped[datetime] = mapped_column(DateTime, default=now_ist)
+    filled_quantity: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    avg_fill_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    last_reconciled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 # ── App Settings ───────────────────────────────────────────────────────
@@ -510,3 +560,19 @@ class CorporateActionBlock(Base):
     blocked_until: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     reason: Mapped[str | None] = mapped_column(String(200), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist)
+
+
+# ── Prediction Jobs (Async Tracking) ──────────────────────────────────
+
+class PredictionJob(Base):
+    __tablename__ = "prediction_jobs"
+
+    id: Mapped[str] = mapped_column(String(50), primary_key=True)  # UUID
+    status: Mapped[str] = mapped_column(String(20), default="running")
+    progress: Mapped[int] = mapped_column(Integer, default=0)
+    total_stocks: Mapped[int] = mapped_column(Integer, default=0)
+    completed_stocks: Mapped[int] = mapped_column(Integer, default=0)
+    batch_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist, onupdate=now_ist)

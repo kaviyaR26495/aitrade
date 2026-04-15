@@ -3,7 +3,7 @@
 Ported from pytrade's df_creator.py — computes all indicators on an OHLCV
 DataFrame and returns it with new columns appended.
 
-Required libraries: ta, pandas_ta, numpy
+Required libraries: ta, numpy
 """
 from __future__ import annotations
 
@@ -12,26 +12,38 @@ import pandas as pd
 import ta
 
 
-# Which indicator groups to compute (matches pytrade obs_col keys)
+# Which indicator groups to compute (matches pytrade obs_col keys).
+# Legacy groups are kept for UI chart overlays (sma_*, bb_*, etc.).
+# New stationary ML groups (dist_sma … adx_norm) are appended additively.
 ALL_INDICATOR_GROUPS = [
     "TGRB", "rsi", "srsi", "kama", "vwkama",
     "obv", "bbl", "macd", "adx", "sma", "atr",
+    # ── Stationary ML features (additive, order matters for dependencies) ──
+    "dist_sma",       # needs sma_50 / sma_200 (computed internally)
+    "roc",            # self-contained
+    "atr_pct",        # depends on: atr
+    "bb_norm",        # self-contained
+    "macd_hist_norm", # depends on: macd
+    "cmf",            # self-contained
+    "vwap_dist",      # self-contained
+    "adx_norm",       # depends on: adx (raw 0-100 kept for regime_classifier)
+    "time_cyclical",  # sin/cos encoding of dow, month, day — always appended
 ]
 
-# Reduced set of indicators computed on weekly bars and merged into daily rows.
-# Chosen for maximum signal on longer timeframes; intentionally narrower than
-# ALL_INDICATOR_GROUPS to avoid feature bloat.
-WEEKLY_INDICATOR_GROUPS = ["rsi", "macd", "sma", "adx"]
+# Stationary weekly indicators.  Non-stationary weekly_sma_50 is dropped;
+# macd_hist_norm and adx_norm replace their raw equivalents.
+WEEKLY_INDICATOR_GROUPS = ["rsi", "macd", "roc", "adx", "macd_hist_norm", "adx_norm"]
 
-# Final column names that appear in the daily DataFrame after the weekly merge.
+# Final column names present in the daily DataFrame after the weekly merge.
 WEEKLY_INDICATOR_COLS = [
     "weekly_rsi",
-    "weekly_macd", "weekly_macd_signal", "weekly_macd_hist",
-    "weekly_sma_50",
-    "weekly_adx", "weekly_adx_pos", "weekly_adx_neg",
+    "weekly_macd_hist_norm",
+    "weekly_roc_1",
+    "weekly_adx_norm", "weekly_adx_pos_norm", "weekly_adx_neg_norm",
 ]
 
-WARMUP_ROWS = 30  # drop first N rows after indicator calc
+# SMA_200 requires 200-bar warmup; drop those rows from the live fallback path.
+WARMUP_ROWS = 200
 
 
 def calc_vw_kama(df: pd.DataFrame, length: int = 10) -> pd.Series:
@@ -126,7 +138,9 @@ def compute_bollinger(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def compute_adx(df: pd.DataFrame) -> pd.DataFrame:
-    """ADX with positive/negative directional indicators."""
+    """ADX with positive/negative directional indicators (raw 0-100 scale).
+    Kept as-is so regime_classifier thresholds (adx > 25) continue to work.
+    """
     df["adx"] = ta.trend.adx(df["high"], df["low"], df["close"], window=14, fillna=True)
     df["adx_neg"] = ta.trend.adx_neg(df["high"], df["low"], df["close"], window=14, fillna=True)
     df["adx_pos"] = ta.trend.adx_pos(df["high"], df["low"], df["close"], window=14, fillna=True)
@@ -134,8 +148,102 @@ def compute_adx(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def compute_atr(df: pd.DataFrame) -> pd.DataFrame:
-    """Average True Range (14)."""
+    """Average True Range (14). Kept for internal + regime use."""
     df["atr"] = ta.volatility.average_true_range(df["high"], df["low"], df["close"], window=14, fillna=True)
+    return df
+
+
+# ── New stationary ML-ready compute functions ─────────────────────────────
+
+def compute_dist_sma(df: pd.DataFrame) -> pd.DataFrame:
+    """Percentage distance from SMA-50 and SMA-200 (stationary trend features)."""
+    sma50 = ta.trend.sma_indicator(df["close"], window=50, fillna=True)
+    sma200 = ta.trend.sma_indicator(df["close"], window=200, fillna=True)
+    df["dist_sma_50"] = ((df["close"] - sma50) / sma50.replace(0, np.nan)).fillna(0)
+    df["dist_sma_200"] = ((df["close"] - sma200) / sma200.replace(0, np.nan)).fillna(0)
+    return df
+
+
+def compute_roc(df: pd.DataFrame) -> pd.DataFrame:
+    """Rate of Change for 1, 5, and 20 bars (daily/weekly/monthly momentum)."""
+    for window in [1, 5, 20]:
+        df[f"roc_{window}"] = (
+            ta.momentum.ROCIndicator(close=df["close"], window=window, fillna=True).roc()
+        )
+    return df
+
+
+def compute_atr_pct(df: pd.DataFrame) -> pd.DataFrame:
+    """ATR as % of close + annualised realised volatility (20-day).
+    Depends on: atr group must run first.
+    """
+    if "atr" not in df.columns:
+        df = compute_atr(df)
+    close = df["close"].replace(0, np.nan)
+    df["atr_pct"] = (df["atr"] / close).fillna(0)
+    log_ret = np.log(df["close"] / df["close"].shift(1))
+    df["realized_vol_20"] = (
+        log_ret.rolling(window=20, min_periods=2).std() * np.sqrt(252)
+    ).fillna(0)
+    return df
+
+
+def compute_bb_normalized(df: pd.DataFrame) -> pd.DataFrame:
+    """Bollinger Band %B (0-1 price position) and Band Width (expansion/contraction)."""
+    bb = ta.volatility.BollingerBands(close=df["close"], window=20, window_dev=2, fillna=True)
+    df["bb_pctb"] = bb.bollinger_pband()
+    df["bb_width"] = bb.bollinger_wband()
+    return df
+
+
+def compute_macd_hist_norm(df: pd.DataFrame) -> pd.DataFrame:
+    """MACD histogram normalised by close price (stationary MACD signal).
+    Depends on: macd group must run first.
+    """
+    if "macd_hist" not in df.columns:
+        df = compute_macd(df)
+    close = df["close"].replace(0, np.nan)
+    df["macd_hist_norm"] = (df["macd_hist"] / close).fillna(0)
+    return df
+
+
+def compute_cmf(df: pd.DataFrame) -> pd.DataFrame:
+    """Chaikin Money Flow (20-day) — institutional accumulation/distribution."""
+    df["cmf_20"] = ta.volume.ChaikinMoneyFlowIndicator(
+        high=df["high"],
+        low=df["low"],
+        close=df["close"],
+        volume=df["volume"],
+        window=20,
+        fillna=True,
+    ).chaikin_money_flow()
+    return df
+
+
+def compute_vwap_dist(df: pd.DataFrame) -> pd.DataFrame:
+    """Percentage distance from rolling 5-day VWAP."""
+    typical = (df["high"] + df["low"] + df["close"]) / 3
+    tvol = typical * df["volume"]
+    rolling_vwap = (
+        tvol.rolling(window=5, min_periods=1).sum()
+        / df["volume"].rolling(window=5, min_periods=1).sum()
+    )
+    rolling_vwap = rolling_vwap.replace(0, np.nan)
+    df["dist_vwap_5"] = ((df["close"] - rolling_vwap) / rolling_vwap).fillna(0)
+    return df
+
+
+def compute_adx_norm(df: pd.DataFrame) -> pd.DataFrame:
+    """ADX normalised to 0-1 for ML models.
+    Regime classifier keeps separate raw adx > 25 thresholds — do not modify
+    the raw adx/adx_pos/adx_neg columns here.
+    Depends on: adx group must run first.
+    """
+    if "adx" not in df.columns:
+        df = compute_adx(df)
+    df["adx_norm"] = df["adx"] / 100.0
+    df["adx_pos_norm"] = df["adx_pos"] / 100.0
+    df["adx_neg_norm"] = df["adx_neg"] / 100.0
     return df
 
 
@@ -152,6 +260,15 @@ INDICATOR_FUNCS = {
     "bbl": compute_bollinger,
     "adx": compute_adx,
     "atr": compute_atr,
+    # New stationary ML features
+    "dist_sma": compute_dist_sma,
+    "roc": compute_roc,
+    "atr_pct": compute_atr_pct,
+    "bb_norm": compute_bb_normalized,
+    "macd_hist_norm": compute_macd_hist_norm,
+    "cmf": compute_cmf,
+    "vwap_dist": compute_vwap_dist,
+    "adx_norm": compute_adx_norm,
 }
 
 
@@ -173,15 +290,30 @@ def compute_all_indicators(
     if missing:
         raise ValueError(f"Missing columns: {missing}")
 
-    # Fill NaN with forward-fill then 1 (pytrade pattern)
-    df = df.ffill().fillna(1)
+    # Forward-fill mid-series gaps (e.g. holidays, stale ticks).
+    # For leading NaN on short-history / recently-listed stocks, back-fill
+    # OHLC from the first real bar — avoids the artificial close=1 artefact
+    # that inflates ROC and distance-SMA features during the IPO era.
+    # Volume is zeroed rather than back-filled (no traded volume is correct).
+    df = df.ffill()
+    for col in ("open", "high", "low", "close"):
+        df[col] = df[col].bfill()
+    df["volume"] = df["volume"].fillna(0)
 
-    # Add date features
+    # Add date features — sin/cos cyclical encoding so the network sees
+    # Monday and Friday as adjacent in circular space (not 0.0 vs 0.4),
+    # and January/December as adjacent (not 0.01 vs 0.12).
     if "date" in df.columns:
         dt = pd.to_datetime(df["date"])
-        df["dow"] = dt.dt.dayofweek / 10
-        df["month"] = dt.dt.month / 100
-        df["day"] = dt.dt.day / 100
+        dow   = dt.dt.dayofweek        # 0=Mon … 4=Fri
+        month = dt.dt.month            # 1–12
+        day   = dt.dt.day              # 1–31
+        df["dow_sin"]   = np.sin(2 * np.pi * dow / 5)
+        df["dow_cos"]   = np.cos(2 * np.pi * dow / 5)
+        df["month_sin"] = np.sin(2 * np.pi * (month - 1) / 12)
+        df["month_cos"] = np.cos(2 * np.pi * (month - 1) / 12)
+        df["day_sin"]   = np.sin(2 * np.pi * (day - 1) / 31)
+        df["day_cos"]   = np.cos(2 * np.pi * (day - 1) / 31)
 
     # Copy raw OHLCV to n-prefixed columns (for normalization later)
     df["n_open"] = df["open"]
@@ -206,12 +338,12 @@ def compute_all_indicators(
 
 def compute_weekly_indicators(weekly_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Compute a high-signal subset of indicators on a *weekly* OHLCV DataFrame
-    and rename every output column with a ``weekly_`` prefix.
+    Compute a high-signal, stationary subset of indicators on a *weekly* OHLCV
+    DataFrame and rename every output column with a ``weekly_`` prefix.
 
     Returns a DataFrame with columns:
-        date, weekly_rsi, weekly_macd, weekly_macd_signal, weekly_macd_hist,
-        weekly_sma_50, weekly_adx, weekly_adx_pos, weekly_adx_neg.
+        date, weekly_rsi, weekly_macd_hist_norm, weekly_roc_1,
+        weekly_adx_norm, weekly_adx_pos_norm, weekly_adx_neg_norm.
 
     Only ``date`` and the indicator columns are returned; raw OHLCV columns are
     dropped so the result is safe to merge into a daily DataFrame without
@@ -229,18 +361,17 @@ def compute_weekly_indicators(weekly_df: pd.DataFrame) -> pd.DataFrame:
         drop_warmup=False,
     )
 
-    # Build rename map: only keep the weekly-group output columns
-    daily_to_weekly: dict[str, str] = {}
-    if "rsi" in wdf.columns:
-        daily_to_weekly["rsi"] = "weekly_rsi"
-    for col in ["macd", "macd_signal", "macd_hist"]:
-        if col in wdf.columns:
-            daily_to_weekly[col] = f"weekly_{col}"
-    if "sma_50" in wdf.columns:
-        daily_to_weekly["sma_50"] = "weekly_sma_50"
-    for col in ["adx", "adx_pos", "adx_neg"]:
-        if col in wdf.columns:
-            daily_to_weekly[col] = f"weekly_{col}"
+    # Build rename map: stationary columns only
+    daily_to_weekly: dict[str, str] = {
+        col: f"weekly_{col}"
+        for col in [
+            "rsi",
+            "macd_hist_norm",
+            "roc_1",
+            "adx_norm", "adx_pos_norm", "adx_neg_norm",
+        ]
+        if col in wdf.columns
+    }
 
     # Rename and keep only date + weekly indicator columns
     wdf = wdf.rename(columns=daily_to_weekly)
@@ -275,5 +406,24 @@ def get_indicator_columns(groups: list[str] | None = None) -> list[str]:
         cols.extend(["adx", "adx_neg", "adx_pos"])
     if "atr" in selected:
         cols.append("atr")
+    # New stationary ML features
+    if "dist_sma" in selected:
+        cols.extend(["dist_sma_50", "dist_sma_200"])
+    if "roc" in selected:
+        cols.extend(["roc_1", "roc_5", "roc_20"])
+    if "atr_pct" in selected:
+        cols.extend(["atr_pct", "realized_vol_20"])
+    if "bb_norm" in selected:
+        cols.extend(["bb_pctb", "bb_width"])
+    if "macd_hist_norm" in selected:
+        cols.append("macd_hist_norm")
+    if "cmf" in selected:
+        cols.append("cmf_20")
+    if "vwap_dist" in selected:
+        cols.append("dist_vwap_5")
+    if "adx_norm" in selected:
+        cols.extend(["adx_norm", "adx_pos_norm", "adx_neg_norm"])
+    if "time_cyclical" in selected:
+        cols.extend(["dow_sin", "dow_cos", "month_sin", "month_cos", "day_sin", "day_cos"])
 
     return cols
