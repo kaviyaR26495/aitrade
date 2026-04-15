@@ -4,6 +4,7 @@ import { useConfig, useUpdateSetting, useUniverse, useSetUniverse, useStocks, us
 import {
   getLoginUrl,
   zerodhaCallback,
+  setManualToken,
   syncStockList,
   syncHolidays,
   listStocks,
@@ -35,10 +36,11 @@ export default function Settings() {
   const { addNotification } = useAppStore();
   const [formValues, setFormValues] = useState<Record<string, string>>({});
   const [dirty, setDirty] = useState<Set<string>>(new Set());
-  const [loginUrl, setLoginUrl] = useState('');
   const [authLoading, setAuthLoading] = useState(false);
   const [populateLoading, setPopulateLoading] = useState(false);
   const [showLoginSteps, setShowLoginSteps] = useState(false);
+  const [manualTokenInput, setManualTokenInput] = useState('');
+  const [manualTokenLoading, setManualTokenLoading] = useState(false);
   const { data: authStatus, refetch: refetchAuth } = useAuthStatus();
   const isAuthenticated = authStatus?.authenticated ?? false;
 
@@ -145,13 +147,18 @@ export default function Settings() {
     dirty.forEach((key) => handleSave(key));
   };
 
-  const handleZerodhaLogin = async () => {
+  const handleManualTokenSubmit = async () => {
+    if (!manualTokenInput.trim()) return;
+    setManualTokenLoading(true);
     try {
-      const res = await getLoginUrl();
-      setLoginUrl(res.data.login_url ?? '');
-      window.open(res.data.login_url, '_blank');
-    } catch {
-      addNotification({ type: 'error', message: 'Failed to get login URL' });
+      await setManualToken(manualTokenInput.trim());
+      addNotification({ type: 'success', message: 'Token updated manually' });
+      setManualTokenInput('');
+      refetchAuth();
+    } catch (e: any) {
+      addNotification({ type: 'error', message: e?.response?.data?.detail ?? 'Invalid token' });
+    } finally {
+      setManualTokenLoading(false);
     }
   };
 
@@ -230,27 +237,29 @@ export default function Settings() {
           {(!isAuthenticated || showLoginSteps) && (
             <>
               <div className="flex flex-wrap items-center justify-between gap-4 p-5 rounded-[var(--radius)] bg-[var(--bg-input)]">
-                <div className="flex items-center gap-4">
+                <div className="flex items-center gap-4 flex-1">
                   <div className="w-10 h-10 rounded-full bg-[var(--primary-subtle)] flex items-center justify-center flex-shrink-0">
                     <span className="text-sm font-bold text-[var(--primary)]">1</span>
                   </div>
-                  <div>
-                    <p className="text-sm font-semibold">Open Zerodha Login</p>
-                    <p className="text-xs text-[var(--text-muted)] mt-0.5">
-                      Sign in and copy the redirect URL or request_token.
+                  <div className="flex-1 max-w-sm">
+                    <p className="text-sm font-semibold">Manual Token Entry</p>
+                    <p className="text-xs text-[var(--text-muted)] mt-0.5 mb-2">
+                      Please generate your Kite access token and manually paste it here.
                     </p>
+                    <div className="flex gap-2">
+                       <Input 
+                         value={manualTokenInput} 
+                         onChange={setManualTokenInput} 
+                         placeholder="Paste access_token..."
+                         className="flex-1"
+                       />
+                       <Button onClick={handleManualTokenSubmit} loading={manualTokenLoading} disabled={!manualTokenInput.trim()}>
+                         Save
+                       </Button>
+                    </div>
                   </div>
                 </div>
-                <Button onClick={handleZerodhaLogin} data-guide-id="zerodha-login-btn" className="flex-shrink-0">
-                  <ExternalLink size={14} /> Login with Kite
-                </Button>
               </div>
-
-              {loginUrl && (
-                <div className="p-4 rounded-[var(--radius)] bg-[var(--bg-input)] text-xs text-[var(--text-muted)] break-all font-mono leading-relaxed">
-                  {loginUrl}
-                </div>
-              )}
             </>
           )}
 

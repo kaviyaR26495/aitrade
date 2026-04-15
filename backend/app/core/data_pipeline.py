@@ -39,32 +39,25 @@ async def sync_stock_ohlcv(
     3. Bulk upsert into stock_ohlcv
     """
     if not stock.kite_id:
-        logger.warning(
-            "Stock %s has no kite_id — attempting live lookup from Zerodha",
-            stock.symbol,
-        )
+        logger.debug("Stock %s has no kite_id — attempting live lookup from Zerodha", stock.symbol)
         kite_id = await _resolve_kite_id(db, stock.symbol)
-        if not kite_id:
-            logger.error(
-                "Cannot sync %s: kite_id not found. Run Sync Stock List first.",
-                stock.symbol,
+        if kite_id:
+            # Persist the resolved kite_id so future syncs skip this lookup
+            from sqlalchemy import update as sa_update
+            await db.execute(
+                sa_update(Stock)
+                .where(Stock.id == stock.id)
+                .values(kite_id=kite_id)
             )
-            return 0
-        # Persist the resolved kite_id so future syncs skip this lookup
-        from sqlalchemy import update as sa_update
-        await db.execute(
-            sa_update(Stock)
-            .where(Stock.id == stock.id)
-            .values(kite_id=kite_id)
-        )
-        await db.commit()
-        await db.refresh(stock)
+            await db.commit()
+            await db.refresh(stock)
+        else:
+            logger.warning("Could not resolve kite_id for %s, will rely on Yahoo Finance fallback.", stock.symbol)
 
-    # Guard: fail fast with a clear error if Zerodha is not authenticated
-    if not zerodha.is_authenticated():
-        raise RuntimeError(
-            "Zerodha access token not set. Open Settings and complete Zerodha login first."
-        )
+    # Check if we can use Zerodha
+    use_zerodha = zerodha.is_authenticated()
+    if not use_zerodha:
+        logger.info("Zerodha is not authenticated, will fallback to Yahoo Finance for %s.", stock.symbol)
 
     stale, max_db_date = await is_data_stale(db, stock.id, interval)
 
@@ -88,16 +81,33 @@ async def sync_stock_ohlcv(
 
     logger.info("Syncing %s interval=%s from=%s to=%s", stock.symbol, interval, from_date, to_date)
 
-    # Fetch from Kite API (with 2000-day chunking)
-    raw_data = zerodha.fetch_historical_data(
-        instrument_token=stock.kite_id,
-        from_date=from_date,
-        to_date=to_date,
-        interval=interval,
-    )
+    raw_data = None
+    if use_zerodha and stock.kite_id:
+        try:
+            # Fetch from Kite API (with 2000-day chunking)
+            raw_data = zerodha.fetch_historical_data(
+                instrument_token=stock.kite_id,
+                from_date=from_date,
+                to_date=to_date,
+                interval=interval,
+            )
+        except Exception as e:
+            logger.warning("Zerodha fetch failed for %s: %s. Falling back to yfinance.", stock.symbol, e)
+            raw_data = None
+            
+    if not raw_data:
+        # Fallback to Yahoo Finance
+        from app.core import yfinance_api
+        logger.info("Fetching data for %s using Yahoo Finance fallback", stock.symbol)
+        raw_data = yfinance_api.fetch_historical_data(
+            symbol=stock.symbol,
+            from_date=from_date,
+            to_date=to_date,
+            interval=interval,
+        )
 
     if not raw_data:
-        logger.warning("No data returned for %s", stock.symbol)
+        logger.warning("No data returned for %s (from both Zerodha and yfinance)", stock.symbol)
         return 0
 
     # Convert to DB rows

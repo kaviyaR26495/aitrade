@@ -505,13 +505,6 @@ async def _stage_data_sync(job_id: str, stock_ids: list[int], symbols: list[str]
 
     await _update_stage(job_id, 0, status="running", progress=0, message="Starting OHLCV + Regime sync…")
 
-    if not zerodha.is_authenticated():
-        # Data sync requires Zerodha auth; mark as failed with actionable message
-        await _update_stage(
-            job_id, 0, status="failed", progress=0,
-            message="Zerodha not authenticated. Open Settings → Zerodha and login first.",
-        )
-        raise RuntimeError("Zerodha not authenticated — cannot sync OHLCV data")
 
     total = len(stock_ids)
     synced = 0

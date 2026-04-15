@@ -290,29 +290,7 @@ export const useAppStore = create<AppState>((set) => ({
       set({ isZerodhaAuthenticated: authenticated });
 
       if (!authenticated) {
-        // Attempt Silent Refresh
-        const REFRESH_KEY = 'aitrade-last-refresh';
-        const now = Date.now();
-        const lastRefresh = sessionStorage.getItem(REFRESH_KEY);
-        
-        // Prevent infinite loops: only try auto-refreshing once every 5 minutes in this tab
-        if (!lastRefresh || (now - parseInt(lastRefresh)) > 300000) {
-          sessionStorage.setItem(REFRESH_KEY, now.toString());
-          console.log('Zerodha session expired. Attempting silent refresh...');
-          
-          try {
-            const loginRes = await getLoginUrl();
-            const loginUrl = loginRes.data.login_url;
-            if (loginUrl) {
-              // Append state=currentURL so backend knows to redirect back
-              const redirectUrl = `${loginUrl}&state=${encodeURIComponent(window.location.href)}`;
-              set({ isAuthRefreshing: true });
-              window.location.assign(redirectUrl);
-            }
-          } catch (err) {
-            console.error('Failed to trigger auto-refresh:', err);
-          }
-        }
+        console.log('Zerodha session not active. Application will continue without live broker features.');
       }
     } catch (err) {
       console.error('Initialization failed:', err);

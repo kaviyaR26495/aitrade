@@ -16,15 +16,16 @@ celery[redis]==5.4.0
 redis==5.2.1
 
 # ML - RL
-stable-baselines3==2.4.1
-sb3-contrib==2.4.0
-gymnasium==1.0.0
+stable-baselines3==2.8.0
+sb3-contrib==2.8.0
+gymnasium>=1.0.0
 d3rlpy>=2.4.0
 # Install PyTorch with CUDA 12.4 support (run: pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124)
 # Plain `pip install torch` installs CPU-only; the line below ensures the right build is recorded.
 torch==2.6.0+cu124
 torchvision==0.21.0+cu124
 torchaudio==2.6.0+cu124
+# numpy >=2.0 ships pre-built wheels for Python 3.13 (no C compiler required)
 
 # ML - Distillation
 scikit-learn==1.6.1
@@ -35,7 +36,7 @@ scipy>=1.11.0
 
 # Data & Indicators
 pandas==2.2.3
-numpy==1.26.4
+numpy>=2.0.0
 ta==0.11.0
 
 # Zerodha
@@ -51,3 +52,4 @@ sse-starlette>=2.0.0
 python-dotenv==1.0.1
 httpx==0.28.1
 orjson==3.10.13
+yfinance

@@ -1,5 +1,6 @@
 import asyncio
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Body
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sqlalchemy import delete
@@ -12,6 +13,10 @@ import logging
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+class TokenPayload(BaseModel):
+    access_token: str
+
 
 KITE_TOKEN_KEY = "KITE_ACCESS_TOKEN"
 
@@ -98,3 +103,24 @@ async def auth_status(db: AsyncSession = Depends(get_db)):
         return {"authenticated": False}
 
     return {"authenticated": True}
+
+
+@router.post("/manual-token")
+async def update_manual_token(payload: TokenPayload, db: AsyncSession = Depends(get_db)):
+    """Manually update the Zerodha access token."""
+    from app.core import zerodha as _zerodha
+    
+    # Check if we should directly overwrite
+    await crud.set_setting(db, KITE_TOKEN_KEY, payload.access_token)
+    _zerodha.set_access_token(payload.access_token)
+    
+    # Optional: verify immediately
+    is_valid = await _zerodha.is_authenticated_live()
+    if not is_valid:
+        # Clear it immediately to avoid a broken token sitting in the DB
+        await db.execute(delete(AppSetting).where(AppSetting.property == KITE_TOKEN_KEY))
+        await db.commit()
+        _zerodha.set_access_token(None)
+        raise HTTPException(status_code=400, detail="The provided token is invalid or expired.")
+        
+    return {"status": "success", "message": "Token updated manually"}
