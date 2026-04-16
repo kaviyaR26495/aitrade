@@ -42,11 +42,12 @@ class TradeLSTM(nn.Module):
             dropout=dropout if num_layers > 1 else 0,
             batch_first=True,
         )
+        self.layer_norm = nn.LayerNorm(hidden_size)
         self.classifier = nn.Sequential(
-            nn.Linear(hidden_size, 64),
+            nn.Linear(hidden_size, hidden_size // 2),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(64, num_classes),
+            nn.Linear(hidden_size // 2, num_classes),
         )
         # Auxiliary regression head used during pre-training only.
         # Predicts the continuous forward P&L (roc_5 equivalent) so the LSTM
@@ -56,8 +57,8 @@ class TradeLSTM(nn.Module):
     def forward(self, x: torch.Tensor, pretrain: bool = False) -> torch.Tensor:
         # x: (batch, seq_len, features)
         lstm_out, (h_n, c_n) = self.lstm(x)
-        # Use final hidden state from last layer
-        final_hidden = h_n[-1]  # (batch, hidden_size)
+        # Use final hidden state from last layer, stabilized with LayerNorm
+        final_hidden = self.layer_norm(h_n[-1])  # (batch, hidden_size)
         if pretrain:
             return self.pretrain_head(final_hidden)  # (batch, 1) — regression
         logits = self.classifier(final_hidden)
@@ -555,7 +556,7 @@ def load_lstm_model(model_path: str, device: str | None = None) -> TradeLSTM:
         num_layers=checkpoint["num_layers"],
         num_classes=checkpoint["num_classes"],
     )
-    model.load_state_dict(checkpoint["state_dict"])
+    model.load_state_dict(checkpoint["state_dict"], strict=False)
     model.to(device)
     model.eval()
     logger.info("Loaded LSTM model from %s onto %s", model_path, device)

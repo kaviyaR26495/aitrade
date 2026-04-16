@@ -189,14 +189,24 @@ def nifty_breadth_multiplier(
     nifty_close_series: "np.ndarray | list[float]",
     dma_period: int = 200,
     half_size_below_dma: bool = True,
+    continuous: bool = True,
 ) -> float:
     """Return a position-size multiplier based on NIFTY 50's trend health.
 
-    Rules
+    Modes
     -----
-    * NIFTY close > 200-DMA  → multiplier = 1.0  (full size, trend is healthy)
-    * NIFTY close ≤ 200-DMA  → multiplier = 0.5  if ``half_size_below_dma``
-                                            else 0.0  (BUYs fully disabled)
+    continuous=True (default):
+        Smooth sigmoid decay: multiplier = sigmoid(50 × dist_pct) clipped to
+        [0.1, 1.0].  The portfolio deleverages *gradually* as price falls below
+        the DMA, avoiding the abrupt exit that can miss mean-reversion bounces.
+
+        Approximate values (dist_pct = (close − DMA) / DMA):
+          +5 % above DMA → ~0.92×    at DMA (0 %) → ~0.50×
+          −2 % below DMA → ~0.27×    −5 % below   → ~0.10× (floor)
+
+    continuous=False (legacy binary mode):
+        * NIFTY close > 200-DMA  → 1.0  (full size)
+        * NIFTY close ≤ 200-DMA  → 0.5  if half_size_below_dma else 0.0
 
     The computation requires *at least* ``dma_period`` past closes.
     If fewer are available the function returns 1.0 (no signal = no restriction).
@@ -207,12 +217,16 @@ def nifty_breadth_multiplier(
         ordered oldest → newest.  The last element is today's close.
     dma_period : int, default 200.  Rolling simple-average window.
     half_size_below_dma : bool, default True.
-        True  → halve position size when below 200-DMA (conservative).
-        False → block all new BUYs when below 200-DMA (strict kill-switch).
+        Ignored when continuous=True.
+        True  → halve position size when below 200-DMA.
+        False → block all new BUYs when below 200-DMA.
+    continuous : bool, default True.
+        True  → smooth sigmoid-based deleverage (recommended).
+        False → legacy binary step (backward-compatible).
 
     Returns
     -------
-    float in {0.0, 0.5, 1.0}.
+    float — multiplier in [0.0, 1.0].
     """
     arr = np.asarray(nifty_close_series, dtype=float)
     if len(arr) < dma_period:
@@ -221,6 +235,12 @@ def nifty_breadth_multiplier(
     dma = float(np.mean(arr[-dma_period:]))
     current = float(arr[-1])
 
+    if continuous:
+        dist_pct = (current - dma) / dma if dma > 0 else 0.0
+        score = 1.0 / (1.0 + np.exp(-50.0 * dist_pct))
+        return float(max(0.1, min(1.0, score)))
+
+    # Legacy binary mode
     if current > dma:
         return 1.0
     return 0.5 if half_size_below_dma else 0.0
@@ -241,18 +261,21 @@ def size_trade_with_breadth(
     min_kelly_trades: int = 10,
     dma_period: int = 200,
     half_size_below_dma: bool = True,
+    continuous: bool = True,
 ) -> float:
-    """``size_trade()`` + NIFTY 200-DMA breadth kill-switch, composed in one call.
+    """``size_trade()`` + NIFTY 200-DMA breadth filter, composed in one call.
 
     The base fraction from ``size_trade()`` is multiplied by
-    ``nifty_breadth_multiplier()``.  A result of 0.0 means the caller
-    should skip the BUY entirely.
+    ``nifty_breadth_multiplier()``.  With ``continuous=True`` (default) the
+    multiplier decays smoothly via a sigmoid so the portfolio deleverages
+    gradually rather than stepping abruptly to 0.5 or 0.0.
 
     All parameters are identical to ``size_trade()`` except:
 
     nifty_close_series : historical NIFTY 50 closes (oldest → newest).
     dma_period         : 200-DMA window (default 200 trading days).
-    half_size_below_dma: True = halve size, False = full block.
+    half_size_below_dma: Legacy binary mode only — ignored when continuous=True.
+    continuous         : True = sigmoid decay, False = legacy step.
 
     Returns
     -------
@@ -274,6 +297,7 @@ def size_trade_with_breadth(
         nifty_close_series,
         dma_period=dma_period,
         half_size_below_dma=half_size_below_dma,
+        continuous=continuous,
     )
     return float(base_frac * multiplier)
 

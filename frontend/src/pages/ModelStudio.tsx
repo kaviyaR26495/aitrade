@@ -9,7 +9,7 @@ import {
 } from '../hooks/useApi';
 import { useAppStore } from '../store/appStore';
 import { exportModelBundle } from '../services/api';
-import { Brain, Cpu, Layers, ChevronDown, ChevronUp, Zap, Square, Pause, Play, Trash2, ToggleLeft, ToggleRight, Download, Upload } from 'lucide-react';
+import { Brain, Cpu, Layers, ChevronDown, ChevronUp, Zap, Square, Pause, Play, Trash2, ToggleLeft, ToggleRight, Download, Upload, Loader2 } from 'lucide-react';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
 } from 'recharts';
@@ -409,23 +409,31 @@ export default function ModelStudio() {
                               )}
                               {confirmingDelete ? (
                                   <>
-                                    <span className="text-xs text-[var(--text-dim)] mr-1">Delete?</span>
-                                    <button
-                                      className="px-2 py-0.5 rounded text-xs bg-red-500/20 text-red-400 hover:bg-red-500/30 transition-colors"
-                                      onClick={() => deleteMutation.mutate(m.id, {
-                                        onSuccess: () => { setDeleteConfirmId(null); addNotification({ type: 'success', message: 'RL model deleted.' }); },
-                                        onError: () => { setDeleteConfirmId(null); addNotification({ type: 'error', message: 'Failed to delete RL model.' }); },
-                                      })}
-                                      disabled={deleteMutation.isPending}
-                                    >
-                                      Yes
-                                    </button>
-                                    <button
-                                      className="px-2 py-0.5 rounded text-xs bg-[var(--surface-2)] text-[var(--text-dim)] hover:bg-[var(--surface-3)] transition-colors"
-                                      onClick={() => setDeleteConfirmId(null)}
-                                    >
-                                      Cancel
-                                    </button>
+                                    {deleteMutation.isPending && deleteMutation.variables === m.id ? (
+                                      <span className="flex items-center gap-1 text-xs text-red-400">
+                                        <Loader2 size={11} className="animate-spin" /> Deleting…
+                                      </span>
+                                    ) : (
+                                      <>
+                                        <span className="text-xs text-[var(--text-dim)] mr-1">Delete?</span>
+                                        <button
+                                          className="px-2 py-0.5 rounded text-xs bg-red-500/20 text-red-400 hover:bg-red-500/30 transition-colors"
+                                          onClick={() => deleteMutation.mutate(m.id, {
+                                            onSuccess: () => { setDeleteConfirmId(null); addNotification({ type: 'success', message: 'RL model deleted.' }); },
+                                            onError: () => { setDeleteConfirmId(null); addNotification({ type: 'error', message: 'Failed to delete RL model.' }); },
+                                          })}
+                                          disabled={deleteMutation.isPending}
+                                        >
+                                          Yes
+                                        </button>
+                                        <button
+                                          className="px-2 py-0.5 rounded text-xs bg-[var(--surface-2)] text-[var(--text-dim)] hover:bg-[var(--surface-3)] transition-colors"
+                                          onClick={() => setDeleteConfirmId(null)}
+                                        >
+                                          Cancel
+                                        </button>
+                                      </>
+                                    )}
                                   </>
                                 ) : (
                                   <button
