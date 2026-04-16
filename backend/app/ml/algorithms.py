@@ -64,9 +64,10 @@ ALGORITHM_CONFIGS: dict[str, dict[str, Any]] = {
             "n_epochs": 10,
             "batch_size": 256,
             "policy_kwargs": {
-                # Separate actor/critic: Critic gets a larger network so the
-                # value-function can converge independently of the policy.
-                "net_arch": {"pi": [256, 128], "vf": [512, 512, 256]},
+                # Balanced actor/critic: matching network sizes prevent the
+                # critic's gradients from dominating the shared attention
+                # extractor, keeping "Golden Pattern" labels consistent.
+                "net_arch": {"pi": [256, 128], "vf": [256, 128]},
                 # features_extractor_class and features_extractor_kwargs are
                 # injected by rl_trainer.py (need the live Python class).
             },

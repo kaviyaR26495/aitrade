@@ -156,7 +156,17 @@ async def auto_retrain(
 
         knn_obj, knn_metrics = await loop.run_in_executor(
             _ct_executor,
-            lambda: train_knn(X, y, k_neighbors=5, log_fn=_log),
+            lambda: train_knn(
+                X, y,
+                k_neighbors=11,
+                train_ratio=0.7,
+                smote_k_neighbors=11,
+                augment_jitter=True,
+                jitter_copies=3,
+                use_pca=True,
+                pca_components=50,
+                log_fn=_log,
+            ),
         )
         knn_artifacts = save_knn_model(
             knn_obj, knn_metrics,
@@ -189,7 +199,7 @@ async def auto_retrain(
             sdb,
             name=f"auto_lstm_{timestamp}",
             source_rl_model_id=source_rl_model_id,
-            hidden_size=128,
+            hidden_size=256,
             num_layers=2,
             dropout=0.3,
             seq_len=seq_len,
@@ -207,11 +217,16 @@ async def auto_retrain(
             _ct_executor,
             lambda: train_lstm(
                 X, y,
-                hidden_size=128,
+                hidden_size=256,
                 num_layers=2,
                 dropout=0.3,
+                lr=5e-4,
+                patience=20,
+                train_ratio=0.7,
+                augment_jitter=True,
+                jitter_copies=3,
                 roc5_targets=roc5_targets,
-                pretrain_epochs=10,
+                pretrain_epochs=25,
                 log_fn=_log,
             ),
         )

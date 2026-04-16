@@ -133,9 +133,12 @@ def train_knn(
     k_neighbors: int = 5,
     train_ratio: float = 0.8,
     use_smote: bool = True,
+    smote_k_neighbors: int = 5,
     augment_jitter: bool = False,
     jitter_noise_std: float = 0.001,
     jitter_copies: int = 1,
+    use_pca: bool = True,
+    pca_components: int = 50,
     log_fn: Any = None,
 ) -> tuple[KNeighborsClassifier, dict[str, Any]]:
     """
@@ -184,6 +187,24 @@ def train_knn(
     }
     _log(f"INFO   StandardScaler fitted (features={X_flat.shape[1]}).")
 
+    # PCA dimensionality reduction — fitted on original (pre-jitter) training data
+    # to avoid inflating the PCA basis with synthetic noise. Reduces 570D → 50D,
+    # resolving the curse of dimensionality that makes L2 distances meaningless.
+    if use_pca:
+        n_comp = min(pca_components, X_train.shape[1], X_train.shape[0] - 1)
+        if n_comp >= 2:
+            from sklearn.decomposition import PCA as _PCA
+            _pca = _PCA(n_components=n_comp, random_state=42)
+            _pca.fit(X_train)
+            norm_params["pca_mean"] = _pca.mean_.tolist()
+            norm_params["pca_components"] = _pca.components_.tolist()
+            _log(
+                f"INFO   PCA fitted: {X_train.shape[1]}D → {n_comp}D "
+                f"(variance retained: {_pca.explained_variance_ratio_.sum():.2%})."
+            )
+        else:
+            _log(f"WARN   PCA skipped: insufficient training samples ({X_train.shape[0]}).")
+
     # Jitter augmentation — applied to X_train ONLY, after the split,
     # so the validation set stays pure (no synthetic data leaks in)
     if augment_jitter and len(X_train) > 0:
@@ -197,14 +218,27 @@ def train_knn(
         X_train = X_3d_aug.reshape(len(X_3d_aug), -1)
         _log(f"INFO   Jitter augmentation applied to train only: {n_tr} → {len(X_train)} samples.")
 
+    # Apply PCA transform (after augmentation so synthetic samples are also projected)
+    if "pca_components" in norm_params:
+        _pca_mean = np.asarray(norm_params["pca_mean"], dtype=np.float32)
+        _pca_comp = np.asarray(norm_params["pca_components"], dtype=np.float32)
+        X_train = (X_train.astype(np.float32) - _pca_mean) @ _pca_comp.T
+        X_test = (X_test.astype(np.float32) - _pca_mean) @ _pca_comp.T
+        _log(f"INFO   PCA applied: train={X_train.shape}, test={X_test.shape}.")
+
     # SMOTE oversampling for class imbalance
     if use_smote and len(np.unique(y_train)) > 1:
         try:
             from imblearn.over_sampling import SMOTE
             _log("INFO   Running SMOTE oversampling...")
-            smote = SMOTE(random_state=42)
-            X_train, y_train = smote.fit_resample(X_train, y_train)
-            _log(f"INFO   After SMOTE: {dict(zip(*np.unique(y_train, return_counts=True)))}")
+            _, class_counts = np.unique(y_train, return_counts=True)
+            safe_k = min(smote_k_neighbors, int(class_counts.min()) - 1)
+            if safe_k >= 1:
+                smote = SMOTE(k_neighbors=safe_k, random_state=42)
+                X_train, y_train = smote.fit_resample(X_train, y_train)
+                _log(f"INFO   After SMOTE (k={safe_k}): {dict(zip(*np.unique(y_train, return_counts=True)))}")
+            else:
+                _log("WARN   SMOTE skipped: minority class too small for k_neighbors.")
         except ImportError:
             _log("WARN   imblearn not installed, skipping SMOTE")
 
@@ -331,6 +365,10 @@ def predict_knn(
         mean = np.asarray(norm_params["mean"], dtype=np.float64)
         scale = np.asarray(norm_params["scale"], dtype=np.float64)
         X = (X - mean) / np.where(scale > 0, scale, 1.0)
+        if "pca_components" in norm_params:
+            pca_mean = np.asarray(norm_params["pca_mean"], dtype=np.float64)
+            pca_comp = np.asarray(norm_params["pca_components"], dtype=np.float64)
+            X = (X - pca_mean) @ pca_comp.T
 
     predictions = model.predict(X)
     probabilities = model.predict_proba(X)
