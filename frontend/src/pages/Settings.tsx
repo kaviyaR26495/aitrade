@@ -39,7 +39,7 @@ export default function Settings() {
   const [authLoading, setAuthLoading] = useState(false);
   const [populateLoading, setPopulateLoading] = useState(false);
   const [showLoginSteps, setShowLoginSteps] = useState(false);
-  const { data: authStatus, refetch: refetchAuth } = useAuthStatus();
+  const { data: authStatus, refetch: refetchAuth, isFetching: isAuthFetching } = useAuthStatus();
   const isAuthenticated = authStatus?.authenticated ?? false;
 
   // Stock Universe state
@@ -145,13 +145,18 @@ export default function Settings() {
     dirty.forEach((key) => handleSave(key));
   };
 
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
+
   const handleZerodhaLogin = async () => {
     try {
+      setIsLoggingIn(true);
       const res = await getLoginUrl();
       setLoginUrl(res.data.login_url ?? '');
       window.open(res.data.login_url, '_blank');
     } catch {
       addNotification({ type: 'error', message: 'Failed to get login URL' });
+    } finally {
+      setIsLoggingIn(false);
     }
   };
 
@@ -215,8 +220,8 @@ export default function Settings() {
               </div>
             </div>
             <div className="flex gap-2 flex-shrink-0">
-              <Button variant="secondary" size="sm" onClick={() => refetchAuth()}>
-                <RefreshCw size={13} /> Refresh
+              <Button variant="secondary" size="sm" onClick={() => refetchAuth()} loading={isAuthFetching}>
+                <RefreshCw size={13} className={isAuthFetching ? "animate-spin" : ""} /> Refresh
               </Button>
               {isAuthenticated && (
                 <Button variant="secondary" size="sm" onClick={() => setShowLoginSteps((v) => !v)}>
@@ -241,8 +246,8 @@ export default function Settings() {
                     </p>
                   </div>
                 </div>
-                <Button onClick={handleZerodhaLogin} data-guide-id="zerodha-login-btn" className="flex-shrink-0">
-                  <ExternalLink size={14} /> Login with Kite
+                <Button onClick={handleZerodhaLogin} disabled={isLoggingIn} loading={isLoggingIn} data-guide-id="zerodha-login-btn" className="flex-shrink-0">
+                  <ExternalLink size={14} /> {isLoggingIn ? "Logging in..." : "Login with Kite"}
                 </Button>
               </div>
 
