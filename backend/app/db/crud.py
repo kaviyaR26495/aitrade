@@ -711,7 +711,7 @@ async def bulk_upsert_ensemble_predictions(db: AsyncSession, rows: list[dict]) -
     update_cols = {
         c.name: c
         for c in stmt.inserted
-        if c.name not in ("id", "ensemble_config_id", "stock_id", "date", "interval")
+        if c.name not in ("id", "batch_id", "ensemble_config_id", "stock_id", "date", "interval")
     }
     stmt = stmt.on_duplicate_key_update(**update_cols)
     await db.execute(stmt)

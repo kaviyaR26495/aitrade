@@ -10,13 +10,13 @@ from datetime import datetime
 
 from fastapi import APIRouter, BackgroundTasks, Depends
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db
 from app.db import crud
 from app.db.database import async_session_factory
-from app.db.models import EnsembleConfig
+from app.db.models import EnsembleConfig, KNNModel, LSTMModel, ModelStatus
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -89,10 +89,21 @@ async def get_retrain_status(db: AsyncSession = Depends(get_db)):
             "last_retrain_at": last_str,
             "days_since_retrain": days_since,
             "needs_retrain": days_since >= _STALE_AFTER_DAYS,
+            "has_models": True,
         }
+
+    # No ensemble config — check whether individual KNN/LSTM models exist
+    knn_count_result = await db.execute(
+        select(func.count()).select_from(KNNModel).where(KNNModel.status == ModelStatus.completed)
+    )
+    lstm_count_result = await db.execute(
+        select(func.count()).select_from(LSTMModel).where(LSTMModel.status == ModelStatus.completed)
+    )
+    has_models = (knn_count_result.scalar() or 0) > 0 or (lstm_count_result.scalar() or 0) > 0
 
     return {
         "last_retrain_at": None,
         "days_since_retrain": None,
         "needs_retrain": True,
+        "has_models": has_models,
     }
