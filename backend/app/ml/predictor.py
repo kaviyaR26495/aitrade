@@ -353,11 +353,10 @@ async def run_daily_predictions(
                     "regime_id": regime_id,
                 }
                 
-                pending_predictions.append(EnsemblePrediction(**pred_row))
+                pending_predictions.append(pred_row)
                 # Batch-commit to avoid per-row transaction overhead
                 if len(pending_predictions) >= _COMMIT_BATCH_SIZE:
-                    db.add_all(pending_predictions)
-                    await db.commit()
+                    await crud.bulk_upsert_ensemble_predictions(db, pending_predictions)
                     pending_predictions.clear()
                     gc.collect()  # free cyclic garbage at existing periodic boundary
 
@@ -372,32 +371,36 @@ async def run_daily_predictions(
             is_last = processed_count == len(stocks)
             if job_id and (processed_count <= 10 or processed_count % 5 == 0 or is_last):
                 progress = int((processed_count / len(stocks)) * 100)
-                await crud.update_prediction_job(
-                    db, job_id, 
-                    completed_stocks=processed_count, 
-                    progress=progress
-                )
+                try:
+                    await crud.update_prediction_job(
+                        db, job_id,
+                        completed_stocks=processed_count,
+                        progress=progress
+                    )
+                except Exception as prog_exc:
+                    logger.warning("Failed to update prediction job progress (non-fatal): %s", prog_exc)
 
         
     # Flush any remaining predictions that didn't fill a full batch
     if pending_predictions:
-        db.add_all(pending_predictions)
-        await db.commit()
+        await crud.bulk_upsert_ensemble_predictions(db, pending_predictions)
         pending_predictions.clear()
 
-    # Finalize job status
+    # Finalize job status — use a fresh session to avoid "transaction aborted" errors
+    # that can occur when the long-running db session hit an earlier error/rollback.
     if job_id:
-        is_cancelled = False
-        job = await crud.get_prediction_job(db, job_id)
-        if job and job.status == "cancelled":
-            is_cancelled = True
-        
-        await crud.update_prediction_job(
-            db, job_id, 
-            status="cancelled" if is_cancelled else "completed",
-            batch_id=batch_id,
-            progress=100
-        )
+        try:
+            async with async_session_factory() as final_db:
+                job_check = await crud.get_prediction_job(final_db, job_id)
+                is_cancelled = bool(job_check and job_check.status == "cancelled")
+                await crud.update_prediction_job(
+                    final_db, job_id,
+                    status="cancelled" if is_cancelled else "completed",
+                    batch_id=batch_id,
+                    progress=100
+                )
+        except Exception as finalize_exc:
+            logger.error("Failed to finalize prediction job %s status: %s", job_id, finalize_exc)
 
     return {
         "date": str(target_date),

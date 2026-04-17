@@ -256,6 +256,7 @@ export interface RetrainStatus {
   last_retrain_at: string | null;
   days_since_retrain: number | null;
   needs_retrain: boolean;
+  has_models: boolean;
 }
 
 export const getRetrainStatus = () =>

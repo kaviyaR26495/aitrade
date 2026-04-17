@@ -171,6 +171,29 @@ async def run_predictions(
     # 2. Create Job record
     job_id = str(uuid.uuid4())
     batch_id = str(uuid.uuid4())
+
+    # For partial re-runs (specific stocks selected), reuse the latest existing
+    # batch_id for the same target_date so predictions stay grouped in the same
+    # batch instead of fragmenting into a separate 1-stock batch.
+    if req.stock_ids:
+        from app.db.models import EnsemblePrediction
+        from sqlalchemy import select as sqla_select, desc as sqla_desc
+        from datetime import date as date_type
+        tdate = req.target_date or date_type.today()
+        q_existing = (
+            sqla_select(EnsemblePrediction.batch_id)
+            .where(
+                EnsemblePrediction.date == tdate,
+                EnsemblePrediction.interval == req.interval,
+            )
+            .order_by(sqla_desc(EnsemblePrediction.run_at))
+            .limit(1)
+        )
+        existing_row = await db.execute(q_existing)
+        existing_batch_id = existing_row.scalar_one_or_none()
+        if existing_batch_id:
+            batch_id = existing_batch_id
+
     await crud.create_prediction_job(db, job_id, total_stocks=len(stocks), batch_id=batch_id)
 
     # 3. Define background task wrapper
@@ -188,7 +211,12 @@ async def run_predictions(
                 )
             except Exception as e:
                 logger.error(f"Background prediction job {jid} failed: {e}")
-                await crud.update_prediction_job(b_db, jid, status="failed", error=str(e))
+                # Use a FRESH session — b_db may be in a broken/rolled-back state
+                try:
+                    async with async_session_factory() as err_db:
+                        await crud.update_prediction_job(err_db, jid, status="failed", error=str(e)[:2000])
+                except Exception as db_err:
+                    logger.error(f"Failed to mark prediction job {jid} as failed: {db_err}")
 
     # 4. Launch!
     stock_ids = [s.id for s in stocks]

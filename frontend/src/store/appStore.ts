@@ -175,6 +175,8 @@ interface AppState {
 
   // Retrain alert — shown when models are stale (> 30 days since last CT run)
   retrainAlert: boolean;
+  retrainDaysSince: number | null;
+  retrainHasModels: boolean;
   setRetrainAlert: (v: boolean) => void;
 
   // Initialization
@@ -277,6 +279,8 @@ export const useAppStore = create<AppState>((set) => ({
   isAuthRefreshing: false,
 
   retrainAlert: false,
+  retrainDaysSince: null,
+  retrainHasModels: true,
   setRetrainAlert: (retrainAlert) => set({ retrainAlert }),
 
   isInitialized: true,
@@ -301,7 +305,11 @@ export const useAppStore = create<AppState>((set) => ({
         const { getRetrainStatus } = await import('../services/api');
         const retrainRes = await getRetrainStatus();
         if (retrainRes.data.needs_retrain) {
-          set({ retrainAlert: true });
+          set({ 
+            retrainAlert: true,
+            retrainDaysSince: retrainRes.data.days_since_retrain,
+            retrainHasModels: retrainRes.data.has_models ?? true,
+          });
         }
       } catch {
         // non-critical — ignore
