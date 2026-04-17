@@ -391,6 +391,22 @@ export const useRunBacktest = () => {
   });
 };
 
+export const useDeleteBacktest = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: number) => api.deleteBacktest(id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['backtests'] }),
+  });
+};
+
+export const useDeleteBacktestBatch = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (ids: number[]) => api.deleteBacktestBatch(ids),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['backtests'] }),
+  });
+};
+
 // ── Trading hooks ──
 export const usePredictions = (params?: Record<string, unknown>, options: any = {}) =>
   useQuery({

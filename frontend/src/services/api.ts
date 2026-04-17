@@ -148,6 +148,8 @@ export const getBacktestResults = (id: number) => api.get(`/backtest/results/${i
 export const listBacktestResults = () => api.get('/backtest/results');
 export const getTradePatterns = (backtestId: number, tradeIdx: number) =>
   api.get(`/backtest/${backtestId}/trades/${tradeIdx}/patterns`);
+export const deleteBacktest = (id: number) => api.delete(`/backtest/${id}`);
+export const deleteBacktestBatch = (ids: number[]) => api.delete('/backtest/batch/delete', { data: { ids } });
 
 // ── Trading ──
 export const getPredictions = (params?: { target_date?: string; batch_id?: string; interval?: string; min_confidence?: number; agreement_only?: boolean }) =>

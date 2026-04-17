@@ -466,6 +466,7 @@ class BacktestResult(Base):
     profit_factor: Mapped[float | None] = mapped_column(Float, nullable=True)
     trades_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     trade_log: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist)
 
 
 # ── Trade Orders ───────────────────────────────────────────────────────
