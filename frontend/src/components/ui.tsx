@@ -282,6 +282,7 @@ export function SearchableSelect({ value, onChange, options, label, placeholder 
   const containerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const dropdownRef = useRef<HTMLDivElement>(null);
 
   const selectedLabel = options.find(o => o.value === value)?.label ?? '';
 
@@ -297,7 +298,10 @@ export function SearchableSelect({ value, onChange, options, label, placeholder 
 
   useEffect(() => {
     const handler = (e: MouseEvent) => {
-      if (containerRef.current && !containerRef.current.contains(e.target as Node)) setOpen(false);
+      const target = e.target as Node;
+      const insideTrigger = containerRef.current?.contains(target);
+      const insideDropdown = dropdownRef.current?.contains(target);
+      if (!insideTrigger && !insideDropdown) setOpen(false);
     };
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
@@ -319,6 +323,20 @@ export function SearchableSelect({ value, onChange, options, label, placeholder 
       case 'Escape':    e.preventDefault(); setOpen(false); break;
     }
   };
+
+  const [dropdownStyle, setDropdownStyle] = useState<React.CSSProperties>({});
+  useEffect(() => {
+    if (open && containerRef.current) {
+      const rect = containerRef.current.getBoundingClientRect();
+      setDropdownStyle({
+        position: 'fixed',
+        top: rect.bottom + 4,
+        left: rect.left,
+        width: rect.width,
+        zIndex: 9999,
+      });
+    }
+  }, [open]);
 
   return (
     <div className={`relative ${className}`} ref={containerRef}>
@@ -343,11 +361,12 @@ export function SearchableSelect({ value, onChange, options, label, placeholder 
         </svg>
       </button>
 
-      {open && (
-        <div className="
-          absolute z-50 mt-1 w-full bg-[var(--bg-card)] border border-[var(--border)]
-          rounded-[var(--radius-sm)] shadow-xl overflow-hidden
-        ">
+      {open && createPortal(
+        <div
+          ref={dropdownRef}
+          style={dropdownStyle}
+          className="bg-[var(--bg-card)] border border-[var(--border)] rounded-[var(--radius-sm)] shadow-xl overflow-hidden"
+        >
           <div className="p-2 border-b border-[var(--border)]">
             <input
               ref={inputRef}
@@ -385,7 +404,8 @@ export function SearchableSelect({ value, onChange, options, label, placeholder 
               ))
             )}
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );

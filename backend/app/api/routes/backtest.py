@@ -53,6 +53,7 @@ class BacktestSummary(BaseModel):
     sharpe: float | None
     profit_factor: float | None
     trades_count: int | None
+    created_at: str | None = None
 
     class Config:
         from_attributes = True
@@ -99,19 +100,43 @@ async def run_backtest(
 
     # 2. Try to fetch predictions from DB first
     pred_dict: dict = {}
-    if req.model_type in ("knn", "ensemble"):
+
+    # For ensemble: query EnsemblePrediction directly — these carry the final
+    # ensemble signal (post agreement-filter, sector-guard, weekly-confluence)
+    # that the live prediction UI shows.  Querying raw KNNPrediction first was wrong
+    # because KNN rows are pre-ensemble and may all be HOLD even when the ensemble says BUY.
+    if req.model_type == "ensemble":
+        q = select(EnsemblePrediction).where(
+            EnsemblePrediction.stock_id == stock_id,
+            EnsemblePrediction.interval == req.interval,
+            EnsemblePrediction.date.in_(dates),
+        )
+        if req.model_id:
+            q = q.where(EnsemblePrediction.ensemble_config_id == req.model_id)
+        res = await db.execute(q)
+        for p in res.scalars():
+            # EnsemblePrediction.action: 0=HOLD, 1=BUY, 2=SELL
+            # Backtester expects: 0=HOLD, 1=BUY, -1=SELL — map 2→-1
+            mapped_action = -1 if p.action == 2 else p.action
+            pred_dict[p.date] = {
+                "action": mapped_action,
+                "confidence": p.confidence,
+                "regime_id": p.regime_id,
+            }
+
+    elif req.model_type == "knn":
         q = select(KNNPrediction).where(
             KNNPrediction.stock_id == stock_id,
             KNNPrediction.interval == req.interval,
             KNNPrediction.date.in_(dates),
         )
-        if req.model_id and req.model_type == "knn":
+        if req.model_id:
             q = q.where(KNNPrediction.knn_model_id == req.model_id)
         res = await db.execute(q)
         for p in res.scalars():
             pred_dict[p.date] = {"action": p.action, "confidence": p.confidence, "regime_id": p.regime_id, "matched_pattern_indices": p.matched_pattern_ids}
 
-    if req.model_type in ("lstm",):
+    elif req.model_type == "lstm":
         q = select(LSTMPrediction).where(
             LSTMPrediction.stock_id == stock_id,
             LSTMPrediction.interval == req.interval,
@@ -123,17 +148,14 @@ async def run_backtest(
         for p in res.scalars():
             pred_dict[p.date] = {"action": p.action, "confidence": p.confidence, "regime_id": p.regime_id}
 
-    if req.model_type == "ensemble" and not pred_dict:
-        q = select(EnsemblePrediction).where(
-            EnsemblePrediction.stock_id == stock_id,
-            EnsemblePrediction.interval == req.interval,
-            EnsemblePrediction.date.in_(dates),
-        )
-        if req.model_id:
-            q = q.where(EnsemblePrediction.ensemble_config_id == req.model_id)
-        res = await db.execute(q)
-        for p in res.scalars():
-            pred_dict[p.date] = {"action": p.action, "confidence": p.confidence, "regime_id": p.regime_id}
+    # Diagnostic: log signal breakdown from DB
+    _buy_cnt = sum(1 for v in pred_dict.values() if v["action"] == 1)
+    _buy_above_thresh = sum(1 for v in pred_dict.values() if v["action"] == 1 and v["confidence"] >= req.min_confidence)
+    logger.info(
+        "Backtest stock=%d type=%s dates=%d db_preds=%d BUY=%d BUY_above_min_conf(%.2f)=%d",
+        stock_id, req.model_type, len(dates), len(pred_dict),
+        _buy_cnt, req.min_confidence, _buy_above_thresh,
+    )
 
     # 3. If no predictions in DB, run live inference from model artifacts
     coverage = len(pred_dict) / max(len(dates), 1)
@@ -585,6 +607,40 @@ async def list_backtest_results(
             "sharpe": bt.sharpe,
             "profit_factor": bt.profit_factor,
             "trades_count": bt.trades_count,
+            "created_at": str(bt.created_at) if getattr(bt, "created_at", None) else None,
         }
         for bt, symbol in rows
     ]
+
+
+@router.delete("/{backtest_id}")
+async def delete_backtest(
+    backtest_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete a single backtest result by ID."""
+    res = await db.execute(select(BacktestResultModel).where(BacktestResultModel.id == backtest_id))
+    bt = res.scalar_one_or_none()
+    if not bt:
+        raise HTTPException(status_code=404, detail="Backtest not found")
+    await db.delete(bt)
+    await db.commit()
+    return {"deleted": backtest_id}
+
+
+class BatchDeleteRequest(BaseModel):
+    ids: list[int]
+
+
+@router.delete("/batch/delete")
+async def delete_backtest_batch(
+    req: BatchDeleteRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete multiple backtest results by a list of IDs."""
+    from sqlalchemy import delete as sqla_delete
+    if not req.ids:
+        return {"deleted": 0}
+    await db.execute(sqla_delete(BacktestResultModel).where(BacktestResultModel.id.in_(req.ids)))
+    await db.commit()
+    return {"deleted": len(req.ids)}
