@@ -229,9 +229,10 @@ async def _scrape_screener(symbol: str, client: httpx.AsyncClient) -> dict:
         if current_price is not None and book_value is not None and book_value > 0:
             pb_ratio = _safe_float(current_price / book_value)
 
+        pe_ratio_val = _safe_float(pe_ratio)
         metrics = {
-            "pe_ratio": _safe_float(pe_ratio),
-            "forward_pe": None,          # not available on Screener free tier
+            "pe_ratio": pe_ratio_val,
+            "forward_pe": pe_ratio_val,  # Screener free tier has no forward PE; fall back to trailing
             "pb_ratio": pb_ratio,
             "dividend_yield": dividend_yield,
             "roe": roe,

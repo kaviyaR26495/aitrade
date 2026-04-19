@@ -8,6 +8,7 @@ Ported from pytrade's df_creator.py + db_common.py patterns:
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import date, datetime, timedelta
 
@@ -88,8 +89,11 @@ async def sync_stock_ohlcv(
 
     logger.info("Syncing %s interval=%s from=%s to=%s", stock.symbol, interval, from_date, to_date)
 
-    # Fetch from Kite API (with 2000-day chunking)
-    raw_data = zerodha.fetch_historical_data(
+    # Fetch from Kite API (with 2000-day chunking).
+    # fetch_historical_data is synchronous; wrap in to_thread to avoid
+    # blocking the asyncio event loop during multi-second REST calls.
+    raw_data = await asyncio.to_thread(
+        zerodha.fetch_historical_data,
         instrument_token=stock.kite_id,
         from_date=from_date,
         to_date=to_date,
@@ -128,17 +132,15 @@ async def sync_all_stocks(
     db: AsyncSession,
     interval: str = "day",
     stock_ids: list[int] | None = None,
-    concurrency: int = 8,
+    concurrency: int = 3,
 ) -> dict[str, int]:
     """Sync OHLCV for all active stocks (or specified subset).
 
     Uses ``asyncio.Semaphore(concurrency)`` to run up to *concurrency* syncs
-    concurrently (default 8), keeping well within Zerodha API rate limits and
-    the SQLAlchemy connection pool (pool_size=20).  Sequential execution for
-    500 stocks at ~0.5 s/stock takes > 4 minutes; parallel at 8 takes ~30 s.
+    concurrently.  Zerodha enforces a hard limit of 3 historical-data requests
+    per second; the default concurrency=3 combined with the 0.35 s sleep in
+    each worker keeps burst rate safely below that threshold.
     """
-    import asyncio
-
     if stock_ids:
         from sqlalchemy import select as _select
         from app.db.models import Stock as StockModel
@@ -155,6 +157,7 @@ async def sync_all_stocks(
         async with sem:
             try:
                 count = await sync_stock_ohlcv(db, stock, interval)
+                await asyncio.sleep(0.35)  # respect Zerodha 3 req/s rate limit
                 return stock.symbol, count
             except Exception as e:
                 logger.error("Failed to sync %s: %s", stock.symbol, e)
