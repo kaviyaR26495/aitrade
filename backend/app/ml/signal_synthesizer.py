@@ -198,8 +198,11 @@ def synthesize_signal(
     # ── 2. Blend LSTM and KNN predicted returns (inverse-variance) ──
     # True statistical inverse-variance weighting:
     # each model's weight is proportional to 1/variance.
-    lstm_var = lstm_sigma ** 2 + 1e-8
-    knn_var = knn_return_std ** 2 + 1e-8
+    # Floor std to minimum market noise (0.5%) to prevent weight explosion
+    # when KNN finds tightly clustered analogs.
+    _MIN_NOISE = 0.005  # 0.5% minimum standard deviation
+    lstm_var = max(lstm_sigma, _MIN_NOISE) ** 2
+    knn_var = max(knn_return_std, _MIN_NOISE) ** 2
 
     w_lstm = 1.0 / lstm_var
     w_knn = 1.0 / knn_var

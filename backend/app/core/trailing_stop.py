@@ -174,6 +174,10 @@ async def execute_trailing_stop_update(
             )
             return None  # Do not proceed — existing GTT still protects position
 
+    # Execution spread buffer: place limit below trigger to capture gap-downs
+    execution_sl = round(new_sl * 0.995, 2)  # 0.5% buffer for slippage
+    execution_old_sl = round(state.current_sl * 0.995, 2)
+
     # Step 2: Place new GTT OCO with updated SL
     try:
         gtt_id = await asyncio.to_thread(
@@ -191,7 +195,7 @@ async def execute_trailing_stop_update(
                     "quantity": state.quantity,
                     "order_type": "LIMIT",
                     "product": "CNC",
-                    "price": new_sl,
+                    "price": execution_sl,
                 },
                 {
                     "exchange": state.exchange,
@@ -205,8 +209,8 @@ async def execute_trailing_stop_update(
             ],
         )
         logger.info(
-            "New trailing GTT placed for %s: SL=%.2f → %.2f, target=%.2f → %s",
-            state.symbol, state.current_sl, new_sl, state.target_price, gtt_id,
+            "New trailing GTT placed for %s: SL=%.2f → %.2f (exec=%.2f), target=%.2f → %s",
+            state.symbol, state.current_sl, new_sl, execution_sl, state.target_price, gtt_id,
         )
         return str(gtt_id)
     except Exception as e:
@@ -236,7 +240,7 @@ async def execute_trailing_stop_update(
                         "quantity": state.quantity,
                         "order_type": "LIMIT",
                         "product": "CNC",
-                        "price": state.current_sl,
+                        "price": execution_old_sl,
                     },
                     {
                         "exchange": state.exchange,

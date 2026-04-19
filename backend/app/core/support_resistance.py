@@ -231,18 +231,27 @@ def _count_touches(
     atr: float,
     touch_tolerance_atr: float = 0.3,
 ) -> None:
-    """Count how many times price has tested each zone (in-place update)."""
+    """Count how many times price has tested each zone (in-place update).
+
+    Applies exponential time-decay so recent touches carry more weight
+    than old ones (a touch 240 bars ago contributes ~0.1, recent ~1.0).
+    """
+    import math
+
     tol = atr * touch_tolerance_atr
+    n_bars = len(closes)
     for zone in zones:
         mid = zone.midpoint
-        count = 0
+        count = 0.0
         last_idx = 0
-        for i in range(len(closes)):
+        for i in range(n_bars):
             # Price came within tolerance of the zone midpoint
             if abs(lows[i] - mid) <= tol or abs(highs[i] - mid) <= tol:
-                count += 1
+                # Exponential decay: recent bars get weight ~1.0, oldest ~0.13
+                weight = math.exp(-2.0 * (n_bars - 1 - i) / max(n_bars, 1))
+                count += weight
                 last_idx = i
-        zone.touch_count = max(zone.touch_count, count)
+        zone.touch_count = max(zone.touch_count, int(round(count)))
         zone.last_tested_idx = last_idx
 
 

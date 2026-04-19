@@ -130,9 +130,13 @@ class MetaClassifier:
         from sklearn.metrics import roc_auc_score, accuracy_score
 
         n = len(X)
+        # Data MUST be sorted chronologically before calling train().
+        # Purged split: leave a 5-sample gap between train and validation
+        # to prevent overlapping hold-period target leakage.
+        purge_gap = 5
         split = int(n * (1 - eval_ratio))
-        X_tr, X_va = X[:split], X[split:]
-        y_tr, y_va = y[:split], y[split:]
+        X_tr, X_va = X[:split - purge_gap], X[split:]
+        y_tr, y_va = y[:split - purge_gap], y[split:]
 
         params = {
             "objective": "binary:logistic",
