@@ -4,13 +4,16 @@ Trains on GoldenPatterns captured within the last `lookback_years` years.
 New models are *staged* (inserted into DB) but do NOT replace the active
 EnsembleConfig — the operator activates them manually after reviewing accuracy.
 
-Typical call-site: POST /api/training/auto-retrain (monthly recommended).
+Typical call-site: the ``task_monthly_retrain`` Celery task in workers/tasks.py.
+Heavy ML work (PyTorch LSTM, KNN) must only be invoked from a Celery worker
+process — never from the FastAPI web process — to avoid memory spikes and
+event-loop starvation.  The thread executor below uses the default pool so that
+PyTorch can independently manage its intra-op parallelism (OMP_NUM_THREADS).
 """
 from __future__ import annotations
 
 import asyncio
 import logging
-from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
 from pathlib import Path
 from typing import Callable
@@ -26,9 +29,6 @@ from app.db.models import GoldenPattern, IntervalEnum
 from app.db.database import async_session_factory
 
 logger = logging.getLogger(__name__)
-
-# Dedicated single-worker executor so CT training never starves the event loop
-_ct_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ct_train")
 
 
 def _build_training_arrays(
@@ -58,6 +58,10 @@ async def auto_retrain(
     log_fn: Callable[[str], None] | None = None,
 ) -> dict:
     """Retrain KNN + LSTM on a rolling lookback window of GoldenPatterns.
+
+    IMPORTANT: This function performs heavy CPU/memory work (PyTorch LSTM,
+    scikit-learn KNN).  It must only be called from a Celery worker process
+    (task_monthly_retrain), never from within the FastAPI web process.
 
     Steps:
       1. Query GoldenPattern WHERE date >= cutoff
@@ -116,7 +120,7 @@ async def auto_retrain(
 
     try:
         X, y, roc5_targets = await loop.run_in_executor(
-            _ct_executor,
+            None,
             lambda: _build_training_arrays(db_patterns_list, seq_len=seq_len),
         )
     except Exception as exc:
@@ -155,7 +159,7 @@ async def auto_retrain(
         from app.ml.knn_distiller import train_knn, save_knn_model
 
         knn_obj, knn_metrics = await loop.run_in_executor(
-            _ct_executor,
+            None,
             lambda: train_knn(
                 X, y,
                 k_neighbors=11,
@@ -214,7 +218,7 @@ async def auto_retrain(
         from app.ml.lstm_distiller import train_lstm, save_lstm_model
 
         lstm_obj, lstm_metrics = await loop.run_in_executor(
-            _ct_executor,
+            None,
             lambda: train_lstm(
                 X, y,
                 hidden_size=256,

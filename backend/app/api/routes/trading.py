@@ -289,11 +289,20 @@ async def place_order(
 class ExecuteSignalRequest(BaseModel):
     stock_id: int
     ensemble_prediction_id: int | None = None
-    quantity: int
+    # Quantity: provide explicitly OR set auto_kelly=True to compute via Half-Kelly
+    quantity: int | None = None
+    auto_kelly: bool = False
     exchange: str = "NSE"
     product: str = "CNC"
+    # ATR-based GTT parameters (replaces fixed-pct gtt_sell_pct / gtt_stoploss_pct)
+    atr_value: float | None = None      # current ATR(14) in ₹; required for ATR-GTT
+    atr_multiple_sl: float = 1.5        # stop-loss = fill − atr_multiple_sl × ATR
+    rr_ratio: float = 2.5               # target distance = sl_distance × rr_ratio
+    # Legacy percentage-based GTT (used as fallback when atr_value is None)
     gtt_sell_pct: float = 15.0
     gtt_stoploss_pct: float = 5.0
+    # CIO Investment Committee gate
+    enable_cio_gate: bool = True
     max_attempts: int = 5
 
 
@@ -304,18 +313,46 @@ async def execute_signal(
 ):
     """Limit-chase a BUY then immediately place protective GTT OCO stoploss+target.
 
-    The GTT trigger prices are anchored to the *actual fill price* returned by
-    Zerodha order_history so slippage is automatically absorbed.  Returns the
-    chase order id and GTT id so the caller can track both legs.
+    Enhanced with:
+    - CIO Investment Committee gate (enable_cio_gate=True by default)
+    - Half-Kelly position sizing (auto_kelly=True)
+    - ATR-calibrated GTT OCO (when atr_value is provided)
     """
     stock = await crud.get_stock_by_id(db, req.stock_id)
     if not stock:
         raise HTTPException(status_code=404, detail="Stock not found")
 
+    # ── CIO Investment Committee gate ─────────────────────────────────
+    if req.enable_cio_gate:
+        from app.core.agents.investment_committee import evaluate as cio_evaluate
+        try:
+            decision = await cio_evaluate(
+                db,
+                stock_id=req.stock_id,
+                symbol=stock.symbol,
+                atr_value=req.atr_value,
+            )
+            if decision.final_signal != "BUY":
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        f"CIO Investment Committee rejected trade: "
+                        f"signal={decision.final_signal}, "
+                        f"confidence={decision.weighted_confidence:.2%}. "
+                        f"Reason: {decision.reasoning}"
+                    ),
+                )
+            logger.info(
+                "CIO gate APPROVED BUY for %s (conf=%.2f): %s",
+                stock.symbol, decision.weighted_confidence, decision.reasoning,
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            # Non-fatal: log and proceed if CIO itself errors (data gaps, etc.)
+            logger.warning("CIO gate error for %s — proceeding: %s", stock.symbol, exc)
+
     # --- Ex-date / corporate action guard ---
-    # Check DB for an existing active block first (persists across restarts).
-    # If none exists, run a live OHLC gap check; if a gap is detected, create a
-    # 48-hour block in the DB and refuse the trade.
     from datetime import timedelta
     from app.db.models import now_ist
 
@@ -352,19 +389,60 @@ async def execute_signal(
             ),
         )
 
+    # ── Half-Kelly position sizing ────────────────────────────────────
+    quantity = req.quantity
+    if req.auto_kelly or quantity is None:
+        try:
+            snapshot = await crud.get_latest_portfolio_snapshot(db)
+            if snapshot and snapshot.cash_available > 0:
+                # Lookup ensemble prediction confidence for this stock
+                preds = await crud.get_ensemble_predictions_for_date(
+                    db, interval="day", min_confidence=0.0, agreement_only=False
+                )
+                pred = next((p for p in preds if p.stock_id == req.stock_id), None)
+                win_prob = pred.confidence if pred else 0.55
+                rr = req.rr_ratio  # reward/risk ratio
+
+                # Kelly fraction: f* = (p×b − (1−p)) / b
+                kelly_f = (win_prob * rr - (1 - win_prob)) / rr
+                kelly_f = max(0.0, kelly_f)
+                half_kelly_f = kelly_f / 2.0  # Half-Kelly for conservatism
+
+                # Max allocation: 10% of total portfolio
+                max_alloc_pct = 0.10
+                alloc_pct = min(half_kelly_f, max_alloc_pct)
+                total_portfolio = snapshot.cash_available + snapshot.holdings_value
+                alloc_capital = alloc_pct * total_portfolio
+
+                # Get current LTP to estimate quantity
+                ltp = await zerodha.async_get_ltp(stock.symbol, req.exchange)
+                if ltp and ltp > 0:
+                    quantity = max(1, int(alloc_capital / ltp))
+                    logger.info(
+                        "Half-Kelly sizing for %s: win_prob=%.3f, kelly_f=%.4f, "
+                        "half_kelly=%.4f, alloc=₹%.0f, qty=%d",
+                        stock.symbol, win_prob, kelly_f, half_kelly_f, alloc_capital, quantity,
+                    )
+        except Exception as exc:
+            logger.warning("Half-Kelly computation failed for %s: %s", stock.symbol, exc)
+
+    if not quantity or quantity <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Could not determine quantity — provide quantity explicitly or enable auto_kelly with a valid portfolio snapshot.",
+        )
+
     # --- BUY leg: limit-chase until filled or MARKET fallback ---
     try:
         result = await zerodha.async_place_limit_chase_order(
             symbol=stock.symbol,
             transaction_type="BUY",
-            quantity=req.quantity,
+            quantity=quantity,
             exchange=req.exchange,
             product=req.product,
             max_attempts=req.max_attempts,
         )
     except zerodha.CorporateActionGapError as exc:
-        # Last-resort guard fired inside the chase loop (race condition).
-        # Write a 48-h DB block so restarts honour the cooldown too.
         from datetime import timedelta
         from app.db.models import now_ist
         blocked_until = now_ist() + timedelta(hours=48)
@@ -390,7 +468,7 @@ async def execute_signal(
         ensemble_prediction_id=req.ensemble_prediction_id,
         variety="regular",
         transaction_type="BUY",
-        quantity=req.quantity,
+        quantity=quantity,
         price=fill_price,
         status="filled",
         zerodha_order_id=chase_order_id,
@@ -399,20 +477,30 @@ async def execute_signal(
     await db.commit()
     await db.refresh(chase_record)
 
-    # --- GTT leg: 3-attempt retry so a transient network blip can't leave
-    #     the position naked. If all retries fail, fire an emergency alert.   ---
+    # --- GTT leg: ATR-based OCO when atr_value provided, else percentage fallback ---
     gtt_id: int | None = None
     last_gtt_exc: Exception | None = None
     for attempt in range(1, 4):
         try:
-            gtt_id = await zerodha.async_place_gtt_order(
-                symbol=stock.symbol,
-                exchange=req.exchange,
-                avg_price=fill_price,
-                quantity=req.quantity,
-                sell_pct=req.gtt_sell_pct,
-                stoploss_pct=req.gtt_stoploss_pct,
-            )
+            if req.atr_value and req.atr_value > 0:
+                gtt_id = await zerodha.async_place_gtt_oco_atr(
+                    symbol=stock.symbol,
+                    exchange=req.exchange,
+                    fill_price=fill_price,
+                    quantity=quantity,
+                    atr_value=req.atr_value,
+                    atr_multiple_sl=req.atr_multiple_sl,
+                    rr_ratio=req.rr_ratio,
+                )
+            else:
+                gtt_id = await zerodha.async_place_gtt_order(
+                    symbol=stock.symbol,
+                    exchange=req.exchange,
+                    avg_price=fill_price,
+                    quantity=quantity,
+                    sell_pct=req.gtt_sell_pct,
+                    stoploss_pct=req.gtt_stoploss_pct,
+                )
             if gtt_id:
                 last_gtt_exc = None
                 break
@@ -426,9 +514,8 @@ async def execute_signal(
                 await asyncio.sleep(2)
 
     if not gtt_id:
-        # Position held with zero stoploss protection — alert immediately.
         alert_msg = (
-            f"URGENT: Bought {req.quantity} {stock.symbol} @ {fill_price:.2f} "
+            f"URGENT: Bought {quantity} {stock.symbol} @ {fill_price:.2f} "
             f"(order {chase_order_id}) but GTT stoploss failed after 3 attempts. "
             f"Last error: {last_gtt_exc}"
         )
@@ -447,7 +534,7 @@ async def execute_signal(
         ensemble_prediction_id=req.ensemble_prediction_id,
         variety="gtt",
         transaction_type="SELL",
-        quantity=req.quantity,
+        quantity=quantity,
         price=fill_price,
         status="submitted",
         zerodha_order_id=str(gtt_id) if gtt_id else None,
@@ -461,6 +548,7 @@ async def execute_signal(
         "chase_order_id": chase_order_id,
         "fill_price": fill_price,
         "gtt_id": gtt_id,
+        "quantity": quantity,
         "chase_db_id": chase_record.id,
         "gtt_db_id": gtt_record.id,
     }
