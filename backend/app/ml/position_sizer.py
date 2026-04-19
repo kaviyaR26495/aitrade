@@ -357,3 +357,52 @@ def sector_concentration_multiplier(
         return 0.0
     return 1.0
 
+
+async def compute_position_size(db, stock, entry_price: float) -> int:
+    """Async position sizing for the execute and preview routes.
+
+    Fetches the latest portfolio snapshot and the stock's recent realised
+    volatility from the DB, then applies volatility-target sizing.
+
+    Returns
+    -------
+    int — number of shares to buy (≥ 1).
+    """
+    import math
+    try:
+        from app.db import crud
+        from app.db.models import StockIndicators
+        from sqlalchemy import select as sqla_select
+
+        snapshot = await crud.get_latest_portfolio_snapshot(db)
+        total_equity = 100_000.0
+        if snapshot:
+            cash = snapshot.cash_available or 0.0
+            mkt = snapshot.holdings_value or 0.0
+            if cash + mkt > 0:
+                total_equity = cash + mkt
+
+        ind = (await db.execute(
+            sqla_select(StockIndicators)
+            .where(
+                StockIndicators.stock_id == stock.id,
+                StockIndicators.interval == "day",
+            )
+            .order_by(StockIndicators.date.desc())
+            .limit(1)
+        )).scalar_one_or_none()
+
+        realized_vol_daily = float(getattr(ind, "realized_vol_20", None) or 0.015)
+
+        frac = size_trade(
+            method="volatility_target",
+            realized_vol_daily=realized_vol_daily,
+            max_risk_pct=0.02,
+            stoploss_pct=0.05,
+        )
+
+        position_value = frac * total_equity
+        return max(1, math.floor(position_value / entry_price))
+    except Exception:
+        return 1
+

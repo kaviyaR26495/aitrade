@@ -989,7 +989,7 @@ async def get_distill_log(knn_model_id: int):
     }
 
 
-
+@router.get("/training-logs")
 async def list_training_log_files():
     """List all training log files with sizes."""
     files = []

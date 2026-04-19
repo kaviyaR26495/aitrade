@@ -1,11 +1,13 @@
 import { Card, Button, Badge, StatCard, EmptyState, PageHeader, Table, SkeletonTable, type TableColumn } from '../components/ui';
-import { useHoldings, usePositions } from '../hooks/useApi';
+import { useHoldings, usePositions, usePortfolioSnapshot, useReconcilePortfolio } from '../hooks/useApi';
 import { useAppStore } from '../store/appStore';
-import { Briefcase, RefreshCw } from 'lucide-react';
+import { Briefcase, RefreshCw, RotateCcw, DollarSign } from 'lucide-react';
 
 export default function Portfolio() {
   const { data: holdingsData, isLoading: loadingHoldings, refetch: refetchHoldings } = useHoldings();
   const { data: positionsData, isLoading: loadingPositions, refetch: refetchPositions } = usePositions();
+  const { data: snapshot, isLoading: loadingSnapshot } = usePortfolioSnapshot();
+  const reconcileMutation = useReconcilePortfolio();
   const { addNotification } = useAppStore();
 
   const holdings = holdingsData?.holdings ?? [];
@@ -57,13 +59,39 @@ export default function Portfolio() {
     }
   };
 
+  const handleReconcile = () => {
+    reconcileMutation.mutate(undefined, {
+      onSuccess: (res: any) => {
+        addNotification({ type: 'success', message: `Reconciled — ₹${res.total_equity?.toLocaleString('en-IN', { maximumFractionDigits: 0 })} total equity` });
+      },
+      onError: (e: any) => {
+        addNotification({ type: 'error', message: e?.response?.data?.detail ?? 'Reconciliation failed' });
+      },
+    });
+  };
+
   return (
     <div className="space-y-8">
       <PageHeader title="Portfolio" description="Holdings, positions, and P&L overview">
-        <Button variant="secondary" size="sm" onClick={handleRefresh} loading={loadingHoldings || loadingPositions}>
-          <RefreshCw size={14} className={(loadingHoldings || loadingPositions) ? 'animate-spin' : ''} /> Refresh
-        </Button>
+        <div className="flex gap-2">
+          <Button variant="secondary" size="sm" onClick={handleReconcile} loading={reconcileMutation.isPending}>
+            <RotateCcw size={14} /> Reconcile
+          </Button>
+          <Button variant="secondary" size="sm" onClick={handleRefresh} loading={loadingHoldings || loadingPositions}>
+            <RefreshCw size={14} className={(loadingHoldings || loadingPositions) ? 'animate-spin' : ''} /> Refresh
+          </Button>
+        </div>
       </PageHeader>
+
+      {/* Reconciliation snapshot strip */}
+      {!loadingSnapshot && snapshot && (
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 px-1">
+          <StatCard label="Cash Available" value={`₹${snapshot.cash_available?.toLocaleString('en-IN', { maximumFractionDigits: 0 })}`} icon={<DollarSign size={16} />} color="var(--success)" />
+          <StatCard label="Holdings Value" value={`₹${snapshot.holdings_value?.toLocaleString('en-IN', { maximumFractionDigits: 0 })}`} icon={<Briefcase size={16} />} color="var(--primary)" />
+          <StatCard label="Total Equity" value={`₹${snapshot.total_equity?.toLocaleString('en-IN', { maximumFractionDigits: 0 })}`} color="var(--text)" />
+          <StatCard label="Unrealised P&L" value={`₹${snapshot.unrealized_pnl?.toLocaleString('en-IN', { maximumFractionDigits: 0 })}`} color={snapshot.unrealized_pnl >= 0 ? 'var(--success)' : 'var(--danger)'} />
+        </div>
+      )}
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-5">
         <StatCard label="Holdings" value={holdings.length} icon={<Briefcase size={18} />} color="var(--primary)" />

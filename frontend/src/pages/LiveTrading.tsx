@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { Card, Button, Badge, StatCard, EmptyState, PageHeader, Table, Modal, Tooltip, SkeletonTable, type TableColumn } from '../components/ui';
-import { useSignals, useGenerateSignals, useExecuteSignal, useOrders, useUniverseStocks, usePredictionJob, useCancelPredictionJob } from '../hooks/useApi';
+import { useSignals, useGenerateSignals, useExecuteSignal, useOrders, useUniverseStocks, usePredictionJob, useCancelPredictionJob, useSignalPreview } from '../hooks/useApi';
 import { useAppStore } from '../store/appStore';
 import { Crosshair, Play, Shield, XCircle, Loader2, Filter, Zap, ToggleLeft, ToggleRight } from 'lucide-react';
 import { useEffect } from 'react';
@@ -39,6 +39,7 @@ export default function LiveTrading() {
   const [executeModal, setExecuteModal] = useState<any>(null);
   const [dryRun, setDryRun] = useState(true);
   const executeSignal = useExecuteSignal();
+  const { data: signalPreview } = useSignalPreview(executeModal?.id ?? null);
 
   useEffect(() => {
     if (job?.status === 'completed' || job?.status === 'failed' || job?.status === 'cancelled') {
@@ -170,7 +171,15 @@ export default function LiveTrading() {
       tooltip: 'Trading days since signal was generated',
       align: 'center',
       mono: true,
-      render: (s) => <span className="text-xs tabular-nums text-[var(--text-dim)]">{s.days_since_signal ?? 0}</span>,
+      render: (s) => {
+        const days = s.days_since_signal ?? 0;
+        const stale = days > 15;
+        return (
+          <span className={`text-xs tabular-nums ${stale ? 'text-rose-400 font-bold' : 'text-[var(--text-dim)]'}`}>
+            {days}{stale && ' (Stale)'}
+          </span>
+        );
+      },
     },
     {
       key: 'trailing',
@@ -475,6 +484,16 @@ export default function LiveTrading() {
               <div className="flex justify-between text-xs">
                 <span className="text-[var(--text-muted)]">Est. Cost</span>
                 <span className="font-mono">{((executeModal.execution_cost_pct ?? 0) * 100).toFixed(2)} bps</span>
+              </div>
+              <div className="flex justify-between text-xs items-center pt-1 border-t border-[var(--border)]">
+                <span className="text-[var(--text-muted)] font-semibold">Position Size</span>
+                {signalPreview ? (
+                  <span className="font-mono font-bold text-[var(--primary)]">
+                    {signalPreview.quantity} shares (~₹{signalPreview.position_value.toLocaleString('en-IN', { maximumFractionDigits: 0 })})
+                  </span>
+                ) : (
+                  <span className="font-mono text-[var(--text-dim)]">Calculating…</span>
+                )}
               </div>
             </div>
 

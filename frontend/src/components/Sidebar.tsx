@@ -5,6 +5,24 @@ import {
   TrendingUp, Palette, ListChecks,
 } from 'lucide-react';
 import { useAppStore } from '../store/appStore';
+import { usePipelineStatus } from '../hooks/useApi';
+
+const PIPELINE_STAGE_LABELS = [
+  'Data Sync', 'CQL Pre-train', 'BC Warmup',
+  'PPO Fine-tune', 'Ensemble Distill', 'Backtest', 'Ready',
+];
+
+function getPipelineLabel(status?: { status: string; current_stage: number } | null): string {
+  if (!status) return 'System Idle — Ready';
+  if (status.status === 'queued') return 'Queued…';
+  if (status.status === 'running') {
+    const label = PIPELINE_STAGE_LABELS[status.current_stage] ?? `Stage ${status.current_stage + 1}`;
+    return `Training: ${label}…`;
+  }
+  if (status.status === 'completed') return 'Training Complete';
+  if (status.status === 'failed') return 'Pipeline Failed';
+  return 'System Idle — Ready';
+}
 
 const NAV_SECTIONS = [
   {
@@ -41,7 +59,17 @@ const NAV_SECTIONS = [
 ];
 
 export default function Sidebar() {
-  const { sidebarOpen, toggleSidebar } = useAppStore();
+  const { sidebarOpen, toggleSidebar, activePipelineJobId } = useAppStore();
+  const { data: pipelineStatus } = usePipelineStatus(activePipelineJobId);
+
+  const isActive = pipelineStatus?.status === 'running' || pipelineStatus?.status === 'queued';
+  const isFailed = pipelineStatus?.status === 'failed';
+  const dotClass = isActive
+    ? 'bg-emerald-400 shadow-[0_0_6px_rgba(16,185,129,0.5)] animate-pulse'
+    : isFailed
+      ? 'bg-red-400 shadow-[0_0_6px_rgba(239,68,68,0.5)]'
+      : 'bg-emerald-400 shadow-[0_0_6px_rgba(16,185,129,0.5)]';
+  const pipelineLabel = getPipelineLabel(pipelineStatus ?? null);
 
   return (
     <aside
@@ -128,14 +156,14 @@ export default function Sidebar() {
         {sidebarOpen ? (
           <div className="px-3 py-2.5 rounded-lg bg-[var(--primary-subtle)] border border-[var(--primary-glow)]">
             <div className="flex items-center gap-2 mb-0.5">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shadow-[0_0_6px_rgba(16,185,129,0.5)]" />
+              <span className={`w-1.5 h-1.5 rounded-full ${dotClass}`} />
               <span className="text-[9px] font-bold uppercase tracking-[0.12em] text-[var(--primary)]">Pipeline</span>
             </div>
-            <div className="text-[11px] text-[var(--text-muted)] font-medium">Regime → RL → KNN+LSTM</div>
+            <div className="text-[11px] text-[var(--text-muted)] font-medium">{pipelineLabel}</div>
           </div>
         ) : (
           <div className="flex justify-center">
-            <div className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_8px_rgba(16,185,129,0.5)]" title="Pipeline Active" />
+            <div className={`w-2 h-2 rounded-full ${dotClass}`} title={pipelineLabel} />
           </div>
         )}
       </div>

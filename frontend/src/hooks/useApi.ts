@@ -408,23 +408,6 @@ export const useDeleteBacktestBatch = () => {
 };
 
 // ── Trading hooks ──
-export const usePredictions = (params?: Record<string, unknown>, options: any = {}) =>
-  useQuery({
-    queryKey: ['predictions', params],
-    queryFn: () => api.getPredictions(params).then(r => r.data),
-    ...options
-  });
-
-export const useRunPredictions = () => {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (params: Record<string, unknown>) => api.runPredictions(params).then(r => r.data),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['prediction-batches'] });
-    },
-  });
-};
-
 export const usePredictionJob = (jobId: string | null) =>
   useQuery({
     queryKey: ['prediction-job', jobId],
@@ -449,26 +432,6 @@ export const useCancelPredictionJob = () => {
     },
   });
 };
-
-export const useBatches = (interval = 'day') =>
-  useQuery({
-    queryKey: ['prediction-batches', interval],
-    queryFn: () => api.getBatches(interval).then(r => r.data),
-  });
-
-export const useDeleteBatch = () => {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (batchId: string) => api.deleteBatch(batchId),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['prediction-batches'] });
-      qc.invalidateQueries({ queryKey: ['predictions'] });
-    },
-  });
-};
-
-export const usePlaceOrder = () =>
-  useMutation({ mutationFn: (params: Record<string, unknown>) => api.placeOrder(params) });
 
 export const useOrders = (limit = 50) =>
   useQuery({ queryKey: ['orders', limit], queryFn: () => api.listOrders(limit).then(r => r.data) });
@@ -502,11 +465,12 @@ export const useExecuteSignal = () => {
   });
 };
 
-export const useForwardLook = (params: { stock_id: number; after_date: string; interval?: string }) =>
+export const useSignalPreview = (signalId: number | null) =>
   useQuery({
-    queryKey: ['forward-look', params.stock_id, params.after_date, params.interval],
-    queryFn: () => api.getForwardLook(params).then(r => r.data),
-    enabled: !!params.stock_id && !!params.after_date
+    queryKey: ['signal-preview', signalId],
+    queryFn: () => api.getSignalPreview(signalId!).then(r => r.data),
+    enabled: !!signalId,
+    staleTime: 60_000,
   });
 
 // ── Portfolio hooks ──
@@ -515,6 +479,26 @@ export const useHoldings = () =>
 
 export const usePositions = () =>
   useQuery({ queryKey: ['positions'], queryFn: () => api.getPositions().then(r => r.data) });
+
+export const usePortfolioSnapshot = () =>
+  useQuery({
+    queryKey: ['portfolio-snapshot'],
+    queryFn: () => api.getPortfolioSnapshot().then(r => r.data),
+    staleTime: 5 * 60 * 1000,
+    retry: false,
+  });
+
+export const useReconcilePortfolio = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.reconcilePortfolio().then(r => r.data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['portfolio-snapshot'] });
+      qc.invalidateQueries({ queryKey: ['holdings'] });
+      qc.invalidateQueries({ queryKey: ['positions'] });
+    },
+  });
+};
 
 // ── Config hooks ──
 export const useConfig = () =>

@@ -152,38 +152,28 @@ export const deleteBacktest = (id: number) => api.delete(`/backtest/${id}`);
 export const deleteBacktestBatch = (ids: number[]) => api.delete('/backtest/batch/delete', { data: { ids } });
 
 // ── Trading ──
-export const getPredictions = (params?: { target_date?: string; batch_id?: string; interval?: string; min_confidence?: number; agreement_only?: boolean }) =>
-  api.get('/trading/predictions', { params });
 export const getPredictionJob = (jobId: string) =>
   api.get(`/trading/predictions/jobs/${jobId}`);
 export const cancelPredictionJob = (jobId: string) =>
   api.delete(`/trading/predictions/jobs/${jobId}`);
-export const getBatches = (interval: string = 'day') =>
-  api.get('/trading/batches', { params: { interval } });
-export const deleteBatch = (batchId: string) =>
-  api.delete(`/trading/batches/${batchId}`);
-export const runPredictions = (params: Record<string, unknown>) =>
-  api.post('/trading/run-predictions', params);
-export const placeOrder = (params: Record<string, unknown>) =>
-  api.post('/trading/order', params);
 export const listOrders = (limit?: number) =>
   api.get('/trading/orders', { params: { limit } });
-export const getForwardLook = (params: { stock_id: number; after_date: string; interval?: string }) =>
-  api.get('/trading/predictions/forward-look', { params });
 
 // ── TPML Signals ──
 export const getSignals = (params?: { target_date?: string; status?: string; min_pop?: number }) =>
   api.get('/trading/signals', { params });
 export const generateSignals = (params: { interval?: string; stock_ids?: number[]; target_date?: string; pop_threshold?: number }) =>
   api.post('/trading/signals/generate', params);
+export const getSignalPreview = (signalId: number) =>
+  api.get<{ signal_id: number; quantity: number; entry_price: number; position_value: number }>(`/trading/signals/${signalId}/preview`);
 export const executeSignal = (signalId: number, dryRun = false) =>
   api.post(`/trading/signals/${signalId}/execute`, null, { params: { dry_run: dryRun } });
 
 // ── Portfolio ──
 export const getHoldings = () => api.get('/portfolio/holdings');
 export const getPositions = () => api.get('/portfolio/positions');
-export const getLtp = (symbol: string) => api.get(`/portfolio/ltp/${symbol}`);
-export const exitAll = () => api.post('/portfolio/exit-all');
+export const reconcilePortfolio = () => api.post('/portfolio/reconcile');
+export const getPortfolioSnapshot = () => api.get('/portfolio/snapshot');
 
 // ── Chat ──
 export const getChatProviders = () => api.get('/chat/providers');

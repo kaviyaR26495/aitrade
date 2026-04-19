@@ -709,6 +709,36 @@ async def get_signals(
     ]
 
 
+@router.get("/signals/{signal_id}/preview")
+async def preview_signal(signal_id: int, db: AsyncSession = Depends(get_db)):
+    """Return estimated quantity and capital allocation without placing an order."""
+    from sqlalchemy import select
+    from app.db.models import TradeSignal, Stock
+
+    signal = (await db.execute(
+        select(TradeSignal).where(TradeSignal.id == signal_id)
+    )).scalar_one_or_none()
+    if not signal:
+        raise HTTPException(404, f"Signal {signal_id} not found")
+
+    stock = (await db.execute(
+        select(Stock).where(Stock.id == signal.stock_id)
+    )).scalar_one_or_none()
+
+    try:
+        from app.ml.position_sizer import compute_position_size
+        quantity = await compute_position_size(db, stock, signal.entry_price)
+    except Exception:
+        quantity = 1
+
+    return {
+        "signal_id": signal.id,
+        "quantity": quantity,
+        "entry_price": float(signal.entry_price),
+        "position_value": round(quantity * float(signal.entry_price), 2),
+    }
+
+
 @router.post("/signals/{signal_id}/execute")
 async def execute_signal(
     signal_id: int,
