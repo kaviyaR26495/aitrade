@@ -815,3 +815,104 @@ async def async_place_limit_chase_order(
 async def async_exit_all_positions() -> list[str]:
     return await asyncio.to_thread(exit_all_positions)
 
+
+# ── ATR-Based GTT-OCO ─────────────────────────────────────────────────────────
+# Uses the stock's Average True Range to set stop-loss and target levels that
+# adapt to actual volatility rather than fixed percentages.
+#
+#   stop_loss  = fill_price − atr_multiple_sl  × atr
+#   target     = fill_price + atr_multiple_tp  × atr
+#   rr_ratio   : target / risk_per_share (used to compute atr_multiple_tp)
+#
+# Example with atr=10, atr_multiple_sl=1.5, rr_ratio=2.5:
+#   stop_loss = fill_price − 15       (1.5 ATR risk)
+#   target    = fill_price + 37.50    (= 1.5 × 2.5 ATR reward)
+
+def place_gtt_oco_atr(
+    symbol: str,
+    exchange: str,
+    fill_price: float,
+    quantity: int,
+    atr_value: float,
+    atr_multiple_sl: float = 1.5,
+    rr_ratio: float = 2.5,
+    tick_size: float = 0.05,
+) -> int | None:
+    """Place ATR-calibrated GTT OCO order.
+
+    Args:
+        fill_price:     Actual execution price (from limit-chase fill).
+        atr_value:      Latest ATR(14) for the stock, in rupees.
+        atr_multiple_sl: Number of ATRs to risk as stop-loss distance.
+        rr_ratio:       Reward-to-risk ratio for the target leg.
+        tick_size:      Exchange minimum price increment for rounding.
+
+    Returns:
+        GTT trigger ID or None on failure.
+    """
+    risk_per_share = atr_value * atr_multiple_sl
+    reward_per_share = risk_per_share * rr_ratio
+
+    stoploss_price = round(
+        max(fill_price - risk_per_share, tick_size) / tick_size
+    ) * tick_size
+    target_price = round((fill_price + reward_per_share) / tick_size) * tick_size
+
+    kite = get_kite()
+    try:
+        gtt_id = kite.place_gtt(
+            trigger_type=kite.GTT_TYPE_OCO,
+            tradingsymbol=symbol,
+            exchange=exchange,
+            trigger_values=[stoploss_price, target_price],
+            last_price=fill_price,
+            orders=[
+                {
+                    "exchange": exchange,
+                    "tradingsymbol": symbol,
+                    "transaction_type": "SELL",
+                    "quantity": quantity,
+                    "order_type": "LIMIT",
+                    "product": "CNC",
+                    "price": stoploss_price,
+                },
+                {
+                    "exchange": exchange,
+                    "tradingsymbol": symbol,
+                    "transaction_type": "SELL",
+                    "quantity": quantity,
+                    "order_type": "LIMIT",
+                    "product": "CNC",
+                    "price": target_price,
+                },
+            ],
+        )
+        logger.info(
+            "ATR-GTT placed for %s: fill=%.2f  SL=%.2f (−%.2f)  Target=%.2f (+%.2f)  → %s",
+            symbol, fill_price, stoploss_price, risk_per_share,
+            target_price, reward_per_share, gtt_id,
+        )
+        return gtt_id
+    except Exception as exc:
+        logger.error("ATR-GTT failed for %s: %s", symbol, exc)
+        raise
+
+
+async def async_place_gtt_oco_atr(
+    symbol: str,
+    exchange: str,
+    fill_price: float,
+    quantity: int,
+    atr_value: float,
+    atr_multiple_sl: float = 1.5,
+    rr_ratio: float = 2.5,
+    tick_size: float = 0.05,
+) -> int | None:
+    """Async wrapper for :func:`place_gtt_oco_atr`."""
+    return await asyncio.to_thread(
+        place_gtt_oco_atr,
+        symbol, exchange, fill_price, quantity,
+        atr_value, atr_multiple_sl, rr_ratio, tick_size,
+    )
+
+

@@ -1,0 +1,89 @@
+"""Celery application factory.
+
+Broker  : Redis  (redis://localhost:6379/0)
+Backend : Redis  (redis://localhost:6379/1)
+
+Two queues:
+  data  — I/O-heavy tasks (OHLCV sync, fundamentals, sentiment)
+  ml    — CPU/GPU-heavy tasks (retraining, predictions)
+
+Concurrency note
+----------------
+All Celery tasks run in a *separate process* from the FastAPI server, so
+they cannot share SQLAlchemy async sessions.  Each task creates its own
+``asyncio.run(...)`` context and opens a fresh DB session via
+``async_session_factory()``.
+"""
+from __future__ import annotations
+
+import os
+
+from celery import Celery
+from celery.schedules import crontab
+from kombu import Queue
+
+# Allow overriding via environment variable (useful in Docker)
+BROKER_URL = os.environ.get("CELERY_BROKER_URL", "redis://localhost:6379/0")
+RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", "redis://localhost:6379/1")
+
+celery_app = Celery(
+    "aitrade",
+    broker=BROKER_URL,
+    backend=RESULT_BACKEND,
+    include=["app.workers.tasks"],
+)
+
+celery_app.conf.update(
+    # Serialisation
+    task_serializer="json",
+    result_serializer="json",
+    accept_content=["json"],
+    # Result expiry
+    result_expires=86400,  # 24 hours
+    # Worker behaviour
+    worker_prefetch_multiplier=1,   # don't pre-fetch ML tasks — they're heavy
+    task_acks_late=True,            # ack only after task completes
+    worker_max_tasks_per_child=50,  # recycle workers to avoid memory leaks after GPU ops
+    # Queues
+    task_default_queue="data",
+    task_queues=(
+        Queue("data"),
+        Queue("ml"),
+    ),
+    task_routes={
+        "app.workers.tasks.task_nightly_sync": {"queue": "data"},
+        "app.workers.tasks.task_fundamental_sync": {"queue": "data"},
+        "app.workers.tasks.task_morning_sentiment": {"queue": "data"},
+        "app.workers.tasks.task_morning_predictions": {"queue": "ml"},
+        "app.workers.tasks.task_monthly_retrain": {"queue": "ml"},
+    },
+    # Beat schedule (IST = UTC+5:30)
+    beat_schedule={
+        # Nightly OHLCV + indicator sync — 18:30 IST (13:00 UTC)
+        "nightly-sync": {
+            "task": "app.workers.tasks.task_nightly_sync",
+            "schedule": crontab(hour=13, minute=0),
+        },
+        # Weekly fundamental refresh — Sunday 20:00 IST (14:30 UTC)
+        "weekly-fundamental-sync": {
+            "task": "app.workers.tasks.task_fundamental_sync",
+            "schedule": crontab(hour=14, minute=30, day_of_week=0),
+        },
+        # Morning sentiment — 08:45 IST (03:15 UTC)
+        "morning-sentiment": {
+            "task": "app.workers.tasks.task_morning_sentiment",
+            "schedule": crontab(hour=3, minute=15),
+        },
+        # Morning predictions — 09:00 IST (03:30 UTC)
+        "morning-predictions": {
+            "task": "app.workers.tasks.task_morning_predictions",
+            "schedule": crontab(hour=3, minute=30),
+        },
+        # Monthly retraining — 1st of each month at 22:00 IST (16:30 UTC)
+        "monthly-retrain": {
+            "task": "app.workers.tasks.task_monthly_retrain",
+            "schedule": crontab(hour=16, minute=30, day_of_month=1),
+        },
+    },
+    timezone="UTC",
+)

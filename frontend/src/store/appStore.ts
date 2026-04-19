@@ -315,8 +315,8 @@ export const useAppStore = create<AppState>((set) => ({
         // non-critical — ignore
       }
 
-      if (!authenticated) {
-        // Attempt Silent Refresh
+      if (!authenticated && !window.location.pathname.startsWith('/token')) {
+        // Attempt Silent Refresh (skip if we're on the OAuth callback route)
         const REFRESH_KEY = 'aitrade-last-refresh';
         const now = Date.now();
         const lastRefresh = sessionStorage.getItem(REFRESH_KEY);

@@ -38,6 +38,15 @@ pandas==2.2.3
 numpy==1.26.4
 ta==0.11.0
 
+# Fundamentals & News
+nsepython>=2.9
+yfinance>=0.2.40
+feedparser>=6.0.11
+
+# Sentiment / NLP
+transformers>=4.40.0
+accelerate>=0.30.0
+
 # Zerodha
 kiteconnect==5.0.1
 
