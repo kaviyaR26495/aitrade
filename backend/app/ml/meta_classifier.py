@@ -130,7 +130,18 @@ class MetaClassifier:
         from sklearn.metrics import roc_auc_score, accuracy_score
 
         n = len(X)
+        if n < 50:
+            raise ValueError(f"MetaClassifier needs >= 50 samples, got {n}")
+
         # Data MUST be sorted chronologically before calling train().
+        # Validate monotonicity when a date index is supplied.
+        if hasattr(X, 'index') and hasattr(X.index, 'is_monotonic_increasing'):
+            if not X.index.is_monotonic_increasing:
+                raise ValueError(
+                    "MetaClassifier.train() received non-chronological data. "
+                    "Sort by signal_date ASC before calling train()."
+                )
+
         # Purged split: leave a 5-sample gap between train and validation
         # to prevent overlapping hold-period target leakage.
         purge_gap = 5

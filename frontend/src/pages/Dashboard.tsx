@@ -1,27 +1,26 @@
 import { Card, StatCard, Badge, EmptyState, PageHeader, ListItem } from '../components/ui';
-import { usePredictions, useHoldings, useRlModels, useOrders } from '../hooks/useApi';
+import { useSignals, useHoldings, useRlModels, useOrders } from '../hooks/useApi';
 import { XAxis, YAxis, Tooltip, ResponsiveContainer, Area, AreaChart } from 'recharts';
 import { CHART_TOOLTIP_STYLE, CHART_LABEL_STYLE, CHART_AXIS_PROPS, CHART_GRID_PROPS } from '../components/ChartTheme';
-import { TrendingUp, Brain, Target, AlertTriangle, ArrowRight } from 'lucide-react';
+import { TrendingUp, Brain, Target, Zap, ArrowRight } from 'lucide-react';
 import { NavLink } from 'react-router-dom';
 
-const REGIME_LABELS: Record<number, { label: string; color: string }> = {
-  0: { label: 'Bull+LV', color: 'green' },
-  1: { label: 'Bull+HV', color: 'yellow' },
-  2: { label: 'Bear+LV', color: 'red' },
-  3: { label: 'Bear+HV', color: 'red' },
-  4: { label: 'Neut+LV', color: 'gray' },
-  5: { label: 'Neut+HV', color: 'yellow' },
+const STATUS_COLORS: Record<string, 'green' | 'blue' | 'yellow' | 'red' | 'gray'> = {
+  pending: 'yellow',
+  active: 'blue',
+  target_hit: 'green',
+  sl_hit: 'red',
+  expired: 'gray',
 };
 
 export default function Dashboard() {
-  const { data: predictions } = usePredictions();
+  const { data: signals } = useSignals();
   const { data: holdings } = useHoldings();
   const { data: rlModels } = useRlModels();
   const { data: orders } = useOrders(10);
 
-  const buySignals = predictions?.filter((p: any) => p.action === 'BUY') ?? [];
-  const sellSignals = predictions?.filter((p: any) => p.action === 'SELL') ?? [];
+  const activeSignals = signals?.filter((s: any) => s.status === 'active') ?? [];
+  const pendingSignals = signals?.filter((s: any) => s.status === 'pending') ?? [];
   const holdingsData = holdings?.holdings ?? [];
   const totalModels = rlModels?.length ?? 0;
 
@@ -45,10 +44,10 @@ export default function Dashboard() {
       </PageHeader>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
-        <StatCard label="Buy Signals" value={buySignals.length} icon={<TrendingUp size={18} />} color="var(--success)" data-guide-id="buy-signals-card" />
+        <StatCard label="Active Signals" value={activeSignals.length} icon={<Zap size={18} />} color="var(--success)" data-guide-id="active-signals-card" />
         <StatCard label="Active Holdings" value={holdingsData.length} icon={<Target size={18} />} color="var(--info)" />
         <StatCard label="Trained Models" value={totalModels} icon={<Brain size={18} />} color="var(--primary)" />
-        <StatCard label="Sell Signals" value={sellSignals.length} icon={<AlertTriangle size={18} />} color="var(--danger)" data-guide-id="sell-signals-card" />
+        <StatCard label="Pending Signals" value={pendingSignals.length} icon={<TrendingUp size={18} />} color="var(--warning)" data-guide-id="pending-signals-card" />
       </div>
 
       <Card title="Portfolio Equity Curve" data-guide-id="equity-curve" action={
@@ -78,36 +77,34 @@ export default function Dashboard() {
       </Card>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-        <Card title="Today's Predictions" data-guide-id="predictions-card" action={
-          predictions && predictions.length > 0 ? (
+        <Card title="Today's Signals" data-guide-id="signals-card" action={
+          signals && signals.length > 0 ? (
             <NavLink to="/trading" className="text-[11px] text-[var(--primary)] hover:text-[var(--primary-hover)] font-medium">View All →</NavLink>
           ) : null
         }>
-          {predictions && predictions.length > 0 ? (
+          {signals && signals.length > 0 ? (
             <div className="space-y-2 max-h-72 overflow-y-auto">
-              {predictions.slice(0, 10).map((p: any) => (
+              {signals.slice(0, 10).map((s: any) => (
                 <ListItem
-                  key={p.id}
+                  key={s.id}
                   left={
                     <>
-                      <Badge color={p.action === 'BUY' ? 'green' : p.action === 'SELL' ? 'red' : 'gray'}>{p.action}</Badge>
-                      <span className="font-medium">{p.symbol}</span>
+                      <Badge color={STATUS_COLORS[s.status] ?? 'gray'}>{s.status?.replace('_', ' ')}</Badge>
+                      <span className="font-medium">{s.symbol}</span>
                     </>
                   }
                   right={
-                    <div className="flex items-center gap-2 text-xs">
-                      <span className="text-[var(--text-muted)] font-medium tabular-nums">{(p.confidence * 100).toFixed(0)}%</span>
-                      {p.agreement && <Badge color="green">✓</Badge>}
-                      {p.regime_id != null && (
-                        <Badge color={REGIME_LABELS[p.regime_id]?.color as any ?? 'gray'}>{REGIME_LABELS[p.regime_id]?.label ?? `R${p.regime_id}`}</Badge>
-                      )}
+                    <div className="flex items-center gap-3 text-xs">
+                      <span className="text-[var(--text-muted)] tabular-nums">₹{Number(s.entry_price).toFixed(0)} → ₹{Number(s.target_price).toFixed(0)}</span>
+                      <span className="text-[var(--text-muted)] font-medium tabular-nums">PoP {(Number(s.pop_score) * 100).toFixed(0)}%</span>
+                      <span className="text-[var(--text-muted)] tabular-nums">R:R {Number(s.initial_rr_ratio).toFixed(1)}</span>
                     </div>
                   }
                 />
               ))}
             </div>
           ) : (
-            <EmptyState icon={<TrendingUp size={28} />} title="No predictions yet" description="Run predictions from the Trading page to see signals here." />
+            <EmptyState icon={<Zap size={28} />} title="No signals yet" description="Generate signals from the Trading page to see them here." />
           )}
         </Card>
 

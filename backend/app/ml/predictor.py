@@ -765,3 +765,77 @@ async def run_target_price_predictions(
         "rejected": signals_rejected,
         "error_details": errors,
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Meta-Classifier Training — builds PoP model from resolved TradeSignal history
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def train_meta_classifier(
+    db: AsyncSession,
+    model_dir: str | None = None,
+    min_samples: int = 100,
+) -> dict[str, Any]:
+    """Train the meta-classifier on resolved TradeSignal rows.
+
+    Queries signals that reached a terminal state (target_hit / sl_hit)
+    strictly ordered by signal_date ASC to preserve chronological integrity
+    for the purged temporal split inside MetaClassifier.train().
+
+    Returns training metrics dict, or raises if insufficient data.
+    """
+    global _meta_clf
+    from sqlalchemy import select, asc
+    from app.core.support_resistance import sr_features as _sr_features
+
+    model_dir = model_dir or settings.MODEL_DIR
+    model_path = Path(model_dir)
+
+    # Fetch resolved signals chronologically — ORDER BY is critical for purge_gap
+    q = (
+        select(TradeSignal)
+        .where(TradeSignal.status.in_([SignalStatus.target_hit, SignalStatus.sl_hit]))
+        .order_by(asc(TradeSignal.signal_date))
+    )
+    result = await db.execute(q)
+    signals = list(result.scalars().all())
+
+    if len(signals) < min_samples:
+        raise ValueError(
+            f"Need >= {min_samples} resolved signals to train meta-classifier, "
+            f"got {len(signals)}"
+        )
+
+    # Build feature matrix & labels
+    X_rows = []
+    y_rows = []
+    for sig in signals:
+        X_rows.append([
+            sig.confluence_score or 0.0,
+            sig.fqs_score or 0.0,
+            sig.execution_cost_pct or 0.0,
+            sig.initial_rr_ratio or 0.0,
+            ((sig.target_price - sig.entry_price) / sig.entry_price) if sig.entry_price else 0.0,
+            sig.lstm_mu or 0.0,
+            sig.lstm_sigma or 0.0,
+            sig.knn_median_return or 0.0,
+            sig.knn_win_rate or 0.0,
+            float(sig.regime_id or 0),
+            0.0, 0.0, 0.0, 0.0, 0.0, 1.0,  # sr_features placeholders
+        ])
+        y_rows.append(1.0 if sig.status == SignalStatus.target_hit else 0.0)
+
+    X = np.array(X_rows, dtype=np.float32)
+    y = np.array(y_rows, dtype=np.float32)
+
+    if _meta_clf is None:
+        _meta_clf = MetaClassifier()
+
+    metrics = _meta_clf.train(X, y)
+
+    # Persist trained model
+    save_dir = model_path / "meta_classifier"
+    save_path = _meta_clf.save(save_dir / "meta_clf.joblib")
+    logger.info("MetaClassifier saved to %s", save_path)
+
+    return metrics

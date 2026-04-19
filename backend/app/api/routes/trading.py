@@ -712,9 +712,15 @@ async def get_signals(
 @router.post("/signals/{signal_id}/execute")
 async def execute_signal(
     signal_id: int,
+    dry_run: bool = Query(False, description="Paper-trade mode: mark signal active without placing live orders"),
     db: AsyncSession = Depends(get_db),
 ):
-    """Execute a trade signal — place limit-chase BUY + GTT OCO exit."""
+    """Execute a trade signal — place limit-chase BUY + GTT OCO exit.
+
+    When ``dry_run=True``, the signal is marked active and a simulated fill
+    at entry_price is recorded, but no Kite API calls are made.  Use this
+    for forward-test paper trading.
+    """
     from sqlalchemy import select
     from app.db.models import TradeSignal, Stock, TradeOrder, SignalStatus
 
@@ -726,6 +732,37 @@ async def execute_signal(
         raise HTTPException(404, f"Signal {signal_id} not found")
     if signal.status != SignalStatus.pending:
         raise HTTPException(400, f"Signal status is {signal.status.value}, expected pending")
+
+    # ── Dry-run (paper trading) path ──────────────────────────────────
+    if dry_run:
+        stock = (await db.execute(
+            select(Stock).where(Stock.id == signal.stock_id)
+        )).scalar_one_or_none()
+
+        signal.status = SignalStatus.active
+        order = TradeOrder(
+            stock_id=signal.stock_id,
+            trade_signal_id=signal.id,
+            variety="paper",
+            transaction_type="BUY",
+            quantity=1,
+            price=signal.entry_price,
+            sl_price=signal.stoploss_price,
+            target_price=signal.target_price,
+            status="filled",
+            zerodha_order_id=None,
+        )
+        db.add(order)
+        await db.commit()
+        return {
+            "signal_id": signal.id,
+            "order_id": order.id,
+            "dry_run": True,
+            "fill_price": signal.entry_price,
+            "quantity": 1,
+            "target_price": signal.target_price,
+            "stoploss_price": signal.stoploss_price,
+        }
 
     stock = (await db.execute(
         select(Stock).where(Stock.id == signal.stock_id)

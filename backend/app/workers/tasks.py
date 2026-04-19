@@ -311,6 +311,10 @@ async def _async_trailing_stop_update() -> dict:
     from app.core.support_resistance import compute_sr_zones
     from app.core.data_pipeline import ohlcv_to_dataframe
     from app.db import crud
+    from app.ml.signal_synthesizer import SynthesizerConfig
+
+    # Respect global dry_run flag — skip all Kite API calls when paper-trading
+    _dry_run = SynthesizerConfig().dry_run
 
     updated = 0
     skipped = 0
@@ -392,17 +396,28 @@ async def _async_trailing_stop_update() -> dict:
                 )
 
                 if update.should_update:
-                    new_gtt_id = await execute_trailing_stop_update(state, update.new_sl)
-                    signal.current_stoploss = update.new_sl
-                    signal.is_trailing_active = True
-                    signal.trailing_updates_count += 1
-                    if new_gtt_id:
-                        signal.last_gtt_id = new_gtt_id
-                    updated += 1
-                    _log.info(
-                        "Trailing SL updated for signal %d (%s): %s",
-                        signal.id, stock.symbol, update.reason,
-                    )
+                    if _dry_run:
+                        # Paper-trade: update DB state but skip Kite GTT cycle
+                        _log.info(
+                            "[DRY-RUN] Trailing SL would update signal %d (%s): %s",
+                            signal.id, stock.symbol, update.reason,
+                        )
+                        signal.current_stoploss = update.new_sl
+                        signal.is_trailing_active = True
+                        signal.trailing_updates_count += 1
+                        updated += 1
+                    else:
+                        new_gtt_id = await execute_trailing_stop_update(state, update.new_sl)
+                        signal.current_stoploss = update.new_sl
+                        signal.is_trailing_active = True
+                        signal.trailing_updates_count += 1
+                        if new_gtt_id:
+                            signal.last_gtt_id = new_gtt_id
+                        updated += 1
+                        _log.info(
+                            "Trailing SL updated for signal %d (%s): %s",
+                            signal.id, stock.symbol, update.reason,
+                        )
                 else:
                     skipped += 1
 

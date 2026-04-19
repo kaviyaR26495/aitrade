@@ -50,12 +50,19 @@ class SynthesizerConfig:
     min_knn_win_rate: float = 0.45
     # LSTM-KNN agreement bonus
     agreement_bonus: float = 0.15
-    # Execution cost default (bps) if not available from order book
+    # Execution cost default (bps) if not available from order book.
+    # 15 bps is calibrated for Nifty 50 large-caps.  For mid-caps /
+    # small-caps, scale via ``scale_cost_bps()`` or raise this default.
     default_cost_bps: float = 15.0  # 0.15%
+    # Multiplier applied to realized_vol when scaling slippage for
+    # less-liquid stocks.  Higher = more aggressive cost penalty.
+    vol_slippage_scale: float = 0.5
     # Stoploss ATR multiplier
     sl_atr_multiplier: float = 1.5
     # Target rounding to tick size
     tick_size: float = 0.05
+    # Paper-trading dry-run: write signals to DB but never call Kite APIs
+    dry_run: bool = True
 
 
 # ── Data structures ───────────────────────────────────────────────────
@@ -105,6 +112,36 @@ def _kappa_decay_rr(
     R:R(t) = R:R(0) × exp(-κ × t)
     """
     return initial_rr * math.exp(-kappa * days)
+
+
+def scale_cost_bps(
+    base_cost_bps: float,
+    avg_daily_volume: Optional[float] = None,
+    realized_vol: float = 0.0,
+) -> float:
+    """Scale execution cost for liquidity tier.
+
+    Returns adjusted cost in bps.  The base (15 bps) is safe for Nifty-50
+    large-caps.  For mid-caps / small-caps the cost is increased based on
+    lower trading volume and higher realized volatility.
+
+    Heuristic tiers (override by passing avg_daily_volume):
+      - Large-cap (ADV > 5 Cr ₹):  base
+      - Mid-cap   (ADV 1-5 Cr ₹):  base × 1.5
+      - Small-cap (ADV < 1 Cr ₹):  base × 2.5
+
+    An additional volatility uplift of ``realized_vol × 100`` bps is added
+    when realized_vol > 3%.
+    """
+    multiplier = 1.0
+    if avg_daily_volume is not None:
+        if avg_daily_volume < 1e7:        # < 1 Cr
+            multiplier = 2.5
+        elif avg_daily_volume < 5e7:      # 1-5 Cr
+            multiplier = 1.5
+
+    vol_uplift = max(0.0, (realized_vol - 0.03)) * 10_000  # extra bps above 3% vol
+    return base_cost_bps * multiplier + vol_uplift
 
 
 def estimate_execution_cost(

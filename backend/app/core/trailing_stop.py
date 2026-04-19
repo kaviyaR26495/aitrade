@@ -157,6 +157,40 @@ async def execute_trailing_stop_update(
 
     kite = get_kite()
 
+    # Step 0: Verify position quantity matches expected.
+    # A "ghost fill" (partial execution via a stray tick) will cause Kite
+    # to reject the new GTT if the quantity is stale.
+    try:
+        positions = await asyncio.to_thread(kite.positions)
+        net_positions = positions.get("net", [])
+        held_qty = 0
+        for pos in net_positions:
+            if (pos.get("tradingsymbol") == state.symbol
+                    and pos.get("exchange") == state.exchange
+                    and pos.get("product") == "CNC"):
+                held_qty += int(pos.get("quantity", 0))
+
+        if held_qty <= 0:
+            logger.warning(
+                "Position for %s is %d (expected %d) — target/SL may have filled. "
+                "Skipping trailing update.",
+                state.symbol, held_qty, state.quantity,
+            )
+            return None
+
+        if held_qty != state.quantity:
+            logger.warning(
+                "Ghost fill detected: %s position is %d, signal expects %d. "
+                "Adjusting GTT quantity to actual holdings.",
+                state.symbol, held_qty, state.quantity,
+            )
+            state.quantity = held_qty
+    except Exception as pos_exc:
+        # Non-fatal: proceed with original quantity if position check fails
+        logger.warning(
+            "Position check failed for %s (non-fatal): %s", state.symbol, pos_exc,
+        )
+
     # Step 1: Cancel existing GTT — abort if this fails (position stays protected)
     if state.last_gtt_id:
         try:

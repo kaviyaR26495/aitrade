@@ -473,6 +473,35 @@ export const usePlaceOrder = () =>
 export const useOrders = (limit = 50) =>
   useQuery({ queryKey: ['orders', limit], queryFn: () => api.listOrders(limit).then(r => r.data) });
 
+export const useSignals = (params?: { target_date?: string; status?: string; min_pop?: number }) =>
+  useQuery({
+    queryKey: ['signals', params],
+    queryFn: () => api.getSignals(params).then(r => r.data),
+  });
+
+export const useGenerateSignals = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (params: { interval?: string; stock_ids?: number[]; target_date?: string; pop_threshold?: number }) =>
+      api.generateSignals(params).then(r => r.data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['signals'] });
+    },
+  });
+};
+
+export const useExecuteSignal = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ signalId, dryRun }: { signalId: number; dryRun: boolean }) =>
+      api.executeSignal(signalId, dryRun).then(r => r.data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['signals'] });
+      qc.invalidateQueries({ queryKey: ['orders'] });
+    },
+  });
+};
+
 export const useForwardLook = (params: { stock_id: number; after_date: string; interval?: string }) =>
   useQuery({
     queryKey: ['forward-look', params.stock_id, params.after_date, params.interval],

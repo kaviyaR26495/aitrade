@@ -171,6 +171,14 @@ export const listOrders = (limit?: number) =>
 export const getForwardLook = (params: { stock_id: number; after_date: string; interval?: string }) =>
   api.get('/trading/predictions/forward-look', { params });
 
+// ── TPML Signals ──
+export const getSignals = (params?: { target_date?: string; status?: string; min_pop?: number }) =>
+  api.get('/trading/signals', { params });
+export const generateSignals = (params: { interval?: string; stock_ids?: number[]; target_date?: string; pop_threshold?: number }) =>
+  api.post('/trading/signals/generate', params);
+export const executeSignal = (signalId: number, dryRun = false) =>
+  api.post(`/trading/signals/${signalId}/execute`, null, { params: { dry_run: dryRun } });
+
 // ── Portfolio ──
 export const getHoldings = () => api.get('/portfolio/holdings');
 export const getPositions = () => api.get('/portfolio/positions');
