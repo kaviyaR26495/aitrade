@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 import logging
 from app.api.deps import get_db
 from app.db import crud
+from app.db.database import async_session_factory
 from app.core import zerodha
 from app.ml.predictor import ACTION_MAP
 from app.ml import predictor
@@ -599,3 +600,203 @@ async def delete_batch(
     return {"status": "deleted", "batch_id": batch_id}
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Target-Price Signal Endpoints (TPML)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class RunTPMLRequest(BaseModel):
+    interval: str = "day"
+    stock_ids: list[int] | None = None
+    target_date: date | None = None
+    pop_threshold: float = 0.55
+
+
+@router.post("/signals/generate")
+async def generate_signals(
+    req: RunTPMLRequest,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
+    """Launch async target-price signal generation for all stocks."""
+    from app.ml.predictor import run_target_price_predictions
+    from app.db.models import PredictionJob
+    import uuid as _uuid
+
+    job_id = str(_uuid.uuid4())
+    job = PredictionJob(
+        id=job_id, status="running", progress=0,
+        total_stocks=0, completed_stocks=0,
+    )
+    db.add(job)
+    await db.commit()
+
+    async def _run():
+        async with get_db.__wrapped__() if hasattr(get_db, "__wrapped__") else async_session_factory() as session:
+            from app.db.database import async_session_factory as _sf
+            async with _sf() as session:
+                await run_target_price_predictions(
+                    session,
+                    target_date=req.target_date,
+                    interval=req.interval,
+                    stock_ids=req.stock_ids,
+                    job_id=job_id,
+                    pop_threshold=req.pop_threshold,
+                )
+
+    background_tasks.add_task(lambda: asyncio.run(_run()))
+    return {"job_id": job_id, "status": "started"}
+
+
+@router.get("/signals")
+async def get_signals(
+    db: AsyncSession = Depends(get_db),
+    target_date: date | None = Query(None),
+    status: str | None = Query(None),
+    min_pop: float = Query(0.0),
+):
+    """Get trade signals with optional filters."""
+    from sqlalchemy import select, desc
+    from app.db.models import TradeSignal, Stock
+
+    q = select(TradeSignal).order_by(desc(TradeSignal.created_at))
+
+    if target_date:
+        q = q.where(TradeSignal.signal_date == target_date)
+    if status:
+        q = q.where(TradeSignal.status == status)
+    if min_pop > 0:
+        q = q.where(TradeSignal.pop_score >= min_pop)
+
+    result = await db.execute(q.limit(200))
+    signals = result.scalars().all()
+
+    # Bulk resolve stock symbols
+    stock_ids = list({s.stock_id for s in signals})
+    if stock_ids:
+        stock_res = await db.execute(select(Stock).where(Stock.id.in_(stock_ids)))
+        stock_map = {s.id: s.symbol for s in stock_res.scalars().all()}
+    else:
+        stock_map = {}
+
+    return [
+        {
+            "id": s.id,
+            "stock_id": s.stock_id,
+            "symbol": stock_map.get(s.stock_id, "?"),
+            "signal_date": str(s.signal_date),
+            "entry_price": s.entry_price,
+            "target_price": s.target_price,
+            "stoploss_price": s.stoploss_price,
+            "current_stoploss": s.current_stoploss,
+            "pop_score": s.pop_score,
+            "fqs_score": s.fqs_score,
+            "confluence_score": s.confluence_score,
+            "execution_cost_pct": s.execution_cost_pct,
+            "initial_rr_ratio": s.initial_rr_ratio,
+            "current_rr_ratio": s.current_rr_ratio,
+            "days_since_signal": s.days_since_signal,
+            "lstm_mu": s.lstm_mu,
+            "lstm_sigma": s.lstm_sigma,
+            "knn_median_return": s.knn_median_return,
+            "knn_win_rate": s.knn_win_rate,
+            "is_trailing_active": s.is_trailing_active,
+            "trailing_updates_count": s.trailing_updates_count,
+            "status": s.status.value if s.status else "pending",
+            "regime_id": s.regime_id,
+            "created_at": str(s.created_at) if s.created_at else None,
+        }
+        for s in signals
+    ]
+
+
+@router.post("/signals/{signal_id}/execute")
+async def execute_signal(
+    signal_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Execute a trade signal — place limit-chase BUY + GTT OCO exit."""
+    from sqlalchemy import select
+    from app.db.models import TradeSignal, Stock, TradeOrder, SignalStatus
+
+    signal = (await db.execute(
+        select(TradeSignal).where(TradeSignal.id == signal_id)
+    )).scalar_one_or_none()
+
+    if not signal:
+        raise HTTPException(404, f"Signal {signal_id} not found")
+    if signal.status != SignalStatus.pending:
+        raise HTTPException(400, f"Signal status is {signal.status.value}, expected pending")
+
+    stock = (await db.execute(
+        select(Stock).where(Stock.id == signal.stock_id)
+    )).scalar_one_or_none()
+
+    if not stock:
+        raise HTTPException(404, f"Stock {signal.stock_id} not found")
+
+    # Position sizing (Half-Kelly or fixed)
+    try:
+        from app.ml.position_sizer import compute_position_size
+        quantity = await compute_position_size(db, stock, signal.entry_price)
+    except Exception:
+        quantity = 1
+
+    # Place limit-chase BUY order
+    try:
+        fill_price, zerodha_order_id = await zerodha.async_place_limit_chase_order(
+            symbol=stock.symbol,
+            exchange=stock.exchange,
+            transaction_type="BUY",
+            quantity=quantity,
+            tick_size=stock.tick_size or 0.05,
+        )
+    except Exception as e:
+        raise HTTPException(500, f"Order placement failed: {e}")
+
+    # Place GTT OCO with signal's target/SL
+    gtt_id = None
+    try:
+        gtt_id = await zerodha.async_place_gtt_oco_atr(
+            symbol=stock.symbol,
+            exchange=stock.exchange,
+            fill_price=fill_price,
+            quantity=quantity,
+            atr_value=abs(signal.entry_price - signal.stoploss_price),
+            atr_multiple_sl=1.0,  # SL already computed by synthesiser
+            rr_ratio=signal.initial_rr_ratio,
+            tick_size=stock.tick_size or 0.05,
+        )
+    except Exception as e:
+        logger.warning("GTT placement failed for signal %d: %s", signal_id, e)
+
+    # Create trade order record
+    order = TradeOrder(
+        stock_id=stock.id,
+        trade_signal_id=signal.id,
+        variety="regular",
+        transaction_type="BUY",
+        quantity=quantity,
+        price=fill_price,
+        sl_price=signal.stoploss_price,
+        target_price=signal.target_price,
+        zerodha_order_id=str(zerodha_order_id) if zerodha_order_id else None,
+    )
+    db.add(order)
+
+    # Update signal status
+    signal.status = SignalStatus.active
+    if gtt_id:
+        signal.last_gtt_id = str(gtt_id)
+
+    await db.commit()
+
+    return {
+        "signal_id": signal.id,
+        "order_id": order.id,
+        "zerodha_order_id": zerodha_order_id,
+        "gtt_id": gtt_id,
+        "fill_price": fill_price,
+        "quantity": quantity,
+        "target_price": signal.target_price,
+        "stoploss_price": signal.stoploss_price,
+    }

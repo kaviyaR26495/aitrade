@@ -79,6 +79,18 @@ celery_app.conf.update(
             "task": "app.workers.tasks.task_morning_predictions",
             "schedule": crontab(hour=3, minute=30),
         },
+        # TPML signal generation — 09:05 IST (03:35 UTC), Mon-Fri
+        "tpml-signals": {
+            "task": "app.workers.tasks.task_morning_tpml_signals",
+            "schedule": crontab(hour=3, minute=35, day_of_week="1-5"),
+            "options": {"queue": "ml"},
+        },
+        # Trailing stop updates — every 5 min, 09:15-15:30 IST (03:45-10:00 UTC), Mon-Fri
+        "trailing-stop-update": {
+            "task": "app.workers.tasks.task_trailing_stop_update",
+            "schedule": crontab(minute="*/5", hour="3-10", day_of_week="1-5"),
+            "options": {"queue": "ml"},
+        },
         # Monthly retraining — 1st of each month at 22:00 IST (16:30 UTC)
         "monthly-retrain": {
             "task": "app.workers.tasks.task_monthly_retrain",

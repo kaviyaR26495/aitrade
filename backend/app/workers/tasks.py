@@ -250,3 +250,173 @@ async def _async_monthly_retrain() -> dict:
         results["regime_stratified"] = {"error": str(exc)}
 
     return results
+
+
+# ── Task: Morning Target-Price Signals (TPML) ─────────────────────────
+
+@celery_app.task(name="app.workers.tasks.task_morning_tpml_signals", bind=True, max_retries=1)
+def task_morning_tpml_signals(self):
+    """Generate target-price trade signals for the full universe.
+
+    Runs at 09:05 IST — after OHLCV data and sentiment are fresh.
+    Produces TradeSignal rows with entry/target/SL/PoP.
+    """
+    _log.info("[task_morning_tpml_signals] Starting TPML signal generation")
+    try:
+        return asyncio.run(_async_morning_tpml_signals())
+    except Exception as exc:
+        _log.error("[task_morning_tpml_signals] Failed: %s", exc)
+        raise self.retry(exc=exc, countdown=120)
+
+
+async def _async_morning_tpml_signals() -> dict:
+    from app.db.database import async_session_factory
+    from app.ml.predictor import run_target_price_predictions
+
+    async with async_session_factory() as db:
+        result = await run_target_price_predictions(db)
+
+    _log.info("[task_morning_tpml_signals] Done: %s signals created", result.get("signals_created", 0))
+    return {
+        "signals_created": result.get("signals_created", 0),
+        "signals_rejected": result.get("signals_rejected", 0),
+        "errors": result.get("errors", 0),
+    }
+
+
+# ── Task: Trailing Stop Update ─────────────────────────────────────────
+
+@celery_app.task(name="app.workers.tasks.task_trailing_stop_update", bind=True, max_retries=0)
+def task_trailing_stop_update(self):
+    """Update trailing stops for all active signals.
+
+    Runs every 5 minutes during market hours (09:15–15:30 IST).
+    Cancels + re-places GTT OCO orders when price breaches S/R zones.
+    """
+    _log.info("[task_trailing_stop_update] Checking trailing stops")
+    try:
+        return asyncio.run(_async_trailing_stop_update())
+    except Exception as exc:
+        _log.error("[task_trailing_stop_update] Failed: %s", exc)
+        return {"error": str(exc)}
+
+
+async def _async_trailing_stop_update() -> dict:
+    import sqlalchemy as sa
+    from app.db.database import async_session_factory
+    from app.db.models import TradeSignal, SignalStatus, Stock
+    from app.core.trailing_stop import (
+        TrailingStopState, evaluate_trailing_stop, execute_trailing_stop_update,
+    )
+    from app.core.support_resistance import compute_sr_zones
+    from app.core.data_pipeline import ohlcv_to_dataframe
+    from app.db import crud
+
+    updated = 0
+    skipped = 0
+    errors = 0
+
+    async with async_session_factory() as db:
+        # Get all active signals
+        result = await db.execute(
+            sa.select(TradeSignal).where(TradeSignal.status == SignalStatus.active)
+        )
+        active_signals = result.scalars().all()
+
+        if not active_signals:
+            return {"updated": 0, "skipped": 0, "active_signals": 0}
+
+        # Bulk resolve stock info
+        stock_ids = list({s.stock_id for s in active_signals})
+        stock_res = await db.execute(sa.select(Stock).where(Stock.id.in_(stock_ids)))
+        stock_map = {s.id: s for s in stock_res.scalars().all()}
+
+        for signal in active_signals:
+            try:
+                stock = stock_map.get(signal.stock_id)
+                if not stock:
+                    continue
+
+                # Get latest price from Kite
+                try:
+                    from app.core.zerodha import _get_bid_ask
+                    bid, ask = _get_bid_ask(stock.symbol, stock.exchange)
+                    current_price = (bid + ask) / 2
+                except Exception:
+                    skipped += 1
+                    continue
+
+                # Get latest OHLCV for S/R computation
+                ohlcv_rows = await crud.get_ohlcv_rows(db, stock.id, limit=250)
+                if not ohlcv_rows or len(ohlcv_rows) < 30:
+                    skipped += 1
+                    continue
+
+                df = ohlcv_to_dataframe(ohlcv_rows)
+                atr = float(df["high"].rolling(14).max().iloc[-1] - df["low"].rolling(14).min().iloc[-1]) / 14
+                if "atr" in df.columns:
+                    atr = float(df["atr"].iloc[-1])
+
+                sr_result = compute_sr_zones(df, current_price, atr)
+
+                # Get nearest support below price
+                supports = [z for z in sr_result.zones if z.midpoint < current_price]
+                nearest_sup = max(supports, key=lambda z: z.midpoint).midpoint if supports else None
+
+                # Get holding quantity from trade orders
+                from app.db.models import TradeOrder
+                order_q = sa.select(TradeOrder).where(
+                    TradeOrder.trade_signal_id == signal.id,
+                    TradeOrder.transaction_type == "BUY",
+                )
+                order_row = (await db.execute(order_q)).scalar_one_or_none()
+                quantity = order_row.filled_quantity or order_row.quantity if order_row else 1
+
+                state = TrailingStopState(
+                    signal_id=signal.id,
+                    stock_id=stock.id,
+                    symbol=stock.symbol,
+                    exchange=stock.exchange,
+                    quantity=quantity,
+                    entry_price=signal.entry_price,
+                    target_price=signal.target_price,
+                    original_sl=signal.stoploss_price,
+                    current_sl=signal.current_stoploss or signal.stoploss_price,
+                    last_gtt_id=signal.last_gtt_id,
+                    is_active=signal.is_trailing_active,
+                    updates_count=signal.trailing_updates_count,
+                )
+
+                update = evaluate_trailing_stop(
+                    state, current_price, atr, nearest_sup,
+                )
+
+                if update.should_update:
+                    new_gtt_id = await execute_trailing_stop_update(state, update.new_sl)
+                    signal.current_stoploss = update.new_sl
+                    signal.is_trailing_active = True
+                    signal.trailing_updates_count += 1
+                    if new_gtt_id:
+                        signal.last_gtt_id = new_gtt_id
+                    updated += 1
+                    _log.info(
+                        "Trailing SL updated for signal %d (%s): %s",
+                        signal.id, stock.symbol, update.reason,
+                    )
+                else:
+                    skipped += 1
+
+            except Exception as exc:
+                _log.warning("Trailing stop error for signal %d: %s", signal.id, exc)
+                errors += 1
+
+        await db.commit()
+
+    summary = {
+        "active_signals": len(active_signals),
+        "updated": updated,
+        "skipped": skipped,
+        "errors": errors,
+    }
+    _log.info("[task_trailing_stop_update] Done: %s", summary)
+    return summary

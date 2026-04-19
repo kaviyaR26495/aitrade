@@ -1,20 +1,20 @@
-"""Multi-Horizon LSTM: predicts 10 future trading-day actions (BUY=1/HOLD=0/SELL=2)
-and a trend-durability score in a single forward pass.
+"""Multi-Horizon LSTM: predicts 10 future trading-day *percentage returns*
+(μ, σ) and a trend-durability score in a single forward pass.
 
 Architecture
 ────────────
 Input  : (batch, seq_len=15, n_features)
        → BiLSTM(hidden=256, layers=2) + LayerNorm
-       → per-horizon heads: 10 × Linear(hidden, 3)  [action logits]
+       → per-horizon heads: 10 × Linear(hidden, 2)  [μ, log_σ]
        → durability head  : Linear(hidden, 1) + Sigmoid [0-1]
 
 Training targets
 ────────────────
 For training-day d, horizon h ∈ {1…10}:
-  - y_h   = discretised ROC(d+h): ROC > +1% → BUY(1), ROC < -1% → SELL(2), else HOLD(0)
-  - trend = fraction of h=1..5 steps with the same non-HOLD direction as h=1
+  - y_h   = percentage return at horizon h: (close[d+h] - close[d]) / close[d]
+  - trend = fraction of h=1..5 steps with the same sign as h=1
 
-Loss: mean of 10 CrossEntropy losses + BCE on trend durability
+Loss: sum of 10 GaussianNLLLoss(μ_h, σ_h², y_h) + BCE on trend durability
 """
 from __future__ import annotations
 
@@ -37,7 +37,7 @@ HORIZON = 10
 # ─────────────────────────────────────────────────────────────────────────────
 
 class MultiHorizonLSTM(nn.Module):
-    """Bidirectional LSTM with 10 per-horizon classification heads."""
+    """Bidirectional LSTM with 10 per-horizon regression heads (μ, log_σ)."""
 
     def __init__(
         self,
@@ -46,11 +46,9 @@ class MultiHorizonLSTM(nn.Module):
         num_layers: int = 2,
         dropout: float = 0.3,
         horizon: int = HORIZON,
-        num_classes: int = 3,
     ) -> None:
         super().__init__()
         self.horizon = horizon
-        self.num_classes = num_classes
 
         self.lstm = nn.LSTM(
             input_size=n_features,
@@ -62,9 +60,9 @@ class MultiHorizonLSTM(nn.Module):
         )
         self.layer_norm = nn.LayerNorm(hidden_size * 2)
 
-        # 10 independent action classification heads
-        self.action_heads = nn.ModuleList(
-            [nn.Linear(hidden_size * 2, num_classes) for _ in range(horizon)]
+        # 10 independent regression heads: each outputs (μ, log_σ)
+        self.return_heads = nn.ModuleList(
+            [nn.Linear(hidden_size * 2, 2) for _ in range(horizon)]
         )
         # Trend durability head
         self.trend_head = nn.Sequential(
@@ -80,14 +78,14 @@ class MultiHorizonLSTM(nn.Module):
         """
         x: (batch, seq_len, n_features)
         Returns:
-            action_logits: list of 10 tensors each (batch, 3)
+            return_params: list of 10 tensors each (batch, 2) → [μ, log_σ]
             trend_score:   (batch,) ∈ [0,1]
         """
         out, _ = self.lstm(x)                         # (batch, seq_len, hidden*2)
         last = self.layer_norm(out[:, -1, :])         # take last time-step
-        action_logits = [head(last) for head in self.action_heads]
+        return_params = [head(last) for head in self.return_heads]
         trend_score = self.trend_head(last).squeeze(-1)
-        return action_logits, trend_score
+        return return_params, trend_score
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -98,13 +96,11 @@ def _build_horizon_labels(
     close_prices: np.ndarray,
     seq_len: int,
     horizon: int = HORIZON,
-    buy_thresh: float = 0.01,
-    sell_thresh: float = -0.01,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Build multi-horizon labels from a 1-D close price array.
+    """Build multi-horizon regression labels from a 1-D close price array.
 
     Returns:
-        y_horizon: (n_samples, horizon) int8 — 0=HOLD, 1=BUY, 2=SELL
+        y_returns: (n_samples, horizon) float32 — percentage returns
         y_trend:   (n_samples,) float32 — trend durability [0,1]
     """
     n = len(close_prices) - seq_len - horizon
@@ -113,37 +109,30 @@ def _build_horizon_labels(
             f"Not enough bars: len={len(close_prices)}, seq_len={seq_len}, horizon={horizon}"
         )
 
-    y_horizon = np.zeros((n, horizon), dtype=np.int8)
+    y_returns = np.zeros((n, horizon), dtype=np.float32)
     y_trend = np.zeros(n, dtype=np.float32)
 
     for i in range(n):
         ref_close = close_prices[i + seq_len - 1]
-        actions = []
+        returns = []
         for h in range(1, horizon + 1):
             future_close = close_prices[i + seq_len - 1 + h]
-            roc = (future_close - ref_close) / ref_close
-            # Scale threshold by sqrt(h) so short horizons don't require the
-            # same absolute ROC as long horizons (avoids HOLD bias at h=1).
-            h_scale = h ** 0.5
-            h_buy = buy_thresh * h_scale
-            h_sell = sell_thresh * h_scale
-            if roc > h_buy:
-                actions.append(1)  # BUY
-            elif roc < h_sell:
-                actions.append(2)  # SELL
-            else:
-                actions.append(0)  # HOLD
-        y_horizon[i] = actions
+            pct_return = (future_close - ref_close) / ref_close
+            returns.append(pct_return)
+        y_returns[i] = returns
 
-        # Trend durability: fraction of first-5 horizons agreeing with h=1
-        h1 = actions[0]
-        if h1 != 0:
-            agree = sum(1 for a in actions[:5] if a == h1)
+        # Trend durability: fraction of first-5 horizons with same sign as h=1
+        h1_sign = 1 if returns[0] > 0 else (-1 if returns[0] < 0 else 0)
+        if h1_sign != 0:
+            agree = sum(
+                1 for r in returns[:5]
+                if (r > 0 and h1_sign > 0) or (r < 0 and h1_sign < 0)
+            )
             y_trend[i] = agree / 5.0
         else:
             y_trend[i] = 0.0
 
-    return y_horizon, y_trend
+    return y_returns, y_trend
 
 
 def build_training_data(
@@ -162,7 +151,7 @@ def build_training_data(
 
     Returns:
         X: (n_samples, seq_len, n_features)
-        y_horizon: (n_samples, horizon) int8
+        y_returns: (n_samples, horizon) float32 — pct returns
         y_trend: (n_samples,) float32
     """
     n = len(feature_matrix) - seq_len - horizon
@@ -170,8 +159,8 @@ def build_training_data(
         raise ValueError("Insufficient data for multi-horizon training")
 
     X = np.stack([feature_matrix[i : i + seq_len] for i in range(n)])
-    y_horizon, y_trend = _build_horizon_labels(close_prices, seq_len=seq_len, horizon=horizon)
-    return X, y_horizon, y_trend
+    y_returns, y_trend = _build_horizon_labels(close_prices, seq_len=seq_len, horizon=horizon)
+    return X, y_returns, y_trend
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -180,7 +169,7 @@ def build_training_data(
 
 def train_multi_horizon(
     X: np.ndarray,
-    y_horizon: np.ndarray,
+    y_returns: np.ndarray,
     y_trend: np.ndarray,
     hidden_size: int = 256,
     num_layers: int = 2,
@@ -192,11 +181,11 @@ def train_multi_horizon(
     train_ratio: float = 0.8,
     log_fn: Callable[[str], None] | None = None,
 ) -> tuple[MultiHorizonLSTM, dict[str, Any]]:
-    """Train a MultiHorizonLSTM.
+    """Train a MultiHorizonLSTM with GaussianNLL regression.
 
     Returns:
         model: trained MultiHorizonLSTM
-        metrics: dict with train/val loss, per-horizon accuracy, trend_mse
+        metrics: dict with train/val loss, per-horizon MAE, trend_mse
     """
 
     def _log(msg: str) -> None:
@@ -208,28 +197,28 @@ def train_multi_horizon(
     _log(f"MultiHorizon training on {device}  X={X.shape}")
 
     n_samples, seq_len, n_features = X.shape
-    horizon = y_horizon.shape[1]
+    horizon = y_returns.shape[1]
     split = int(n_samples * train_ratio)
 
     X_tr, X_va = X[:split], X[split:]
-    yh_tr, yh_va = y_horizon[:split], y_horizon[split:]
+    yr_tr, yr_va = y_returns[:split], y_returns[split:]
     yt_tr, yt_va = y_trend[:split], y_trend[split:]
 
-    def _to_tensors(xa, yha, yta):
+    def _to_tensors(xa, yra, yta):
         return (
             torch.tensor(xa, dtype=torch.float32),
-            torch.tensor(yha, dtype=torch.long),
+            torch.tensor(yra, dtype=torch.float32),
             torch.tensor(yta, dtype=torch.float32),
         )
 
-    t_X, t_yh, t_yt = _to_tensors(X_tr, yh_tr, yt_tr)
-    v_X, v_yh, v_yt = _to_tensors(X_va, yh_va, yt_va)
+    t_X, t_yr, t_yt = _to_tensors(X_tr, yr_tr, yt_tr)
+    v_X, v_yr, v_yt = _to_tensors(X_va, yr_va, yt_va)
 
     train_loader = DataLoader(
-        TensorDataset(t_X, t_yh, t_yt), batch_size=batch_size, shuffle=True
+        TensorDataset(t_X, t_yr, t_yt), batch_size=batch_size, shuffle=True
     )
     val_loader = DataLoader(
-        TensorDataset(v_X, v_yh, v_yt), batch_size=batch_size * 2, shuffle=False
+        TensorDataset(v_X, v_yr, v_yt), batch_size=batch_size * 2, shuffle=False
     )
 
     model = MultiHorizonLSTM(
@@ -241,7 +230,7 @@ def train_multi_horizon(
     ).to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
-    ce_loss = nn.CrossEntropyLoss()
+    gnll = nn.GaussianNLLLoss()
     bce_loss = nn.BCELoss()
 
     best_val_loss = float("inf")
@@ -251,12 +240,17 @@ def train_multi_horizon(
     for epoch in range(1, epochs + 1):
         model.train()
         tr_loss = 0.0
-        for bx, by_h, by_t in train_loader:
-            bx, by_h, by_t = bx.to(device), by_h.to(device), by_t.to(device)
+        for bx, by_r, by_t in train_loader:
+            bx, by_r, by_t = bx.to(device), by_r.to(device), by_t.to(device)
             optimizer.zero_grad()
-            act_logits, trend_score = model(bx)
-            loss = sum(ce_loss(act_logits[h], by_h[:, h]) for h in range(horizon))
-            loss += bce_loss(trend_score, by_t)
+            return_params, trend_score = model(bx)
+            loss = torch.tensor(0.0, device=device)
+            for h in range(horizon):
+                mu = return_params[h][:, 0]
+                log_sigma = return_params[h][:, 1]
+                var = torch.exp(2 * log_sigma).clamp(min=1e-6)
+                loss = loss + gnll(mu, by_r[:, h], var)
+            loss = loss + bce_loss(trend_score, by_t)
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
@@ -264,28 +258,31 @@ def train_multi_horizon(
 
         model.eval()
         va_loss = 0.0
-        horizon_correct = np.zeros(horizon)
+        horizon_mae = np.zeros(horizon)
         horizon_total = 0
         with torch.no_grad():
-            for bx, by_h, by_t in val_loader:
-                bx, by_h, by_t = bx.to(device), by_h.to(device), by_t.to(device)
-                act_logits, trend_score = model(bx)
-                loss = sum(ce_loss(act_logits[h], by_h[:, h]) for h in range(horizon))
-                loss += bce_loss(trend_score, by_t)
-                va_loss += loss.item()
+            for bx, by_r, by_t in val_loader:
+                bx, by_r, by_t = bx.to(device), by_r.to(device), by_t.to(device)
+                return_params, trend_score = model(bx)
+                loss = torch.tensor(0.0, device=device)
                 for h in range(horizon):
-                    preds = act_logits[h].argmax(dim=1)
-                    horizon_correct[h] += (preds == by_h[:, h]).sum().item()
+                    mu = return_params[h][:, 0]
+                    log_sigma = return_params[h][:, 1]
+                    var = torch.exp(2 * log_sigma).clamp(min=1e-6)
+                    loss = loss + gnll(mu, by_r[:, h], var)
+                    horizon_mae[h] += (mu - by_r[:, h]).abs().sum().item()
+                loss = loss + bce_loss(trend_score, by_t)
+                va_loss += loss.item()
                 horizon_total += bx.size(0)
 
         tr_loss /= len(train_loader)
         va_loss /= len(val_loader)
 
         if epoch % 10 == 0 or epoch == 1:
-            h1_acc = horizon_correct[0] / max(horizon_total, 1)
+            h1_mae = horizon_mae[0] / max(horizon_total, 1)
             _log(
                 f"Epoch {epoch:3d}/{epochs}  tr={tr_loss:.4f}  va={va_loss:.4f}  "
-                f"h1_acc={h1_acc:.4f}"
+                f"h1_mae={h1_mae:.6f}"
             )
 
         if va_loss < best_val_loss - 1e-5:
@@ -301,11 +298,11 @@ def train_multi_horizon(
     if best_state:
         model.load_state_dict(best_state)
 
-    per_horizon_acc = (horizon_correct / max(horizon_total, 1)).tolist()
+    per_horizon_mae = (horizon_mae / max(horizon_total, 1)).tolist()
     metrics = {
         "best_val_loss": best_val_loss,
-        "h1_accuracy": per_horizon_acc[0],
-        "per_horizon_accuracy": per_horizon_acc,
+        "h1_mae": per_horizon_mae[0],
+        "per_horizon_mae": per_horizon_mae,
         "n_train": split,
         "n_val": n_samples - split,
         "hidden_size": hidden_size,
@@ -316,8 +313,8 @@ def train_multi_horizon(
     }
     _log(
         f"Training complete  best_val_loss={best_val_loss:.4f}  "
-        f"h1_acc={per_horizon_acc[0]:.4f}  "
-        f"h5_acc={per_horizon_acc[4]:.4f}"
+        f"h1_mae={per_horizon_mae[0]:.6f}  "
+        f"h5_mae={per_horizon_mae[4]:.6f}"
     )
     return model, metrics
 
@@ -385,8 +382,8 @@ def predict_multi_horizon(
         X: (n_samples, seq_len, n_features)
 
     Returns dict:
-        actions: (n_samples, horizon) int — 0=HOLD, 1=BUY, 2=SELL
-        confidences: (n_samples, horizon) float32 ∈ [0,1]
+        mu: (n_samples, horizon) float32 — predicted mean pct return
+        sigma: (n_samples, horizon) float32 — predicted std (uncertainty)
         trend_score: (n_samples,) float32 ∈ [0,1]
     """
     if device is None:
@@ -396,20 +393,19 @@ def predict_multi_horizon(
 
     x_t = torch.tensor(X, dtype=torch.float32).to(device)
     with torch.no_grad():
-        act_logits, trend = model(x_t)
+        return_params, trend = model(x_t)
 
-    horizon = len(act_logits)
+    horizon = len(return_params)
     n = X.shape[0]
-    actions = np.zeros((n, horizon), dtype=np.int32)
-    confs = np.zeros((n, horizon), dtype=np.float32)
+    mu_arr = np.zeros((n, horizon), dtype=np.float32)
+    sigma_arr = np.zeros((n, horizon), dtype=np.float32)
 
-    for h, logits in enumerate(act_logits):
-        probs = torch.softmax(logits, dim=-1).cpu().numpy()
-        actions[:, h] = probs.argmax(axis=1)
-        confs[:, h] = probs.max(axis=1)
+    for h, params in enumerate(return_params):
+        mu_arr[:, h] = params[:, 0].cpu().numpy()
+        sigma_arr[:, h] = torch.exp(params[:, 1]).cpu().numpy()  # exp(log_σ) → σ
 
     return {
-        "actions": actions,
-        "confidences": confs,
+        "mu": mu_arr,
+        "sigma": sigma_arr,
         "trend_score": trend.cpu().numpy(),
     }

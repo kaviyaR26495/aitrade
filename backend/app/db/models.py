@@ -479,6 +479,9 @@ class TradeOrder(Base):
     ensemble_prediction_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("ensemble_predictions.id"), nullable=True
     )
+    trade_signal_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("trade_signals.id"), nullable=True
+    )
     variety: Mapped[str] = mapped_column(String(20), default="regular")  # regular, amo, gtt
     transaction_type: Mapped[str] = mapped_column(String(10), nullable=False)  # BUY, SELL
     quantity: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -739,4 +742,67 @@ class RegimeEnsembleMap(Base):
     ensemble_config_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("ensemble_configs.id"), nullable=False
     )
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist, onupdate=now_ist)
+
+
+# ── Trade Signals (Target-Price Pipeline Output) ──────────────────────
+
+class SignalStatus(str, enum.Enum):
+    pending = "pending"        # signal generated, not yet executed
+    active = "active"          # order placed, position open
+    target_hit = "target_hit"  # closed at target
+    sl_hit = "sl_hit"          # closed at stoploss
+    expired = "expired"        # κ-decay made R:R unviable, signal dropped
+    cancelled = "cancelled"    # manually cancelled
+
+
+class TradeSignal(Base):
+    """A BUY signal with target price, stoploss, and meta-classifier score.
+
+    Produced by the signal synthesiser; consumed by the OMS for order
+    placement and by the trailing-stop engine for dynamic SL updates.
+    """
+    __tablename__ = "trade_signals"
+    __table_args__ = (
+        UniqueConstraint("stock_id", "signal_date", name="uq_signal_stock_date"),
+        Index("ix_signal_status", "status"),
+        Index("ix_signal_date", "signal_date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    stock_id: Mapped[int] = mapped_column(Integer, ForeignKey("stocks_list.id"), nullable=False)
+    signal_date: Mapped[date] = mapped_column(Date, nullable=False)
+
+    # ── Price levels ──
+    entry_price: Mapped[float] = mapped_column(Float, nullable=False)
+    target_price: Mapped[float] = mapped_column(Float, nullable=False)
+    stoploss_price: Mapped[float] = mapped_column(Float, nullable=False)
+    current_stoploss: Mapped[float | None] = mapped_column(Float, nullable=True)  # trailing SL
+
+    # ── Confidence & quality scores ──
+    pop_score: Mapped[float | None] = mapped_column(Float, nullable=True)  # meta-classifier PoP (0-1)
+    fqs_score: Mapped[float | None] = mapped_column(Float, nullable=True)  # fundamental quality (0-1)
+    confluence_score: Mapped[float | None] = mapped_column(Float, nullable=True)  # raw ensemble confluence
+    execution_cost_pct: Mapped[float | None] = mapped_column(Float, nullable=True)  # spread+slip as % of price
+
+    # ── κ-decay tracking ──
+    initial_rr_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
+    current_rr_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
+    days_since_signal: Mapped[int] = mapped_column(Integer, default=0)
+
+    # ── Model source references ──
+    lstm_mu: Mapped[float | None] = mapped_column(Float, nullable=True)       # LSTM predicted mean return
+    lstm_sigma: Mapped[float | None] = mapped_column(Float, nullable=True)    # LSTM predicted uncertainty
+    knn_median_return: Mapped[float | None] = mapped_column(Float, nullable=True)
+    knn_win_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    # ── Trailing stop state ──
+    is_trailing_active: Mapped[bool] = mapped_column(Boolean, default=False)
+    trailing_updates_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_gtt_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
+    # ── Status & metadata ──
+    status: Mapped[SignalStatus] = mapped_column(Enum(SignalStatus), default=SignalStatus.pending)
+    regime_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist, onupdate=now_ist)

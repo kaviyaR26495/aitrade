@@ -7,11 +7,16 @@ Step 5.2:
 4. Train KNeighborsClassifier
 5. Chronological train/test split (80/20)
 6. Save artifacts: model.joblib + norm_params.json
+
+The KNN also provides *return statistics* from neighbors: median return,
+return std, and win rate — used by the signal synthesiser for target-price
+calibration.
 """
 from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -374,3 +379,82 @@ def predict_knn(
     probabilities = model.predict_proba(X)
 
     return predictions, probabilities
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# KNN Return Statistics (Target-Price Pipeline)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class KNNReturnStats:
+    """Return statistics from KNN neighbors — one per query sample."""
+    median_return: float     # median pnl_percent of k neighbors
+    return_std: float        # std of neighbor returns (uncertainty)
+    win_rate: float          # fraction of neighbors with pnl_percent > 0
+    mean_return: float       # mean pnl_percent
+    neighbor_count: int      # actual number of neighbors used
+
+
+def predict_knn_returns(
+    model: "FaissKNNClassifier",
+    X: np.ndarray,
+    neighbor_returns: np.ndarray,
+    norm_params: dict | None = None,
+) -> list[KNNReturnStats]:
+    """Query KNN and compute return statistics from neighbors' pnl_percent.
+
+    Parameters
+    ----------
+    model : FaissKNNClassifier
+        Trained KNN model (must have been fit with the same training data).
+    X : ndarray
+        Query features — (n_samples, seq_len, n_features) or pre-flattened.
+    neighbor_returns : ndarray
+        (n_train_samples,) — pnl_percent for each training sample, aligned
+        with the training data order used during ``model.fit()``.
+    norm_params : dict | None
+        Normalization params (mean, scale, pca) from training.
+
+    Returns
+    -------
+    List of KNNReturnStats, one per query sample.
+    """
+    if X.ndim == 3:
+        X = X.reshape(X.shape[0], -1).astype(np.float64)
+    else:
+        X = X.astype(np.float64)
+
+    if norm_params is not None:
+        mean = np.asarray(norm_params["mean"], dtype=np.float64)
+        scale = np.asarray(norm_params["scale"], dtype=np.float64)
+        X = (X - mean) / np.where(scale > 0, scale, 1.0)
+        if "pca_components" in norm_params:
+            pca_mean = np.asarray(norm_params["pca_mean"], dtype=np.float64)
+            pca_comp = np.asarray(norm_params["pca_components"], dtype=np.float64)
+            X = (X - pca_mean) @ pca_comp.T
+
+    X = np.ascontiguousarray(X, dtype=np.float32)
+    distances, indices = model._query(X)
+
+    results: list[KNNReturnStats] = []
+    for i in range(X.shape[0]):
+        idx = indices[i]
+        # Filter out -1 indices (FAISS returns -1 when not enough neighbors)
+        valid = idx[idx >= 0]
+        if len(valid) == 0:
+            results.append(KNNReturnStats(
+                median_return=0.0, return_std=0.0, win_rate=0.0,
+                mean_return=0.0, neighbor_count=0,
+            ))
+            continue
+
+        rets = neighbor_returns[valid]
+        results.append(KNNReturnStats(
+            median_return=float(np.median(rets)),
+            return_std=float(np.std(rets)) if len(rets) > 1 else 0.0,
+            win_rate=float(np.mean(rets > 0)),
+            mean_return=float(np.mean(rets)),
+            neighbor_count=int(len(valid)),
+        ))
+
+    return results

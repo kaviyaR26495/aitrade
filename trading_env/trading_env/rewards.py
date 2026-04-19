@@ -114,10 +114,77 @@ def dense_reward(
     return float(reward)
 
 
+def target_hit_with_mae(
+    entry_price: float,
+    current_price: float,
+    target_price: float,
+    stoploss_price: float,
+    max_adverse_excursion: float,
+    atr: float,
+) -> float:
+    """Reward for target-price trades with MAE (Max Adverse Excursion) penalty.
+
+    Rewards hitting the target proportionally to the R:R realised, while
+    penalising trades that experienced deep drawdowns before recovering.
+    This teaches the RL agent to prefer *clean* entries with low MAE.
+
+    Parameters
+    ----------
+    entry_price : float
+        Buy entry price.
+    current_price : float
+        Current or exit price.
+    target_price : float
+        Profit target set by the signal synthesiser.
+    stoploss_price : float
+        Stoploss level.
+    max_adverse_excursion : float
+        Worst intra-trade drawdown (lowest price seen after entry).
+    atr : float
+        Current ATR for normalisation.
+
+    Returns
+    -------
+    float  — reward value (can be negative for SL hits).
+    """
+    if atr <= 0 or entry_price <= 0:
+        return 0.0
+
+    # Realised P&L as multiple of risk (ATR)
+    pnl_pct = (current_price - entry_price) / entry_price
+    risk = abs(entry_price - stoploss_price) / entry_price
+    reward_pct = abs(target_price - entry_price) / entry_price
+
+    # R-multiple: how much of the target was captured
+    if reward_pct > 0:
+        r_captured = pnl_pct / reward_pct
+    else:
+        r_captured = 0.0
+
+    # MAE penalty: penalise trades that dipped deeply before recovering
+    mae_depth = (entry_price - max_adverse_excursion) / entry_price
+    mae_penalty = max(0.0, mae_depth / (risk + 1e-8) - 0.3)  # forgive up to 30% of risk
+
+    # Base reward
+    if current_price >= target_price:
+        # Target hit — full reward minus MAE penalty
+        reward = 1.0 + 0.5 * max(0, r_captured - 1.0)  # bonus for overshooting
+        reward -= 0.3 * mae_penalty
+    elif current_price <= stoploss_price:
+        # Stoploss hit — negative reward
+        reward = -1.0 - 0.2 * mae_penalty
+    else:
+        # Still open — small unrealised signal
+        reward = 0.1 * r_captured - 0.1 * mae_penalty
+
+    return float(reward)
+
+
 REWARD_FUNCTIONS = {
     "risk_adjusted_pnl": risk_adjusted_pnl,
     "sharpe": sharpe_reward,
     "sortino": sortino_reward,
     "profit": profit_reward,
     "dense": dense_reward,
+    "target_hit_mae": target_hit_with_mae,
 }

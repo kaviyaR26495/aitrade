@@ -18,13 +18,21 @@ from app.config import settings
 from app.core.data_service import get_model_ready_data
 from app.core.normalizer import prepare_model_input
 from app.db import crud
-from app.db.models import KNNModel, LSTMModel, EnsembleConfig, EnsemblePrediction, Stock
+from app.db.models import (
+    KNNModel, LSTMModel, EnsembleConfig, EnsemblePrediction, Stock,
+    LSTMHorizonModel, TradeSignal, SignalStatus,
+)
 from app.db.database import async_session_factory
-from app.ml.knn_distiller import load_knn_model, predict_knn, load_knn_norm_params
+from app.ml.knn_distiller import load_knn_model, predict_knn, load_knn_norm_params, predict_knn_returns
 from app.ml.lstm_distiller import load_lstm_model, predict_lstm
+from app.ml.multi_horizon_lstm import load_multi_horizon_model, predict_multi_horizon
 from app.ml.ensemble import ensemble_predict
+from app.ml.signal_synthesizer import synthesize_signal, SynthesizerConfig
+from app.ml.meta_classifier import MetaClassifier
 from app.ml.position_sizer import sector_concentration_multiplier
 from app.core.regime_classifier import classify_regimes
+from app.core.support_resistance import compute_sr_zones, sr_features
+from app.core.fundamental_scorer import compute_fundamental_score, fundamental_features
 
 logger = logging.getLogger(__name__)
 
@@ -411,5 +419,346 @@ async def run_daily_predictions(
         "sell_signals": sum(1 for r in results if r["action"] == 2),
         "hold_signals": sum(1 for r in results if r["action"] == 0),
         "results": results,
+        "error_details": errors,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Target-Price Prediction Pipeline (TPML)
+# ─────────────────────────────────────────────────────────────────────────────
+# Replaces classification-based predictions with target-price signals:
+#   1. LSTM regression → (μ, σ) per horizon
+#   2. KNN neighbor return stats → (median, std, win_rate)
+#   3. S/R zones → nearest support/resistance
+#   4. Fundamental quality score
+#   5. Signal synthesiser → entry/target/SL
+#   6. Meta-classifier gate → PoP score
+
+_mh_lstm_cache: dict[str, Any] = {}  # path -> model
+_meta_clf: MetaClassifier | None = None
+
+
+def _load_mh_lstm_cached(path: str):
+    if path not in _mh_lstm_cache:
+        logger.info(f"Loading MultiHorizon LSTM from disk: {path}")
+        _mh_lstm_cache[path] = load_multi_horizon_model(path)
+    return _mh_lstm_cache[path]
+
+
+async def run_target_price_predictions(
+    db: AsyncSession,
+    model_dir: str | None = None,
+    target_date: date | None = None,
+    interval: str = "day",
+    stock_ids: list[int] | None = None,
+    job_id: str | None = None,
+    pop_threshold: float = 0.55,
+    config: SynthesizerConfig | None = None,
+) -> dict[str, Any]:
+    """Run the target-price prediction pipeline for all active stocks.
+
+    This is the TPML replacement for ``run_daily_predictions()``.
+    Instead of BUY/HOLD/SELL classification, it produces trade signals
+    with entry_price, target_price, stoploss_price, and PoP score.
+
+    Returns
+    -------
+    dict with summary stats and list of generated TradeSignal IDs.
+    """
+    global _meta_clf
+
+    model_dir = model_dir or settings.MODEL_DIR
+    model_path = Path(model_dir)
+    target_date = target_date or date.today()
+    config = config or SynthesizerConfig()
+
+    # ── Load Multi-Horizon LSTM ───────────────────────────────────────
+    q = (select(LSTMHorizonModel)
+         .where(LSTMHorizonModel.status == "completed")
+         .order_by(desc(LSTMHorizonModel.created_at))
+         .limit(1))
+    res = await db.execute(q)
+    mh_lstm_db = res.scalar_one_or_none()
+
+    if mh_lstm_db and mh_lstm_db.model_path:
+        mh_lstm = _load_mh_lstm_cached(mh_lstm_db.model_path)
+    else:
+        # Fallback: try filesystem
+        mh_path = model_path / "lstm" / "mh_lstm.pt"
+        if not mh_path.exists():
+            raise FileNotFoundError("No trained MultiHorizon LSTM model found")
+        mh_lstm = _load_mh_lstm_cached(str(mh_path))
+
+    # ── Load KNN model (for return stats) ─────────────────────────────
+    q = (select(KNNModel)
+         .where(KNNModel.status == "completed")
+         .order_by(desc(KNNModel.created_at))
+         .limit(1))
+    res = await db.execute(q)
+    knn_db = res.scalar_one_or_none()
+    knn_model = None
+    knn_norm_params = None
+    knn_neighbor_returns = None
+
+    if knn_db and knn_db.model_path:
+        knn_model, knn_norm_params = _load_knn_cached(
+            knn_db.model_path, Path(knn_db.model_path).parent
+        )
+        # Load neighbor returns (pnl_percent from golden patterns)
+        try:
+            from app.db.models import GoldenPattern
+            gp_q = (select(GoldenPattern.pnl_percent)
+                     .where(GoldenPattern.rl_model_id == knn_db.source_rl_model_id)
+                     .order_by(GoldenPattern.id))
+            gp_res = await db.execute(gp_q)
+            knn_neighbor_returns = np.array(
+                [r[0] if r[0] is not None else 0.0 for r in gp_res.all()],
+                dtype=np.float32,
+            )
+        except Exception as e:
+            logger.warning("Failed to load KNN neighbor returns: %s", e)
+
+    # ── Load or initialise Meta-Classifier ────────────────────────────
+    meta_path = model_path / "meta_classifier" / "meta_clf.joblib"
+    if _meta_clf is None:
+        _meta_clf = MetaClassifier(threshold=pop_threshold)
+        if meta_path.exists():
+            try:
+                _meta_clf.load(meta_path)
+                logger.info("MetaClassifier loaded from %s", meta_path)
+            except Exception as e:
+                logger.warning("Failed to load MetaClassifier: %s", e)
+
+    # ── Get stock universe ────────────────────────────────────────────
+    if stock_ids:
+        res = await db.execute(select(Stock).where(Stock.id.in_(stock_ids)))
+        stocks = list(res.scalars().all())
+    else:
+        from app.core import data_service
+        stocks = await data_service.get_universe_stocks(db)
+
+    seq_len = settings.DEFAULT_SEQ_LEN_DAILY if interval == "day" else settings.DEFAULT_SEQ_LEN_WEEKLY
+
+    signals_created: list[dict] = []
+    signals_rejected: list[dict] = []
+    errors: list[dict] = []
+    processed_count = 0
+
+    for i, stock in enumerate(stocks):
+        try:
+            # ── Get OHLCV + indicators ────────────────────────────────
+            df, feature_cols = await get_model_ready_data(
+                db, stock.id, interval=interval, seq_len=seq_len,
+                end_date=target_date,
+            )
+            if df is None or len(df) < seq_len:
+                continue
+
+            X = prepare_model_input(df, feature_cols, seq_len=seq_len)
+            if len(X) == 0:
+                continue
+
+            X_last = X[-1:].copy()
+            latest = df.iloc[-1]
+            current_price = float(latest["close"])
+            atr = float(latest.get("atr", current_price * 0.02))
+
+            # ── 1. LSTM regression ────────────────────────────────────
+            lstm_out = predict_multi_horizon(mh_lstm, X_last)
+            # Use h=5 (5-day horizon) as the primary signal
+            h_idx = 4  # 0-indexed
+            lstm_mu = float(lstm_out["mu"][0, h_idx])
+            lstm_sigma = float(lstm_out["sigma"][0, h_idx])
+
+            # ── 2. KNN return stats ───────────────────────────────────
+            knn_median = 0.0
+            knn_win = 0.5
+            if knn_model is not None and knn_neighbor_returns is not None:
+                try:
+                    knn_stats = predict_knn_returns(
+                        knn_model, X_last, knn_neighbor_returns,
+                        norm_params=knn_norm_params,
+                    )
+                    if knn_stats:
+                        knn_median = knn_stats[0].median_return
+                        knn_win = knn_stats[0].win_rate
+                except Exception as e:
+                    logger.warning("KNN returns failed for %s: %s", stock.symbol, e)
+
+            # ── 3. S/R zones ──────────────────────────────────────────
+            sr_result = compute_sr_zones(df, current_price, atr)
+            sr_feat = sr_features(sr_result, current_price, atr)
+
+            # ── 4. Fundamental quality score ──────────────────────────
+            fqs = 0.5  # neutral default
+            try:
+                from app.db.models import StockFundamentalZScore, StockFundamentalPIT, StockSentiment
+                zs_q = (select(StockFundamentalZScore)
+                        .where(StockFundamentalZScore.stock_id == stock.id)
+                        .order_by(desc(StockFundamentalZScore.date))
+                        .limit(1))
+                zs_row = (await db.execute(zs_q)).scalar_one_or_none()
+
+                pit_q = (select(StockFundamentalPIT)
+                         .where(StockFundamentalPIT.stock_id == stock.id)
+                         .order_by(desc(StockFundamentalPIT.date))
+                         .limit(1))
+                pit_row = (await db.execute(pit_q)).scalar_one_or_none()
+
+                sent_q = (select(StockSentiment)
+                          .where(StockSentiment.stock_id == stock.id)
+                          .order_by(desc(StockSentiment.date))
+                          .limit(1))
+                sent_row = (await db.execute(sent_q)).scalar_one_or_none()
+
+                fqs_result = compute_fundamental_score(
+                    pe_zscore_3y=getattr(zs_row, "pe_zscore_3y", None),
+                    pe_zscore_sector=getattr(zs_row, "pe_zscore_sector", None),
+                    roe_norm=getattr(zs_row, "roe_norm", None),
+                    debt_equity_norm=getattr(zs_row, "debt_equity_norm", None),
+                    pe_ratio=getattr(pit_row, "pe_ratio", None),
+                    forward_pe=getattr(pit_row, "forward_pe", None),
+                    dividend_yield=getattr(pit_row, "dividend_yield", None),
+                    avg_finbert_score=getattr(sent_row, "avg_finbert_score", None),
+                )
+                fqs = fqs_result.fqs
+            except Exception as e:
+                logger.debug("Fundamental score unavailable for %s: %s", stock.symbol, e)
+
+            # ── 5. Regime ─────────────────────────────────────────────
+            try:
+                df_regime = classify_regimes(df.iloc[-1:])
+                regime_id = int(df_regime["regime_id"].iloc[0])
+            except Exception:
+                regime_id = 0
+
+            # ── 6. Signal synthesis ───────────────────────────────────
+            # Get bid/ask if available
+            bid, ask = None, None
+            try:
+                from app.core.zerodha import _get_bid_ask
+                bid, ask = _get_bid_ask(stock.symbol, stock.exchange)
+            except Exception:
+                pass
+
+            realized_vol = float(latest.get("realized_vol", 0.0))
+
+            candidate = synthesize_signal(
+                stock_id=stock.id,
+                current_price=current_price,
+                atr=atr,
+                lstm_mu=lstm_mu,
+                lstm_sigma=lstm_sigma,
+                knn_median_return=knn_median,
+                knn_win_rate=knn_win,
+                sr_result=sr_result,
+                fqs_score=fqs,
+                regime_id=regime_id,
+                bid=bid,
+                ask=ask,
+                realized_vol=realized_vol,
+                config=config,
+            )
+
+            # ── 7. Meta-classifier gate ──────────────────────────────
+            pop_score = 0.5
+            if _meta_clf is not None:
+                feat_vec = _meta_clf.build_feature_vector(
+                    confluence_score=candidate.confluence_score,
+                    fqs_score=candidate.fqs_score,
+                    execution_cost_pct=candidate.execution_cost_pct,
+                    initial_rr_ratio=candidate.initial_rr_ratio,
+                    net_expected_return_pct=candidate.net_expected_return_pct,
+                    lstm_mu=candidate.lstm_mu,
+                    lstm_sigma=candidate.lstm_sigma,
+                    knn_median_return=candidate.knn_median_return,
+                    knn_win_rate=candidate.knn_win_rate,
+                    regime_id=regime_id,
+                    sr_features=sr_feat,
+                )
+                meta_results = _meta_clf.predict(feat_vec.reshape(1, -1))
+                pop_score = meta_results[0].pop_score
+
+            # ── 8. Final decision ─────────────────────────────────────
+            if candidate.is_buy and _meta_clf.should_trade(pop_score):
+                signal = TradeSignal(
+                    stock_id=stock.id,
+                    signal_date=target_date,
+                    entry_price=candidate.entry_price,
+                    target_price=candidate.target_price,
+                    stoploss_price=candidate.stoploss_price,
+                    current_stoploss=candidate.stoploss_price,
+                    pop_score=pop_score,
+                    fqs_score=fqs,
+                    confluence_score=candidate.confluence_score,
+                    execution_cost_pct=candidate.execution_cost_pct,
+                    initial_rr_ratio=candidate.initial_rr_ratio,
+                    current_rr_ratio=candidate.initial_rr_ratio,
+                    lstm_mu=candidate.lstm_mu,
+                    lstm_sigma=candidate.lstm_sigma,
+                    knn_median_return=candidate.knn_median_return,
+                    knn_win_rate=candidate.knn_win_rate,
+                    regime_id=regime_id,
+                    status=SignalStatus.pending,
+                )
+                db.add(signal)
+                await db.flush()
+                signals_created.append({
+                    "signal_id": signal.id,
+                    "stock_id": stock.id,
+                    "symbol": stock.symbol,
+                    "entry": candidate.entry_price,
+                    "target": candidate.target_price,
+                    "stoploss": candidate.stoploss_price,
+                    "rr_ratio": candidate.initial_rr_ratio,
+                    "pop_score": pop_score,
+                    "fqs": fqs,
+                })
+            else:
+                reason = candidate.reject_reason or f"PoP {pop_score:.3f} < {pop_threshold}"
+                signals_rejected.append({
+                    "stock_id": stock.id,
+                    "symbol": stock.symbol,
+                    "reason": reason,
+                })
+
+            del df
+            gc.collect()
+
+        except Exception as e:
+            logger.error("TPML failed for %s: %s", stock.symbol, e, exc_info=True)
+            errors.append({"stock_id": stock.id, "symbol": stock.symbol, "error": str(e)})
+        finally:
+            processed_count += 1
+            if job_id and (processed_count <= 10 or processed_count % 5 == 0
+                           or processed_count == len(stocks)):
+                try:
+                    await crud.update_prediction_job(
+                        db, job_id,
+                        completed_stocks=processed_count,
+                        progress=int((processed_count / len(stocks)) * 100),
+                    )
+                except Exception:
+                    pass
+
+    await db.commit()
+
+    if job_id:
+        try:
+            async with async_session_factory() as final_db:
+                await crud.update_prediction_job(
+                    final_db, job_id, status="completed", progress=100,
+                )
+        except Exception as e:
+            logger.error("Failed to finalize TPML job %s: %s", job_id, e)
+
+    return {
+        "date": str(target_date),
+        "total_stocks": len(stocks),
+        "signals_created": len(signals_created),
+        "signals_rejected": len(signals_rejected),
+        "errors": len(errors),
+        "signals": signals_created,
+        "rejected": signals_rejected,
         "error_details": errors,
     }
