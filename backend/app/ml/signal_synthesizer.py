@@ -142,6 +142,7 @@ def synthesize_signal(
     lstm_sigma: float,
     knn_median_return: float,
     knn_win_rate: float,
+    knn_return_std: float,
     sr_result: SRResult,
     fqs_score: float,
     regime_id: Optional[int] = None,
@@ -164,6 +165,8 @@ def synthesize_signal(
         LSTM predicted mean return and uncertainty (from h=5 horizon).
     knn_median_return, knn_win_rate : float
         KNN neighbor return statistics.
+    knn_return_std : float
+        Standard deviation of KNN neighbor returns (for inverse-variance weighting).
     sr_result : SRResult
         Support/resistance analysis.
     fqs_score : float
@@ -192,24 +195,34 @@ def synthesize_signal(
         realized_vol=realized_vol,
     )
 
-    # ── 2. Blend LSTM and KNN predicted returns ──────────────────────
-    # Weight LSTM by inverse-sigma (higher confidence = more weight)
-    lstm_weight = 1.0 / (1.0 + lstm_sigma * 10)  # σ=0.05 → wt≈0.67
-    knn_weight = 1.0 - lstm_weight
+    # ── 2. Blend LSTM and KNN predicted returns (inverse-variance) ──
+    # True statistical inverse-variance weighting:
+    # each model's weight is proportional to 1/variance.
+    lstm_var = lstm_sigma ** 2 + 1e-8
+    knn_var = knn_return_std ** 2 + 1e-8
 
-    blended_return = lstm_weight * lstm_mu + knn_weight * knn_median_return
-    net_return = blended_return - exec_cost  # deduct cost
+    w_lstm = 1.0 / lstm_var
+    w_knn = 1.0 / knn_var
+    total_weight = w_lstm + w_knn
+
+    blended_return = (w_lstm * lstm_mu + w_knn * knn_median_return) / total_weight
+    # Deduct round-trip execution cost (entry + exit)
+    net_return = blended_return - (exec_cost * 2.0)
 
     # ── 3. Target price from blended return ───────────────────────────
     raw_target = current_price * (1.0 + net_return)
 
-    # Clamp target to nearest resistance if it's nearby
+    # Clamp target to nearest resistance — unless breakout is predicted
     if sr_result.nearest_resistance is not None:
         res_mid = sr_result.nearest_resistance.midpoint
-        # If resistance is between current and raw target, use resistance as target
         if current_price < res_mid < raw_target:
-            # Use resistance minus a small buffer (so we sell just before resistance)
-            raw_target = res_mid - 0.001 * res_mid
+            # Breakout condition: if predicted target is > 1.5 ATR above
+            # resistance and we have an upside breakout projection, use that
+            if (raw_target - res_mid) > 1.5 * atr and sr_result.upside_breakout_target > res_mid:
+                raw_target = min(raw_target, sr_result.upside_breakout_target)
+            else:
+                # Standard clamp: sell just before resistance
+                raw_target = res_mid - 0.001 * res_mid
 
     target_price = _round_to_tick(raw_target, config.tick_size)
 

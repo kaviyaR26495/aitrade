@@ -132,12 +132,16 @@ def _volume_profile_zones(
     if price_max <= price_min:
         return []
 
+    # Apply exponential time-decay: older volume gets ~13% weight, recent gets 100%
+    decay_factor = np.exp(np.linspace(-2.0, 0.0, len(volumes)))
+    decayed_volumes = volumes * decay_factor
+
     # Build volume-weighted histogram
     bin_edges = np.linspace(price_min, price_max, n_bins + 1)
     hist = np.zeros(n_bins, dtype=np.float64)
     bin_width = (price_max - price_min) / n_bins
 
-    for price, vol in zip(closes, volumes):
+    for price, vol in zip(closes, decayed_volumes):
         idx = int((price - price_min) / bin_width)
         idx = min(idx, n_bins - 1)
         hist[idx] += vol

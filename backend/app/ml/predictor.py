@@ -573,6 +573,7 @@ async def run_target_price_predictions(
             # ── 2. KNN return stats ───────────────────────────────────
             knn_median = 0.0
             knn_win = 0.5
+            knn_std = 0.10  # default moderate uncertainty
             if knn_model is not None and knn_neighbor_returns is not None:
                 try:
                     knn_stats = predict_knn_returns(
@@ -582,6 +583,7 @@ async def run_target_price_predictions(
                     if knn_stats:
                         knn_median = knn_stats[0].median_return
                         knn_win = knn_stats[0].win_rate
+                        knn_std = knn_stats[0].return_std
                 except Exception as e:
                     logger.warning("KNN returns failed for %s: %s", stock.symbol, e)
 
@@ -651,6 +653,7 @@ async def run_target_price_predictions(
                 lstm_sigma=lstm_sigma,
                 knn_median_return=knn_median,
                 knn_win_rate=knn_win,
+                knn_return_std=knn_std,
                 sr_result=sr_result,
                 fqs_score=fqs,
                 regime_id=regime_id,

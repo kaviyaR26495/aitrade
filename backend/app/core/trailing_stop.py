@@ -157,7 +157,7 @@ async def execute_trailing_stop_update(
 
     kite = get_kite()
 
-    # Step 1: Cancel existing GTT
+    # Step 1: Cancel existing GTT — abort if this fails (position stays protected)
     if state.last_gtt_id:
         try:
             await asyncio.to_thread(
@@ -168,11 +168,11 @@ async def execute_trailing_stop_update(
                 state.last_gtt_id, state.symbol,
             )
         except Exception as e:
-            logger.warning(
-                "Failed to cancel GTT %s for %s: %s",
+            logger.error(
+                "Failed to cancel GTT %s for %s, aborting trail update: %s",
                 state.last_gtt_id, state.symbol, e,
             )
-            # Continue anyway — old GTT may have already been triggered
+            return None  # Do not proceed — existing GTT still protects position
 
     # Step 2: Place new GTT OCO with updated SL
     try:
@@ -210,5 +210,52 @@ async def execute_trailing_stop_update(
         )
         return str(gtt_id)
     except Exception as e:
-        logger.error("Failed to place trailing GTT for %s: %s", state.symbol, e)
-        return None
+        logger.critical(
+            "FATAL: Failed to place new trailing GTT for %s! POSITION NAKED. Error: %s",
+            state.symbol, e,
+        )
+
+        # ROLLBACK: Attempt to reinstate previous GTT with old SL values
+        try:
+            logger.info(
+                "Attempting to reinstate previous GTT for %s (SL=%.2f, target=%.2f)...",
+                state.symbol, state.current_sl, state.target_price,
+            )
+            recovery_id = await asyncio.to_thread(
+                kite.place_gtt,
+                trigger_type=kite.GTT_TYPE_OCO,
+                tradingsymbol=state.symbol,
+                exchange=state.exchange,
+                trigger_values=[state.current_sl, state.target_price],
+                last_price=state.entry_price,
+                orders=[
+                    {
+                        "exchange": state.exchange,
+                        "tradingsymbol": state.symbol,
+                        "transaction_type": "SELL",
+                        "quantity": state.quantity,
+                        "order_type": "LIMIT",
+                        "product": "CNC",
+                        "price": state.current_sl,
+                    },
+                    {
+                        "exchange": state.exchange,
+                        "tradingsymbol": state.symbol,
+                        "transaction_type": "SELL",
+                        "quantity": state.quantity,
+                        "order_type": "LIMIT",
+                        "product": "CNC",
+                        "price": state.target_price,
+                    },
+                ],
+            )
+            logger.info("Recovery GTT placed for %s: %s", state.symbol, recovery_id)
+            # Return the recovery GTT ID so the signal record stays valid
+            return str(recovery_id)
+        except Exception as rollback_err:
+            logger.critical(
+                "ROLLBACK FAILED. NAKED POSITION CONFIRMED on %s: %s",
+                state.symbol, rollback_err,
+            )
+            # TODO: Fire external webhook alert (Discord/Telegram) here
+            return None
