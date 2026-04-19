@@ -49,9 +49,9 @@ const STAGE_DEFS: { name: string; label: string; description: string }[] = [
     description: 'Explore and refine the policy in simulated markets with attention-based feature extraction.',
   },
   {
-    name: 'ensemble_distill',
-    label: 'Ensemble Distillation (KNN + LSTM)',
-    description: 'Compress the RL policy into a fast KNN + LSTM ensemble ready for real-time inference.',
+    name: 'meta_model_train',
+    label: 'Meta-Classifier Training (XGBoost)',
+    description: 'Train the Probability of Profit (PoP) Meta-Gate using the synthesized regression distributions of the LSTM and KNN models.',
   },
   {
     name: 'backtest',
@@ -707,7 +707,7 @@ export default function AutoPilotPipeline() {
             <span className="text-base font-bold text-emerald-400">All stages complete — model is live-ready!</span>
           </div>
           <p className="text-sm text-[var(--text-muted)] text-center max-w-md">
-            The ensemble is distilled and validated. Head to Live Trading to deploy signals for{' '}
+            The Meta-Classifier is trained and validated. Head to Live Trading to deploy signals for{' '}
             <span className="font-semibold text-emerald-300">{pipelineUniverse.join(', ')}</span>.
           </p>
           <div className="flex items-center gap-3">

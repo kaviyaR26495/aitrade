@@ -838,4 +838,13 @@ async def train_meta_classifier(
     save_path = _meta_clf.save(save_dir / "meta_clf.joblib")
     logger.info("MetaClassifier saved to %s", save_path)
 
+    # Persist metrics so the /models/meta-classifier endpoint can surface them
+    import json as _json
+    metrics_to_save = {k: v for k, v in metrics.items() if k != "feature_importances"}
+    try:
+        with open(save_dir / "meta_clf_metrics.json", "w") as _f:
+            _json.dump(metrics_to_save, _f)
+    except Exception as _me:
+        logger.warning("Could not save MetaClassifier metrics: %s", _me)
+
     return metrics

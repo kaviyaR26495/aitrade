@@ -4,18 +4,18 @@ import {
   useAlgorithms, useRlModels, useKnnModels, useLstmModels,
   useUniverseStocks, useTrainModel, useDistillModel, useDistillLog, useRlModelLogs, useDeviceInfo,
   useStopTraining, usePauseTraining, useResumeTraining, useDeleteRlModel,
-  useDeleteKnnModel, useDeleteLstmModel, useEnsembleConfigs, useUpdateEnsemble, useDeleteEnsemble,
+  useDeleteKnnModel, useDeleteLstmModel, useMetaClassifier,
   useImportModel
 } from '../hooks/useApi';
 import { useAppStore } from '../store/appStore';
-import { exportModelBundle } from '../services/api';
+
 import { Brain, Cpu, Layers, ChevronDown, ChevronUp, Zap, Square, Pause, Play, Trash2, ToggleLeft, ToggleRight, Download, Upload, Loader2 } from 'lucide-react';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
 } from 'recharts';
 import AutoPilotPipeline from '../components/AutoPilotPipeline';
 
-type Tab = 'autopilot' | 'rl' | 'distill' | 'ensemble';
+type Tab = 'autopilot' | 'rl' | 'distill' | 'meta';
 
 export default function ModelStudio() {
   const [tab, setTab] = useState<Tab>('autopilot');
@@ -189,7 +189,7 @@ export default function ModelStudio() {
             { id: 'autopilot', label: '⚡ AutoPilot' },
             { id: 'rl', label: 'RL Training' },
             { id: 'distill', label: 'Distillation' },
-            { id: 'ensemble', label: 'Ensemble' },
+            { id: 'meta', label: 'Meta-Classifier' },
           ]}
           activeTab={tab}
           onTabChange={(t) => setTab(t as Tab)}
@@ -678,263 +678,152 @@ export default function ModelStudio() {
         </div>
       )}
 
-      {tab === 'ensemble' && (
-        <EnsembleTab knnModels={knnModels ?? []} lstmModels={lstmModels ?? []} />
+      {tab === 'meta' && (
+        <MetaClassifierTab />
       )}
     </div>
   );
 }
 
-// ── Ensemble Tab ──────────────────────────────────────────────────────
+// ── Meta-Classifier Tab ──────────────────────────────────────────────
 
-function EnsembleTab({ knnModels, lstmModels }: { knnModels: any[]; lstmModels: any[] }) {
-  const { data: ensembles, isLoading } = useEnsembleConfigs();
-  const updateMutation = useUpdateEnsemble();
-  const deleteMutation = useDeleteEnsemble();
-  const { addNotification } = useAppStore();
+function MetaClassifierTab() {
+  const { data, isLoading, refetch, isRefetching } = useMetaClassifier();
 
-  const [exportingId, setExportingId] = useState<number | null>(null);
-
-  const handleExport = async (ensId: number, knnId: number, lstmId: number, name: string) => {
-    setExportingId(ensId);
-    try {
-      const res = await exportModelBundle(knnId, lstmId);
-      const url = URL.createObjectURL(new Blob([res.data], { type: 'application/zip' }));
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `${name.replace(/\s+/g, '_')}_bundle.zip`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-    } catch {
-      addNotification({ type: 'error', message: 'Export failed' });
-    } finally {
-      setExportingId(null);
-    }
+  const FEATURE_LABELS: Record<string, string> = {
+    confluence_score: 'Confluence Score',
+    fqs_score: 'FQS (Fundamental Quality)',
+    execution_cost_pct: 'Execution Cost %',
+    initial_rr_ratio: 'R:R Ratio',
+    net_expected_return_pct: 'Net Expected Return',
+    lstm_mu: 'LSTM μ (Mean Return)',
+    lstm_sigma: 'LSTM σ (Uncertainty)',
+    knn_median_return: 'KNN Median Return',
+    knn_win_rate: 'KNN Win Rate',
+    regime_id: 'Regime ID',
+    sr_support_dist: 'S/R Support Distance',
+    sr_resistance_dist: 'S/R Resistance Distance',
+    sr_support_strength: 'Support Strength',
+    sr_resistance_strength: 'Resistance Strength',
+    sr_zone_count: 'S/R Zone Count',
+    sr_rr_ratio: 'S/R R:R Ratio',
   };
 
-  // per-ensemble local edit state
-  const [editState, setEditState] = useState<Record<number, { knn_weight: string; lstm_weight: string; agreement_required: boolean }>>({});
-  const [deleteConfirmId, setDeleteConfirmId] = useState<number | null>(null);
-
-  // Initialise edit state when data loads
-  useEffect(() => {
-    if (!ensembles) return;
-    const init: typeof editState = {};
-    for (const e of ensembles) {
-      if (!(e.id in editState)) {
-        init[e.id] = {
-          knn_weight: String(e.knn_weight),
-          lstm_weight: String(e.lstm_weight),
-          agreement_required: e.agreement_required,
-        };
-      }
-    }
-    if (Object.keys(init).length > 0) setEditState(prev => ({ ...prev, ...init }));
-  }, [ensembles]);
-
-  if (isLoading) return <div className="p-6 text-[var(--text-muted)] text-sm">Loading…</div>;
-  if (!ensembles || ensembles.length === 0) {
+  if (isLoading) {
     return (
-      <Card title="Ensemble Configuration">
+      <Card title="Meta-Classifier (XGBoost PoP Gate)">
+        <div className="p-6 text-[var(--text-muted)] text-sm">Loading…</div>
+      </Card>
+    );
+  }
+
+  if (!data?.trained) {
+    return (
+      <Card title="Meta-Classifier (XGBoost PoP Gate)">
         <EmptyState
-          icon={<Layers size={32} />}
-          title="No ensemble configurations"
-          description="Run distillation on an RL model to create a KNN + LSTM ensemble pair."
+          icon={<Brain size={32} />}
+          title="Meta-Classifier not trained"
+          description="The PoP gate trains automatically once you have 50+ resolved signals. Run Live Trading predictions and let signals resolve (target hit / SL hit) to build the training set."
         />
       </Card>
     );
   }
 
+  const importances: [string, number][] = data.feature_importances
+    ? Object.entries(data.feature_importances as Record<string, number>)
+    : [];
+
+  const maxVal = importances.length > 0 ? importances[0][1] : 1;
+
   return (
     <div className="space-y-5">
-      <p className="text-sm text-[var(--text-muted)] px-1">
-        The ensemble combines KNN and LSTM predictions using weighted probabilities.
-        When agreement is required, only BUY/SELL signals where both models agree are output — all others become HOLD.
-      </p>
+      {/* Summary stats */}
+      <div className="grid grid-cols-3 gap-4">
+        <div className="p-4 rounded-xl bg-[var(--bg-card)] border border-[var(--border)] text-center">
+          <div className="text-xs text-[var(--text-muted)] uppercase tracking-wider mb-1">Status</div>
+          <Badge color="green" size="md">Trained</Badge>
+        </div>
+        <div className="p-4 rounded-xl bg-[var(--bg-card)] border border-[var(--border)] text-center">
+          <div className="text-xs text-[var(--text-muted)] uppercase tracking-wider mb-1">AUC (Val)</div>
+          <div className="text-2xl font-bold text-[var(--primary)]">
+            {data.auc != null ? data.auc.toFixed(3) : '—'}
+          </div>
+        </div>
+        <div className="p-4 rounded-xl bg-[var(--bg-card)] border border-[var(--border)] text-center">
+          <div className="text-xs text-[var(--text-muted)] uppercase tracking-wider mb-1">PoP Threshold</div>
+          <div className="text-2xl font-bold text-amber-400">
+            {((data.threshold ?? 0.55) * 100).toFixed(0)}%
+          </div>
+        </div>
+      </div>
 
-      {ensembles.map((ens: any) => {
-        const knn = knnModels.find((m: any) => m.id === ens.knn_model_id);
-        const lstm = lstmModels.find((m: any) => m.id === ens.lstm_model_id);
-        const local = editState[ens.id];
-        if (!local) return null;
-
-        const knnW = parseFloat(local.knn_weight) || 0;
-        const lstmW = parseFloat(local.lstm_weight) || 0;
-        const weightsValid = Math.abs(knnW + lstmW - 1.0) < 0.001 && knnW >= 0 && lstmW >= 0;
-
-        const handleSave = () => {
-          if (!weightsValid) {
-            addNotification({ type: 'error', message: 'KNN + LSTM weights must sum to 1.0' });
-            return;
-          }
-          updateMutation.mutate(
-            { id: ens.id, data: { knn_weight: knnW, lstm_weight: lstmW, agreement_required: local.agreement_required } },
-            {
-              onSuccess: () => addNotification({ type: 'success', message: 'Ensemble updated.' }),
-              onError: () => addNotification({ type: 'error', message: 'Failed to update ensemble.' }),
-            }
-          );
-        };
-
-        return (
-          <Card key={ens.id} title={ens.name}>
-            <div className="space-y-5">
-              {/* Model info row */}
-              <div className="grid grid-cols-2 gap-4">
-                <div className="p-3 rounded-[var(--radius-sm)] bg-[var(--bg-input)] border border-blue-500/20">
-                  <div className="text-xs font-medium text-blue-400 uppercase tracking-wider mb-2">KNN Model</div>
-                  {knn ? (
-                    <>
-                      <div className="text-sm font-medium truncate">{knn.name}</div>
-                      <div className="flex gap-3 mt-1 text-xs text-[var(--text-dim)]">
-                        <span>Acc: <span className="text-[var(--text-secondary)]">{knn.accuracy != null ? `${(knn.accuracy * 100).toFixed(1)}%` : '—'}</span></span>
-                        <span>Buy: <span className="text-[var(--text-secondary)]">{knn.precision_buy != null ? `${(knn.precision_buy * 100).toFixed(1)}%` : '—'}</span></span>
-                        <span>Sell: <span className="text-[var(--text-secondary)]">{knn.precision_sell != null ? `${(knn.precision_sell * 100).toFixed(1)}%` : '—'}</span></span>
-                      </div>
-                      <Badge color={knn.status === 'completed' ? 'green' : knn.status === 'training' ? 'yellow' : 'red'} className="mt-2">{knn.status}</Badge>
-                    </>
-                  ) : (
-                    <div className="text-xs text-[var(--text-dim)]">KNN #{ens.knn_model_id}</div>
-                  )}
+      {/* Feature importance chart */}
+      <Card
+        title="Feature Importance Matrix"
+        action={
+          <Button size="sm" variant="ghost" loading={isRefetching} onClick={() => refetch()}>
+            Refresh
+          </Button>
+        }
+      >
+        <div className="mb-3 text-xs text-[var(--text-muted)]">
+          XGBoost gain-based importance — higher indicates stronger influence on the PoP prediction.
+        </div>
+        <div className="space-y-2">
+          {importances.map(([key, val]) => {
+            const pct = maxVal > 0 ? (val / maxVal) * 100 : 0;
+            const label = FEATURE_LABELS[key] ?? key;
+            const isTopFeature = pct >= 60;
+            return (
+              <div key={key} className="flex items-center gap-3">
+                <div className="w-44 shrink-0 text-xs text-[var(--text-secondary)] truncate" title={label}>
+                  {label}
                 </div>
-
-                <div className="p-3 rounded-[var(--radius-sm)] bg-[var(--bg-input)] border border-purple-500/20">
-                  <div className="text-xs font-medium text-purple-400 uppercase tracking-wider mb-2">LSTM Model</div>
-                  {lstm ? (
-                    <>
-                      <div className="text-sm font-medium truncate">{lstm.name}</div>
-                      <div className="flex gap-3 mt-1 text-xs text-[var(--text-dim)]">
-                        <span>Acc: <span className="text-[var(--text-secondary)]">{lstm.accuracy != null ? `${(lstm.accuracy * 100).toFixed(1)}%` : '—'}</span></span>
-                        <span>Buy: <span className="text-[var(--text-secondary)]">{lstm.precision_buy != null ? `${(lstm.precision_buy * 100).toFixed(1)}%` : '—'}</span></span>
-                        <span>Sell: <span className="text-[var(--text-secondary)]">{lstm.precision_sell != null ? `${(lstm.precision_sell * 100).toFixed(1)}%` : '—'}</span></span>
-                      </div>
-                      <Badge color={lstm.status === 'completed' ? 'green' : lstm.status === 'training' ? 'yellow' : 'red'} className="mt-2">{lstm.status}</Badge>
-                    </>
-                  ) : (
-                    <div className="text-xs text-[var(--text-dim)]">LSTM #{ens.lstm_model_id}</div>
-                  )}
-                </div>
-              </div>
-
-              {/* Weight inputs */}
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="text-xs font-medium text-[var(--text-dim)] uppercase tracking-wider block mb-1">KNN Weight</label>
-                  <Input
-                    type="number"
-                    min="0"
-                    max="1"
-                    step="0.05"
-                    value={local.knn_weight}
-                    onChange={e => {
-                      const kw = e.target.value;
-                      const kn = parseFloat(kw);
-                      setEditState(prev => ({
-                        ...prev,
-                        [ens.id]: {
-                          ...prev[ens.id],
-                          knn_weight: kw,
-                          lstm_weight: isNaN(kn) ? prev[ens.id].lstm_weight : String(Math.round((1 - kn) * 100) / 100),
-                        },
-                      }));
+                <div className="flex-1 h-5 bg-[var(--bg-input)] rounded-full overflow-hidden">
+                  <div
+                    className="h-full rounded-full transition-all duration-500"
+                    style={{
+                      width: `${pct}%`,
+                      backgroundColor: isTopFeature ? 'var(--primary)' : 'var(--success)',
                     }}
                   />
                 </div>
-                <div>
-                  <label className="text-xs font-medium text-[var(--text-dim)] uppercase tracking-wider block mb-1">LSTM Weight</label>
-                  <Input
-                    type="number"
-                    min="0"
-                    max="1"
-                    step="0.05"
-                    value={local.lstm_weight}
-                    onChange={e => {
-                      const lw = e.target.value;
-                      const ln = parseFloat(lw);
-                      setEditState(prev => ({
-                        ...prev,
-                        [ens.id]: {
-                          ...prev[ens.id],
-                          lstm_weight: lw,
-                          knn_weight: isNaN(ln) ? prev[ens.id].knn_weight : String(Math.round((1 - ln) * 100) / 100),
-                        },
-                      }));
-                    }}
-                  />
+                <div className="w-12 text-right text-xs font-mono text-[var(--text-secondary)] shrink-0">
+                  {(val * 100).toFixed(1)}%
                 </div>
               </div>
-              {!weightsValid && (
-                <p className="text-xs text-red-400">Weights must sum to 1.0 (currently {(knnW + lstmW).toFixed(2)})</p>
-              )}
-
-              {/* Agreement toggle */}
-              <div className="flex items-center justify-between p-3 rounded-[var(--radius-sm)] bg-[var(--bg-input)]">
-                <div>
-                  <div className="text-sm font-medium">Agreement Required</div>
-                  <div className="text-xs text-[var(--text-dim)] mt-0.5">
-                    When ON, signals where KNN and LSTM disagree become HOLD.
-                  </div>
-                </div>
-                <button
-                  onClick={() => setEditState(prev => ({
-                    ...prev,
-                    [ens.id]: { ...prev[ens.id], agreement_required: !prev[ens.id].agreement_required },
-                  }))}
-                  className="flex items-center gap-1.5 text-sm"
-                >
-                  {local.agreement_required
-                    ? <><ToggleRight size={22} className="text-[var(--primary)]" /><span className="text-[var(--primary)] font-medium">ON</span></>
-                    : <><ToggleLeft size={22} className="text-[var(--text-dim)]" /><span className="text-[var(--text-dim)]">OFF</span></>
-                  }
-                </button>
-              </div>
-
-              {/* Action row */}
-              <div className="flex items-center justify-between pt-1">
-                <div className="text-xs text-[var(--text-dim)]">
-                  Interval: <span className="text-[var(--text-secondary)]">{ens.interval}</span>
-                </div>
-                <div className="flex gap-2">
-                  {deleteConfirmId === ens.id ? (
-                    <>
-                      <span className="text-xs text-[var(--text-muted)] self-center">Delete?</span>
-                      <Button
-                        size="sm"
-                        variant="danger"
-                        loading={deleteMutation.isPending}
-                        onClick={() => deleteMutation.mutate(ens.id, {
-                          onSuccess: () => { setDeleteConfirmId(null); addNotification({ type: 'success', message: 'Ensemble deleted.' }); },
-                          onError: () => addNotification({ type: 'error', message: 'Failed to delete.' }),
-                        })}
-                      >Yes</Button>
-                      <Button size="sm" variant="ghost" onClick={() => setDeleteConfirmId(null)}>No</Button>
-                    </>
-                  ) : (
-                    <>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        loading={exportingId === ens.id}
-                        onClick={() => handleExport(ens.id, ens.knn_model_id, ens.lstm_model_id, ens.name)}
-                      >
-                        <Download size={13} className="mr-1" />Export
-                      </Button>
-                      <Button size="sm" variant="ghost" onClick={() => setDeleteConfirmId(ens.id)}>
-                        <Trash2 size={13} className="mr-1" />Delete
-                      </Button>
-                    </>
-                  )}
-                  <Button size="sm" loading={updateMutation.isPending} onClick={handleSave} disabled={!weightsValid}>
-                    Save
-                  </Button>
-                </div>
-              </div>
+            );
+          })}
+          {importances.length === 0 && (
+            <div className="text-sm text-[var(--text-muted)] text-center py-4">
+              Feature importance data not available.
             </div>
-          </Card>
-        );
-      })}
+          )}
+        </div>
+      </Card>
+
+      <Card title="How the Meta-Classifier Works">
+        <div className="space-y-3 text-sm text-[var(--text-muted)]">
+          <p>
+            The <span className="text-[var(--text-secondary)] font-medium">XGBoost PoP Gate</span> is
+            the final gatekeeper before any signal reaches the OMS. It is trained on the outcomes of
+            past TradeSignals (target hit = 1, SL hit or expired = 0).
+          </p>
+          <p>
+            At inference time it combines all 16 features — including LSTM uncertainty
+            (<span className="font-mono text-xs">σ</span>), KNN win rate, S/R zone proximity, and
+            fundamental quality — to output a <span className="text-amber-400 font-medium">Probability of Profit (PoP)</span>.
+            Only signals above the{' '}
+            <span className="font-mono text-xs">{((data.threshold ?? 0.55) * 100).toFixed(0)}%</span>{' '}
+            threshold are forwarded to execution.
+          </p>
+          <p className="text-xs">
+            Ensemble weights (KNN vs LSTM) are computed dynamically via
+            <span className="font-mono text-xs"> Inverse-Variance Weighting</span> using σ on every trade —
+            not from a static config.
+          </p>
+        </div>
+      </Card>
     </div>
   );
 }

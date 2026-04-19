@@ -329,6 +329,13 @@ export const useDeleteLstmModel = () => {
   });
 };
 
+export const useMetaClassifier = () =>
+  useQuery({
+    queryKey: ['meta-classifier'],
+    queryFn: () => api.getMetaClassifier().then(r => r.data),
+    staleTime: 60_000,
+  });
+
 export const useEnsembleConfigs = () =>
   useQuery({
     queryKey: ['ensemble-configs'],

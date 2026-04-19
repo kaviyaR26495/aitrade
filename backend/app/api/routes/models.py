@@ -1429,6 +1429,55 @@ async def delete_ensemble_config(config_id: int, db: AsyncSession = Depends(get_
     return {"message": "Deleted."}
 
 
+@router.get("/meta-classifier")
+async def get_meta_classifier_info():
+    """Return MetaClassifier training status and feature importance."""
+    import json
+    from pathlib import Path
+    from app.config import settings
+    from app.ml.meta_classifier import META_FEATURES
+
+    meta_path = Path(settings.MODEL_DIR) / "meta_classifier" / "meta_clf.joblib"
+    if not meta_path.exists():
+        return {"trained": False, "feature_importances": None, "threshold": 0.55, "auc": None, "accuracy": None}
+
+    try:
+        import joblib
+        data = joblib.load(meta_path)
+        model = data.get("model")
+        threshold = data.get("threshold", 0.55)
+        feature_names = data.get("feature_names", META_FEATURES)
+
+        feature_importances: dict | None = None
+        if model is not None and hasattr(model, "feature_importances_"):
+            raw = list(model.feature_importances_.tolist())
+            feature_importances = dict(zip(feature_names, raw))
+            # Sort descending by importance
+            feature_importances = dict(
+                sorted(feature_importances.items(), key=lambda x: x[1], reverse=True)
+            )
+
+        metrics_path = meta_path.parent / "meta_clf_metrics.json"
+        auc: float | None = None
+        accuracy: float | None = None
+        if metrics_path.exists():
+            with open(metrics_path) as f:
+                saved = json.load(f)
+            auc = saved.get("auc")
+            accuracy = saved.get("accuracy")
+
+        return {
+            "trained": model is not None,
+            "feature_importances": feature_importances,
+            "threshold": threshold,
+            "auc": auc,
+            "accuracy": accuracy,
+        }
+    except Exception as e:
+        logger.warning("meta-classifier endpoint: %s", e)
+        return {"trained": False, "feature_importances": None, "threshold": 0.55, "auc": None, "accuracy": None}
+
+
 @router.get("/")
 async def list_all_models(db: AsyncSession = Depends(get_db)):
     """List all model types."""

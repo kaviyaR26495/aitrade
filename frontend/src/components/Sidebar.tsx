@@ -9,7 +9,7 @@ import { usePipelineStatus } from '../hooks/useApi';
 
 const PIPELINE_STAGE_LABELS = [
   'Data Sync', 'CQL Pre-train', 'BC Warmup',
-  'PPO Fine-tune', 'Ensemble Distill', 'Backtest', 'Ready',
+  'PPO Fine-tune', 'Meta-Model Train', 'Backtest', 'Ready',
 ];
 
 function getPipelineLabel(status?: { status: string; current_stage: number } | null): string {

@@ -465,10 +465,12 @@ export default function LiveTrading() {
               <div className="p-3 bg-[var(--bg-input)] rounded-lg border border-[var(--border)]">
                 <div className="text-[10px] text-emerald-400 uppercase font-bold">Target</div>
                 <div className="text-sm font-mono font-bold mt-1 text-emerald-400">{executeModal.target_price?.toFixed(2)}</div>
+                <div className="text-[9px] text-emerald-300/60 mt-0.5 font-medium">S/R Resistance Clamp</div>
               </div>
               <div className="p-3 bg-[var(--bg-input)] rounded-lg border border-[var(--border)]">
                 <div className="text-[10px] text-red-400 uppercase font-bold">Stop-Loss</div>
                 <div className="text-sm font-mono font-bold mt-1 text-red-400">{executeModal.stoploss_price?.toFixed(2)}</div>
+                <div className="text-[9px] text-red-300/60 mt-0.5 font-medium">ATR + Support Floor</div>
               </div>
             </div>
 

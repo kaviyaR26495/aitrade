@@ -130,6 +130,7 @@ export const listEnsembleConfigs = () => api.get('/models/ensemble');
 export const updateEnsembleConfig = (id: number, data: { knn_weight: number; lstm_weight: number; agreement_required: boolean }) =>
   api.put(`/models/ensemble/${id}`, data);
 export const deleteEnsembleConfig = (id: number) => api.delete(`/models/ensemble/${id}`);
+export const getMetaClassifier = () => api.get('/models/meta-classifier');
 export const exportModelBundle = (knnModelId: number, lstmModelId: number) =>
   api.get('/models/export', { params: { knn_model_id: knnModelId, lstm_model_id: lstmModelId }, responseType: 'blob' });
 export const importModelBundle = (file: File) => {
