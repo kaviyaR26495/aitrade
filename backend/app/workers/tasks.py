@@ -237,13 +237,12 @@ async def _async_monthly_retrain() -> dict:
         results["global"] = global_result
         _log.info("[task_monthly_retrain] Global retrain done: %s", global_result)
 
-    # Regime-stratified retrain (new function — Phase 5)
+    # Regime-stratified retrain (train_all_regime_models manages its own sessions)
     try:
         from app.ml.regime_trainer import train_all_regime_models
-        async with async_session_factory() as db:
-            regime_result = await train_all_regime_models(db, lookback_years=2)
-            results["regime_stratified"] = regime_result
-            _log.info("[task_monthly_retrain] Regime retrain done: %s", regime_result)
+        regime_result = await train_all_regime_models(lookback_years=2)
+        results["regime_stratified"] = regime_result
+        _log.info("[task_monthly_retrain] Regime retrain done: %s", regime_result)
     except ImportError:
         _log.info("[task_monthly_retrain] regime_trainer not yet implemented — skipping")
     except Exception as exc:

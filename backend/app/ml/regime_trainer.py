@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
 from pathlib import Path
 from typing import Callable
@@ -31,7 +30,6 @@ from app.db.models import GoldenPattern, IntervalEnum, RegimeEnsembleMap
 logger = logging.getLogger(__name__)
 
 NUM_REGIMES = 6
-_rt_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="regime_train")
 MIN_PATTERNS_PER_REGIME = 20
 
 
@@ -90,7 +88,7 @@ async def train_regime_model(
     from app.core.ct_pipeline import _build_training_arrays
 
     X, y, roc5_targets = await loop.run_in_executor(
-        _rt_executor,
+        None,
         lambda: _build_training_arrays(db_patterns_list, seq_len=seq_len),
     )
 
@@ -125,7 +123,7 @@ async def train_regime_model(
         from app.ml.knn_distiller import train_knn, save_knn_model
 
         knn_obj, knn_metrics = await loop.run_in_executor(
-            _rt_executor,
+            None,
             lambda: train_knn(
                 X, y,
                 k_neighbors=11,
@@ -183,7 +181,7 @@ async def train_regime_model(
         from app.ml.lstm_distiller import train_lstm, save_lstm_model
 
         lstm_obj, lstm_metrics = await loop.run_in_executor(
-            _rt_executor,
+            None,
             lambda: train_lstm(
                 X, y,
                 hidden_size=256,

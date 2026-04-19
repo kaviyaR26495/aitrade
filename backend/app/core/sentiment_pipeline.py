@@ -81,7 +81,67 @@ class SentimentSummary(TypedDict):
     non_neutral_headlines: list[HeadlineResult]
 
 
-# ── Headline fetching ──────────────────────────────────────────────────
+# ── Global FinBERT batch ───────────────────────────────────────────────
+# All stock headlines are funnelled into a SINGLE GPU/CPU pipeline call
+# instead of per-stock executor calls that fire simultaneously.
+
+def _run_finbert_batch_global(all_headlines_per_stock: list[list[dict]]) -> list[list[HeadlineResult]]:
+    """Run FinBERT against all stocks' headlines in one batched call.
+
+    Args:
+        all_headlines_per_stock: list of raw headline-dict lists, one per stock.
+
+    Returns:
+        Parallel list of non-neutral HeadlineResult lists, one per stock.
+    """
+    pipe = _load_finbert()
+
+    # Flatten titles, tracking which stock they came from
+    flat_titles: list[str] = []
+    index_map: list[tuple[int, int]] = []   # (stock_idx, headline_idx)
+    flat_headlines: list[dict] = []
+
+    for stock_idx, headlines in enumerate(all_headlines_per_stock):
+        for h_idx, h in enumerate(headlines):
+            if h.get("title"):
+                flat_titles.append(h["title"])
+                index_map.append((stock_idx, h_idx))
+                flat_headlines.append(h)
+
+    if not flat_titles:
+        return [[] for _ in all_headlines_per_stock]
+
+    try:
+        # Single GPU/CPU forward pass for all stocks at once
+        raw_outputs = pipe(flat_titles, batch_size=max(32, len(flat_titles)))
+    except Exception as exc:
+        _log.warning("FinBERT global batch inference failed: %s", exc)
+        return [[] for _ in all_headlines_per_stock]
+
+    # Distribute results back per-stock, discarding neutral
+    per_stock: list[list[HeadlineResult]] = [[] for _ in all_headlines_per_stock]
+    for (stock_idx, _), headline, scores in zip(index_map, flat_headlines, raw_outputs):
+        if not scores:
+            continue
+        best = max(scores, key=lambda x: x["score"])
+        label = best["label"].lower()
+        conf = float(best["score"])
+        if label == "neutral":
+            continue
+        signed = conf if label == "positive" else -conf
+        per_stock[stock_idx].append(
+            HeadlineResult(
+                title=headline["title"],
+                source=headline.get("source", ""),
+                published=headline.get("published", ""),
+                finbert_label=label,
+                finbert_score=conf,
+                finbert_signed=signed,
+            )
+        )
+
+    return per_stock
+
 
 async def fetch_headlines(symbol: str, max_results: int = 20) -> list[dict]:
     """Fetch recent headlines for a stock from Google News RSS.
@@ -195,8 +255,11 @@ async def llm_financial_impact_score(
     """Escalate non-neutral headlines to the configured LLM for a structured
     Financial Impact Score.
 
+    Retries up to 4 times with exponential backoff (2s→4s→8s→16s) when the
+    LLM provider returns a rate-limit or transient error.
+
     Returns a dict: {impact_score, event_type, urgency_hours, summary}.
-    Falls back to {impact_score: 0.0, ...} on any error.
+    Falls back to {impact_score: 0.0, ...} on persistent failure.
     """
     if not headlines:
         return {"impact_score": 0.0, "event_type": "other", "urgency_hours": 0, "summary": "No non-neutral headlines."}
@@ -220,12 +283,34 @@ async def llm_financial_impact_score(
     )
     prompt = _IMPACT_PROMPT.format(headlines=headline_text)
 
-    try:
+    from tenacity import (
+        retry,
+        stop_after_attempt,
+        wait_exponential,
+        retry_if_exception_type,
+    )
+
+    # Classify rate-limit / transient errors broadly so tenacity catches them
+    _RETRYABLE = (Exception,)  # narrow in production if provider raises typed errors
+
+    @retry(
+        reraise=True,
+        stop=stop_after_attempt(4),
+        wait=wait_exponential(multiplier=1, min=2, max=16),
+        retry=retry_if_exception_type(_RETRYABLE),
+        before_sleep=lambda rs: _log.warning(
+            "LLM rate-limit / transient error (attempt %d/4); retrying in %.0fs",
+            rs.attempt_number, rs.next_action.sleep,  # type: ignore[attr-defined]
+        ),
+    )
+    async def _call_llm() -> str:
         response_text = ""
         async for chunk in provider.stream(prompt):
             response_text += chunk
+        return response_text
 
-        # Extract JSON from response
+    try:
+        response_text = await _call_llm()
         match = re.search(r"\{.*\}", response_text, re.DOTALL)
         if not match:
             raise ValueError("No JSON block found in LLM response")
@@ -236,8 +321,7 @@ async def llm_financial_impact_score(
         )
         return result
     except Exception as exc:
-        _log.warning("LLM impact scoring failed: %s", exc)
-        # Fallback: average FinBERT signed scores
+        _log.warning("LLM impact scoring failed after retries: %s", exc)
         avg = sum(h["finbert_signed"] for h in headlines) / len(headlines)
         return {
             "impact_score": round(float(avg), 4),
@@ -327,20 +411,84 @@ async def run_sentiment_batch(
 ) -> list[SentimentSummary]:
     """Run sentiment pipeline for multiple stocks with bounded concurrency.
 
-    ``concurrency`` limits simultaneous headline fetches + LLM calls to
-    avoid rate-limiting on the news RSS and the LLM provider.
+    Pipeline:
+    1. Fetch all headlines concurrently (bounded by ``concurrency`` semaphore).
+    2. Run FinBERT against ALL stocks' headlines in a SINGLE global batch call
+       (avoids concurrent GPU spikes when 5 stocks each trigger the pipeline).
+    3. Fan-out LLM judgment calls concurrently (bounded by ``concurrency``
+       semaphore with exponential-backoff retry on rate-limit errors).
     """
     if as_of_date is None:
         as_of_date = datetime.now(IST).date()
 
-    semaphore = asyncio.Semaphore(concurrency)
+    # ── Stage 1: Fetch all headlines concurrently ───────────────────
+    fetch_sem = asyncio.Semaphore(concurrency)
 
-    async def _bounded(stock: Stock) -> SentimentSummary:
-        async with semaphore:
+    async def _fetch(stock: Stock) -> list[dict]:
+        async with fetch_sem:
+            return await fetch_headlines(stock.symbol)
+
+    all_raw: list[list[dict]] = list(
+        await asyncio.gather(*[_fetch(s) for s in stocks])
+    )
+
+    # ── Stage 2: Single global FinBERT batch ────────────────────────
+    all_non_neutral: list[list[HeadlineResult]] = await asyncio.to_thread(
+        _run_finbert_batch_global, all_raw
+    )
+
+    # ── Stage 3: Concurrent LLM calls + persistence ─────────────────
+    llm_sem = asyncio.Semaphore(concurrency)
+
+    async def _score_and_persist(
+        stock: Stock,
+        raw: list[dict],
+        non_neutral: list[HeadlineResult],
+    ) -> SentimentSummary:
+        async with llm_sem:
             try:
-                return await run_sentiment_for_stock(db, stock, as_of_date)
+                total = len(raw)
+                neutral_count = total - len(non_neutral)
+                avg_finbert: float | None = None
+                if non_neutral:
+                    avg_finbert = round(
+                        sum(h["finbert_signed"] for h in non_neutral) / len(non_neutral), 4
+                    )
+
+                llm_result = await llm_financial_impact_score(non_neutral, db)
+                llm_score = llm_result.get("impact_score")
+                llm_summary = llm_result.get("summary")
+
+                existing = await db.execute(
+                    select(StockSentiment).where(
+                        StockSentiment.stock_id == stock.id,
+                        StockSentiment.date == as_of_date,
+                    )
+                )
+                row = existing.scalar_one_or_none()
+                if row is None:
+                    row = StockSentiment(stock_id=stock.id, date=as_of_date, ingested_at=now_ist())
+                    db.add(row)
+                row.headline_count = total
+                row.neutral_filtered_count = neutral_count
+                row.avg_finbert_score = avg_finbert
+                row.llm_impact_score = llm_score
+                row.llm_summary = llm_summary
+                row.ingested_at = now_ist()
+                await db.commit()
+
+                return SentimentSummary(
+                    stock_id=stock.id,
+                    date=as_of_date.isoformat(),
+                    headline_count=total,
+                    neutral_filtered_count=neutral_count,
+                    avg_finbert_score=avg_finbert,
+                    llm_impact_score=llm_score,
+                    llm_summary=llm_summary,
+                    non_neutral_headlines=non_neutral,
+                )
             except Exception as exc:
-                _log.error("Sentiment failed for %s: %s", stock.symbol, exc)
+                _log.error("Sentiment scoring failed for %s: %s", stock.symbol, exc)
                 return SentimentSummary(
                     stock_id=stock.id,
                     date=as_of_date.isoformat(),
@@ -352,4 +500,9 @@ async def run_sentiment_batch(
                     non_neutral_headlines=[],
                 )
 
-    return list(await asyncio.gather(*[_bounded(s) for s in stocks]))
+    return list(
+        await asyncio.gather(*[
+            _score_and_persist(s, raw, nn)
+            for s, raw, nn in zip(stocks, all_raw, all_non_neutral)
+        ])
+    )

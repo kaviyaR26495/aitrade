@@ -40,7 +40,8 @@ ta==0.11.0
 
 # Fundamentals & News
 nsepython>=2.9
-yfinance>=0.2.40
+beautifulsoup4>=4.12.0
+lxml>=5.0.0
 feedparser>=6.0.11
 
 # Sentiment / NLP
@@ -60,3 +61,4 @@ sse-starlette>=2.0.0
 python-dotenv==1.0.1
 httpx==0.28.1
 orjson==3.10.13
+tenacity>=8.2.0

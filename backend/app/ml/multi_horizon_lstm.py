@@ -122,9 +122,14 @@ def _build_horizon_labels(
         for h in range(1, horizon + 1):
             future_close = close_prices[i + seq_len - 1 + h]
             roc = (future_close - ref_close) / ref_close
-            if roc > buy_thresh:
+            # Scale threshold by sqrt(h) so short horizons don't require the
+            # same absolute ROC as long horizons (avoids HOLD bias at h=1).
+            h_scale = h ** 0.5
+            h_buy = buy_thresh * h_scale
+            h_sell = sell_thresh * h_scale
+            if roc > h_buy:
                 actions.append(1)  # BUY
-            elif roc < sell_thresh:
+            elif roc < h_sell:
                 actions.append(2)  # SELL
             else:
                 actions.append(0)  # HOLD

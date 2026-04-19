@@ -6,6 +6,7 @@ order_history() to avoid exhausting Kite's rate limit (3 req/s).
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 
@@ -53,7 +54,7 @@ async def reconcile_open_orders(db: AsyncSession) -> int:
         if not order.zerodha_order_id:
             continue
         try:
-            raw_status = zerodha._order_status(order.zerodha_order_id)
+            raw_status = await asyncio.to_thread(zerodha._order_status, order.zerodha_order_id)
             new_status = _ZERODHA_STATUS_MAP.get(raw_status.upper())
 
             if new_status is None:
@@ -72,7 +73,10 @@ async def reconcile_open_orders(db: AsyncSession) -> int:
             if new_status == OrderStatus.filled:
                 # Fetch fill details from order history to populate fill columns
                 try:
-                    history = zerodha.get_kite().order_history(order_id=order.zerodha_order_id)
+                    def _get_history(oid: str):
+                        return zerodha.get_kite().order_history(order_id=oid)
+
+                    history = await asyncio.to_thread(_get_history, order.zerodha_order_id)
                     if history:
                         last = history[-1]
                         fill_qty = int(last.get("filled_quantity") or order.quantity)
