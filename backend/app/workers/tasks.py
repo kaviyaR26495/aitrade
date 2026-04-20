@@ -1,8 +1,13 @@
 """Celery task definitions.
 
-Each task wraps existing async pipeline functions via ``asyncio.run()``,
+Each task wraps existing async pipeline functions via ``_run_async()``,
 ensuring compatibility between Celery's synchronous worker model and the
 project's async-first codebase.
+
+A persistent per-worker event loop is reused across tasks (via ``_run_async``)
+instead of ``asyncio.run()`` to avoid "Future attached to a different loop"
+errors caused by SQLAlchemy's ``shield()``-based connection cleanup leaving
+Tasks on a now-closed loop.
 
 Task contract
 -------------
@@ -24,6 +29,21 @@ from app.workers.celery_app import celery_app
 _log = logging.getLogger(__name__)
 IST = timezone(timedelta(hours=5, minutes=30))
 
+# Persistent event loop reused across all async tasks in this worker process.
+# Using asyncio.run() would create+destroy a new loop each call, leaving
+# SQLAlchemy shield()-based Tasks attached to the old loop and causing
+# "Future attached to a different loop" RuntimeErrors on the next invocation.
+_worker_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _run_async(coro):
+    """Run *coro* on the worker-process-level persistent event loop."""
+    global _worker_loop
+    if _worker_loop is None or _worker_loop.is_closed():
+        _worker_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(_worker_loop)
+    return _worker_loop.run_until_complete(coro)
+
 
 # ── Helper ─────────────────────────────────────────────────────────────
 
@@ -44,7 +64,7 @@ def _get_universe_stocks(db_session) -> list:
         )
         return result.scalars().all()
 
-    return asyncio.run(_inner())
+    return _run_async(_inner())
 
 
 # ── Task: Nightly OHLCV + Indicator Sync ─────────────────────────────
@@ -57,7 +77,7 @@ def task_nightly_sync(self):
     """
     _log.info("[task_nightly_sync] Starting nightly OHLCV sync")
     try:
-        return asyncio.run(_async_nightly_sync())
+        return _run_async(_async_nightly_sync())
     except Exception as exc:
         _log.error("[task_nightly_sync] Failed: %s", exc)
         raise self.retry(exc=exc, countdown=300)
@@ -106,7 +126,7 @@ def task_fundamental_sync(self):
     """
     _log.info("[task_fundamental_sync] Starting fundamental sync")
     try:
-        return asyncio.run(_async_fundamental_sync())
+        return _run_async(_async_fundamental_sync())
     except Exception as exc:
         _log.error("[task_fundamental_sync] Failed: %s", exc)
         raise self.retry(exc=exc, countdown=600)
@@ -139,7 +159,7 @@ def task_morning_sentiment(self):
     """
     _log.info("[task_morning_sentiment] Starting morning sentiment run")
     try:
-        return asyncio.run(_async_morning_sentiment())
+        return _run_async(_async_morning_sentiment())
     except Exception as exc:
         _log.error("[task_morning_sentiment] Failed: %s", exc)
         raise self.retry(exc=exc, countdown=120)
@@ -176,7 +196,7 @@ def task_morning_predictions(self):
     """
     _log.info("[task_morning_predictions] Starting morning prediction batch")
     try:
-        return asyncio.run(_async_morning_predictions())
+        return _run_async(_async_morning_predictions())
     except Exception as exc:
         _log.error("[task_morning_predictions] Failed: %s", exc)
         raise self.retry(exc=exc, countdown=120)
@@ -187,7 +207,7 @@ async def _async_morning_predictions() -> dict:
     import sqlalchemy as sa
     from app.db.database import async_session_factory
     from app.db.models import Stock
-    from app.core.data_pipeline import run_prediction_batch
+    from app.ml.predictor import run_daily_predictions
 
     batch_id = str(uuid.uuid4())[:8]
     async with async_session_factory() as db:
@@ -197,7 +217,7 @@ async def _async_morning_predictions() -> dict:
         stocks = result.scalars().all()
 
         try:
-            counts = await run_prediction_batch(db, [s.id for s in stocks], batch_id=batch_id)
+            counts = await run_daily_predictions(db, stock_ids=[s.id for s in stocks], batch_id=batch_id)
             summary = {"batch_id": batch_id, **counts}
         except Exception as exc:
             _log.error("Prediction batch failed: %s", exc)
@@ -219,7 +239,7 @@ def task_monthly_retrain(self):
     """
     _log.info("[task_monthly_retrain] Starting monthly retraining")
     try:
-        return asyncio.run(_async_monthly_retrain())
+        return _run_async(_async_monthly_retrain())
     except Exception as exc:
         _log.error("[task_monthly_retrain] Failed: %s", exc)
         raise self.retry(exc=exc, countdown=600)
@@ -249,6 +269,15 @@ async def _async_monthly_retrain() -> dict:
         _log.warning("[task_monthly_retrain] Regime retrain failed (non-fatal): %s", exc)
         results["regime_stratified"] = {"error": str(exc)}
 
+    # Multi-Horizon LSTM retrain (used by signal generation)
+    try:
+        mh_result = await _async_train_mh_lstm()
+        results["mh_lstm"] = mh_result
+        _log.info("[task_monthly_retrain] MH-LSTM retrain done: %s", mh_result)
+    except Exception as exc:
+        _log.warning("[task_monthly_retrain] MH-LSTM retrain failed (non-fatal): %s", exc)
+        results["mh_lstm"] = {"error": str(exc)}
+
     return results
 
 
@@ -263,7 +292,7 @@ def task_morning_tpml_signals(self):
     """
     _log.info("[task_morning_tpml_signals] Starting TPML signal generation")
     try:
-        return asyncio.run(_async_morning_tpml_signals())
+        return _run_async(_async_morning_tpml_signals())
     except Exception as exc:
         _log.error("[task_morning_tpml_signals] Failed: %s", exc)
         raise self.retry(exc=exc, countdown=120)
@@ -295,7 +324,7 @@ def task_trailing_stop_update(self):
     """
     _log.info("[task_trailing_stop_update] Checking trailing stops")
     try:
-        return asyncio.run(_async_trailing_stop_update())
+        return _run_async(_async_trailing_stop_update())
     except Exception as exc:
         _log.error("[task_trailing_stop_update] Failed: %s", exc)
         return {"error": str(exc)}
@@ -435,3 +464,102 @@ async def _async_trailing_stop_update() -> dict:
     }
     _log.info("[task_trailing_stop_update] Done: %s", summary)
     return summary
+
+
+# ── Task: Train Multi-Horizon LSTM ─────────────────────────────────────
+
+@celery_app.task(name="app.workers.tasks.task_train_mh_lstm", bind=True, max_retries=1)
+def task_train_mh_lstm(self):
+    """Train (or retrain) the MultiHorizon LSTM used by signal generation.
+
+    Fetches OHLCV + features for all active stocks, builds training tensors,
+    trains the model, saves it to disk, and registers it in ``lstm_horizon_models``.
+    """
+    _log.info("[task_train_mh_lstm] Starting MultiHorizon LSTM training")
+    try:
+        return _run_async(_async_train_mh_lstm())
+    except Exception as exc:
+        _log.error("[task_train_mh_lstm] Failed: %s", exc)
+        raise self.retry(exc=exc, countdown=300)
+
+
+async def _async_train_mh_lstm() -> dict:
+    import numpy as np
+    from pathlib import Path
+    from app.db.database import async_session_factory
+    from app.db.models import Stock, LSTMHorizonModel, ModelStatus
+    from app.core.data_service import get_model_ready_data
+    from app.core.normalizer import prepare_model_input
+    from app.ml.multi_horizon_lstm import build_training_data, train_multi_horizon, save_multi_horizon_model
+    from app.config import settings
+    import sqlalchemy as sa
+
+    seq_len = settings.DEFAULT_SEQ_LEN_DAILY
+    model_dir = Path(settings.MODEL_DIR)
+
+    X_all, yr_all, yt_all = [], [], []
+
+    async with async_session_factory() as db:
+        result = await db.execute(sa.select(Stock).where(Stock.is_active == True))  # noqa: E712
+        stocks = result.scalars().all()
+        _log.info("[task_train_mh_lstm] Building training data from %d stocks", len(stocks))
+
+        for stock in stocks:
+            try:
+                df, feature_cols = await get_model_ready_data(db, stock.id, seq_len=seq_len)
+                if df is None or len(df) < seq_len + 10:
+                    continue
+                X = prepare_model_input(df, feature_cols, seq_len=seq_len)
+                if len(X) == 0:
+                    continue
+                close_prices = df["close"].values.astype("float32")
+                feature_matrix = df[feature_cols].values.astype("float32")
+                try:
+                    X_s, yr_s, yt_s = build_training_data(close_prices, feature_matrix, seq_len=seq_len)
+                    X_all.append(X_s)
+                    yr_all.append(yr_s)
+                    yt_all.append(yt_s)
+                except ValueError:
+                    continue
+            except Exception as exc:
+                _log.warning("[task_train_mh_lstm] Skipping stock %s: %s", stock.symbol, exc)
+
+    if not X_all:
+        raise RuntimeError("No training data could be assembled for MultiHorizon LSTM")
+
+    X = np.concatenate(X_all, axis=0)
+    y_returns = np.concatenate(yr_all, axis=0)
+    y_trend = np.concatenate(yt_all, axis=0)
+    _log.info("[task_train_mh_lstm] Dataset: X=%s", X.shape)
+
+    model, metrics = train_multi_horizon(
+        X, y_returns, y_trend,
+        hidden_size=256, num_layers=2, dropout=0.3,
+        epochs=60, patience=10,
+        log_fn=lambda m: _log.info("[MH-LSTM] %s", m),
+    )
+
+    # Save model file
+    mh_dir = model_dir / "lstm"
+    mh_dir.mkdir(parents=True, exist_ok=True)
+    save_result = save_multi_horizon_model(model, metrics, mh_dir, model_name="mh_lstm")
+    mh_path = save_result["model_path"]
+    _log.info("[task_train_mh_lstm] Model saved to %s", mh_path)
+
+    # Register in DB
+    async with async_session_factory() as db:
+        db_record = LSTMHorizonModel(
+            name=f"mh_lstm_{len(X)}s",
+            hidden_size=256,
+            num_layers=2,
+            seq_len=seq_len,
+            horizon=model.horizon,
+            model_path=mh_path,
+            accuracy=float(1.0 - metrics.get("best_val_loss", 1.0)),
+            status=ModelStatus.completed,
+        )
+        db.add(db_record)
+        await db.commit()
+        _log.info("[task_train_mh_lstm] Registered model id=%d", db_record.id)
+
+    return {"model_path": mh_path, "samples": len(X), "metrics": metrics}

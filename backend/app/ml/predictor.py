@@ -537,6 +537,13 @@ async def run_target_price_predictions(
         from app.core import data_service
         stocks = await data_service.get_universe_stocks(db)
 
+    if job_id:
+        from app.db import crud
+        try:
+            await crud.update_prediction_job(db, job_id, total_stocks=len(stocks))
+        except Exception:
+            pass
+
     seq_len = settings.DEFAULT_SEQ_LEN_DAILY if interval == "day" else settings.DEFAULT_SEQ_LEN_WEEKLY
 
     signals_created: list[dict] = []

@@ -1,0 +1,10 @@
+2026-04-20 20:06:43,103 INFO sqlalchemy.engine.Engine SELECT DATABASE()
+2026-04-20 20:06:43,104 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-04-20 20:06:43,105 INFO sqlalchemy.engine.Engine SELECT @@sql_mode
+2026-04-20 20:06:43,106 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-04-20 20:06:43,107 INFO sqlalchemy.engine.Engine SELECT @@lower_case_table_names
+2026-04-20 20:06:43,107 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-04-20 20:06:43,108 INFO sqlalchemy.engine.Engine BEGIN (implicit)
+2026-04-20 20:06:43,109 INFO sqlalchemy.engine.Engine SELECT id FROM stocks LIMIT 2
+2026-04-20 20:06:43,109 INFO sqlalchemy.engine.Engine [generated in 0.00030s] ()
+2026-04-20 20:06:43,111 INFO sqlalchemy.engine.Engine ROLLBACK

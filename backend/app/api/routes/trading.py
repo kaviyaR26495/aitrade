@@ -611,6 +611,31 @@ class RunTPMLRequest(BaseModel):
     pop_threshold: float = 0.55
 
 
+@router.post("/signals/train-model")
+async def train_mh_lstm():
+    """Trigger MultiHorizon LSTM training as a Celery task.
+
+    This must be run at least once before /signals/generate will work.
+    """
+    from app.workers.tasks import task_train_mh_lstm
+    result = task_train_mh_lstm.delay()
+    return {"task_id": result.id, "status": "queued"}
+
+
+@router.get("/signals/task/{task_id}")
+async def get_task_status(task_id: str):
+    """Poll the status of a Celery background task (e.g. model training)."""
+    from app.workers.celery_app import celery_app
+    result = celery_app.AsyncResult(task_id)
+    state = result.state  # PENDING, STARTED, SUCCESS, FAILURE, RETRY
+    data: dict = {"task_id": task_id, "state": state}
+    if state == "SUCCESS":
+        data["result"] = result.result if isinstance(result.result, dict) else {}
+    elif state == "FAILURE":
+        data["error"] = str(result.result)
+    return data
+
+
 @router.post("/signals/generate")
 async def generate_signals(
     req: RunTPMLRequest,
@@ -631,8 +656,8 @@ async def generate_signals(
     await db.commit()
 
     async def _run():
-        async with get_db.__wrapped__() if hasattr(get_db, "__wrapped__") else async_session_factory() as session:
-            from app.db.database import async_session_factory as _sf
+        from app.db.database import async_session_factory as _sf
+        try:
             async with _sf() as session:
                 await run_target_price_predictions(
                     session,
@@ -642,8 +667,18 @@ async def generate_signals(
                     job_id=job_id,
                     pop_threshold=req.pop_threshold,
                 )
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).error("[generate_signals] Background task failed: %s", exc, exc_info=True)
+            from app.db.database import async_session_factory as _sf2
+            try:
+                async with _sf2() as err_db:
+                    from app.db import crud as _crud
+                    await _crud.update_prediction_job(err_db, job_id, status="failed", error=str(exc))
+            except Exception:
+                pass
 
-    background_tasks.add_task(lambda: asyncio.run(_run()))
+    background_tasks.add_task(_run)
     return {"job_id": job_id, "status": "started"}
 
 

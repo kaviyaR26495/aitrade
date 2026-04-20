@@ -601,13 +601,14 @@ async def sync_and_compute(
     db: AsyncSession,
     stock_id: int,
     interval: str = "day",
+    force_full: bool = False,
 ) -> dict:
     """Full pipeline: sync OHLCV from Kite → compute indicators → classify regimes → store all."""
     stock = await crud.get_stock_by_id(db, stock_id)
     if not stock:
         return {"error": f"Stock {stock_id} not found"}
 
-    ohlcv_count = await sync_stock_ohlcv(db, stock, interval)
+    ohlcv_count = await sync_stock_ohlcv(db, stock, interval, force_full)
 
     indicator_count = 0
     try:

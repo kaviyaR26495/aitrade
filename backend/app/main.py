@@ -48,6 +48,39 @@ async def lifespan(app: FastAPI):
     except Exception:
         _log.warning("Celery broker not reachable — scheduled tasks will not run until Redis is available.")
 
+    # Startup — mark any pipeline jobs that were left in "running" state as failed.
+    # Background tasks are lost on server restart; without this the UI shows them
+    # stuck as "in progress" forever.
+    try:
+        from app.db.database import async_session_factory as _asf
+        from sqlalchemy import update as _upd, select as _sel
+        from app.db.models import PipelineJob as _PJ
+        import json as _json
+        async with _asf() as _db:
+            _res = await _db.execute(_sel(_PJ).where(_PJ.status.in_(["running", "queued"])))
+            _orphans = _res.scalars().all()
+            for _j in _orphans:
+                _stages = list(_j.stages or [])
+                for _s in _stages:
+                    if _s.get("status") in ("running", "pending"):
+                        _s["status"] = "failed"
+                        _s["message"] = "Server restarted — pipeline task was lost. Use Resume to continue."
+                await _db.execute(
+                    _upd(_PJ).where(_PJ.id == _j.id).values(
+                        status="failed",
+                        stages=_stages,
+                        error="Server restarted mid-run — task lost. Use Resume to continue.",
+                    )
+                )
+            if _orphans:
+                await _db.commit()
+                _log.warning(
+                    "Startup: marked %d orphaned pipeline job(s) as failed: %s",
+                    len(_orphans), [j.id for j in _orphans],
+                )
+    except Exception as _exc:
+        _log.warning("Startup pipeline orphan cleanup failed (non-fatal): %s", _exc)
+
     yield
     # Shutdown
     await engine.dispose()

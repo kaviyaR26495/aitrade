@@ -165,6 +165,12 @@ export const getSignals = (params?: { target_date?: string; status?: string; min
   api.get('/trading/signals', { params });
 export const generateSignals = (params: { interval?: string; stock_ids?: number[]; target_date?: string; pop_threshold?: number }) =>
   api.post('/trading/signals/generate', params);
+export const trainMhLstm = () =>
+  api.post('/trading/signals/train-model', {});
+export const getMhLstmStatus = () =>
+  api.get<{ status: string; model_id?: number; accuracy?: number; name?: string; created_at?: string }>('/models/mh-lstm/status');
+export const getTaskStatus = (taskId: string) =>
+  api.get<{ task_id: string; state: string; result?: Record<string, unknown>; error?: string }>(`/trading/signals/task/${taskId}`);
 export const getSignalPreview = (signalId: number) =>
   api.get<{ signal_id: number; quantity: number; entry_price: number; position_value: number }>(`/trading/signals/${signalId}/preview`);
 export const executeSignal = (signalId: number, dryRun = false) =>
@@ -205,7 +211,9 @@ export const getGoldenPatterns = (rl_model_id?: number) =>
 export interface PipelineRequest {
   symbols: string[];
   skip_sync?: boolean;
+  force_sync?: boolean;
   use_regime_pooling?: boolean;
+  resume_job_id?: string;
 }
 
 export interface PipelineStageStatus {
@@ -245,6 +253,8 @@ export const startPipeline = (req: PipelineRequest) =>
 
 export const getPipelineStatus = (jobId: string) =>
   api.get<PipelineStatus>(`/pipeline/status/${jobId}`);
+export const getLatestPipelineJob = () =>
+  api.get<PipelineStatus>('/pipeline/latest');
 
 export const terminatePipeline = (jobId: string, purge = false) =>
   api.delete<PipelineTerminateResult>(`/pipeline/${jobId}`, { params: { purge } });

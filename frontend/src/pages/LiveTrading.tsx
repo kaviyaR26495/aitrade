@@ -1,9 +1,9 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useState, useRef, useEffect } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { Card, Button, Badge, StatCard, EmptyState, PageHeader, Table, Modal, Tooltip, SkeletonTable, type TableColumn } from '../components/ui';
-import { useSignals, useGenerateSignals, useExecuteSignal, useOrders, useUniverseStocks, usePredictionJob, useCancelPredictionJob, useSignalPreview } from '../hooks/useApi';
+import { useSignals, useGenerateSignals, useTrainMhLstm, useExecuteSignal, useOrders, useUniverseStocks, usePredictionJob, useCancelPredictionJob, useSignalPreview } from '../hooks/useApi';
 import { useAppStore } from '../store/appStore';
-import { Crosshair, Play, Shield, XCircle, Loader2, Filter, Zap, ToggleLeft, ToggleRight } from 'lucide-react';
-import { useEffect } from 'react';
+import { Crosshair, Play, Shield, XCircle, Loader2, Filter, Zap, ToggleLeft, ToggleRight, BrainCircuit } from 'lucide-react';
 
 type StatusFilter = 'ALL' | 'pending' | 'active' | 'target_hit' | 'sl_hit' | 'expired';
 
@@ -23,6 +23,7 @@ export default function LiveTrading() {
   const [minPop, setMinPop] = useState('55');
   const [symbolQuery, setSymbolQuery] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const qc = useQueryClient();
 
   // Signal generation job tracking
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
@@ -44,6 +45,7 @@ export default function LiveTrading() {
   useEffect(() => {
     if (job?.status === 'completed' || job?.status === 'failed' || job?.status === 'cancelled') {
       if (job.status === 'completed') {
+        qc.invalidateQueries({ queryKey: ['signals'] });
         addNotification({ type: 'success', message: 'Signal generation completed' });
       } else if (job.status === 'cancelled') {
         addNotification({ type: 'warning', message: 'Signal generation stopped' });
@@ -53,7 +55,7 @@ export default function LiveTrading() {
       setIsSubmitting(false);
       setTimeout(() => setActiveJobId(null), 3000);
     }
-  }, [job, addNotification]);
+  }, [job, addNotification, qc]);
 
   // Fetch signals
   const signalParams = useMemo(() => ({
@@ -65,6 +67,22 @@ export default function LiveTrading() {
   const { data: signals, isLoading } = useSignals(signalParams);
   const { data: orders } = useOrders(20);
   const generateSignals = useGenerateSignals();
+  const trainMhLstm = useTrainMhLstm();
+
+  // Notify when training completes or fails
+  const prevTrainingState = useRef(trainMhLstm.trainingState);
+  useEffect(() => {
+    const prev = prevTrainingState.current;
+    prevTrainingState.current = trainMhLstm.trainingState;
+    if (prev === trainMhLstm.trainingState) return;
+    if (trainMhLstm.trainingState === 'success' && (prev === 'queued' || prev === 'running')) {
+      addNotification({ type: 'success', message: 'LSTM model training completed — you can now generate signals' });
+    } else if (trainMhLstm.trainingState === 'failure') {
+      addNotification({ type: 'error', message: 'LSTM model training failed — check Celery worker logs' });
+    } else if (trainMhLstm.trainingState === 'queued') {
+      addNotification({ type: 'info', message: 'LSTM model training queued' });
+    }
+  }, [trainMhLstm.trainingState, addNotification]);
 
   // Filtered signals (symbol search is client-side)
   const filteredSignals = useMemo(() => {
@@ -311,6 +329,34 @@ export default function LiveTrading() {
               ) : (
                 <span className="text-[var(--text-dim)]">All stocks</span>
               )}
+            </Button>
+          </Tooltip>
+
+          <Tooltip content={trainMhLstm.trainingState === 'success' ? "Re-train the MultiHorizon LSTM model (Optional)" : "Train the MultiHorizon LSTM model (required before first signal generation)"} side="bottom">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => {
+                if (confirm(trainMhLstm.trainingState === 'success' ? 'Re-train the MultiHorizon LSTM model? This may take several minutes.' : 'Train the MultiHorizon LSTM model? This will run as a background job and may take several minutes.')) {
+                  trainMhLstm.mutate();
+                }
+              }}
+              disabled={trainMhLstm.trainingState === 'queued' || trainMhLstm.trainingState === 'running'}
+              loading={trainMhLstm.trainingState === 'queued' || trainMhLstm.trainingState === 'running'}
+              icon={
+                trainMhLstm.trainingState === 'success'
+                  ? <Zap size={14} className="text-green-400" />
+                  : trainMhLstm.trainingState === 'failure'
+                  ? <XCircle size={14} className="text-red-400" />
+                  : <BrainCircuit size={14} />
+              }
+              className="h-9 gap-1.5 border border-[var(--border)] bg-[var(--bg-input)] hover:bg-[var(--bg-hover)]"
+            >
+              {trainMhLstm.trainingState === 'queued' && 'Queued...'}
+              {trainMhLstm.trainingState === 'running' && 'Training...'}
+              {trainMhLstm.trainingState === 'success' && 'Model Ready'}
+              {trainMhLstm.trainingState === 'failure' && 'Train Failed'}
+              {trainMhLstm.trainingState === 'idle' && 'Train Model'}
             </Button>
           </Tooltip>
 

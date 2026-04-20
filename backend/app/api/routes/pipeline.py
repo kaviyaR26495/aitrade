@@ -113,7 +113,9 @@ async def _update_stage(job_id: str, stage_idx: int, *, status: str, progress: i
 class PipelineStartRequest(BaseModel):
     symbols: list[str]
     skip_sync: bool = False
+    force_sync: bool = False
     use_regime_pooling: bool = True
+    resume_job_id: str | None = None
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -146,16 +148,32 @@ async def start_pipeline(req: PipelineStartRequest, background_tasks: Background
         # we will create a NEW job but skip stages that were already completed.
     
     job_id = str(uuid.uuid4())
+    stages = _make_stages()
+        
     async with async_session_factory() as db:
+        if req.resume_job_id:
+            from sqlalchemy import select as sqla_select
+            from app.db.models import PipelineJob
+            
+            job = await crud.get_pipeline_job(db, req.resume_job_id)
+            if job and job.symbols == req.symbols:
+                old_stages = job.stages or []
+                for stage in stages:
+                    # Look up matching stage in old job
+                    old_stage = next((s for s in old_stages if s.get("name") == stage["name"]), None)
+                    if old_stage and old_stage.get("status") == "completed":
+                        stage["status"] = "completed"
+                # Set previous IDs to skip the work later
+        
         await crud.create_pipeline_job(
             db,
             job_id=job_id,
             symbols=req.symbols,
-            stages=_make_stages(),
+            stages=stages,
             status="queued"
         )
 
-    background_tasks.add_task(_run_pipeline, job_id, req.symbols, req.skip_sync, req.use_regime_pooling)
+    background_tasks.add_task(_run_pipeline, job_id, req.symbols, req.skip_sync, req.use_regime_pooling, req.force_sync, req.resume_job_id)
     return {"job_id": job_id}
 
 
@@ -189,6 +207,147 @@ async def get_pipeline_status(job_id: str):
         "updated_at": job.updated_at.isoformat(),
         "error": job.error,
     }
+
+
+@router.get("/latest")
+async def get_latest_pipeline():
+    """Return the most recent *meaningful* pipeline job.
+
+    Priority:
+      1. Any job currently running or queued (most recent first).
+      2. The most recent failed/completed job that has at least one completed stage
+         (i.e., something actually ran — not an immediately-failed validation error).
+
+    Returns 404 when no meaningful jobs exist.
+    """
+    from sqlalchemy import select as sqla_select, desc
+    from app.db.models import PipelineJob
+
+    def _resolve_stage_index(val: str | None) -> int:
+        if val is None:
+            return 0
+        try:
+            return int(val)
+        except ValueError:
+            try:
+                return _STAGE_NAMES.index(val)
+            except ValueError:
+                return 0
+
+    def _has_progress(job) -> bool:
+        """True if at least one stage completed (not an immediately-failed job)."""
+        return any(
+            s.get("status") == "completed"
+            for s in (job.stages or [])
+        )
+
+    async with async_session_factory() as db:
+        # First priority: running / queued jobs
+        res = await db.execute(
+            sqla_select(PipelineJob)
+            .where(PipelineJob.status.in_(["running", "queued"]))
+            .order_by(desc(PipelineJob.created_at))
+            .limit(1)
+        )
+        job = res.scalar_one_or_none()
+
+        if job is None:
+            # Second priority: most recent job with actual progress
+            res = await db.execute(
+                sqla_select(PipelineJob)
+                .where(PipelineJob.status.in_(["failed", "completed", "cancelled"]))
+                .order_by(desc(PipelineJob.created_at))
+                .limit(20)  # scan recent jobs to find one with progress
+            )
+            candidates = res.scalars().all()
+            for candidate in candidates:
+                if _has_progress(candidate):
+                    job = candidate
+                    break
+
+    if not job:
+        raise HTTPException(status_code=404, detail="No meaningful pipeline jobs found")
+
+    return {
+        "job_id": job.id,
+        "symbols": job.symbols,
+        "status": job.status,
+        "current_stage": _resolve_stage_index(job.current_stage),
+        "stages": job.stages,
+        "created_at": job.created_at.isoformat(),
+        "updated_at": job.updated_at.isoformat(),
+        "error": job.error,
+    }
+
+
+@router.get("/sync-status")
+async def get_sync_status() -> dict:
+    """Return the latest OHLCV and regime dates for every active stock.
+
+    Used by the frontend to show "Data last synced: April 18, 2026" and to
+    highlight stale stocks before the user starts a pipeline run.
+
+    Response shape::
+
+        {
+            "RELIANCE": {
+                "ohlcv_latest": "2026-04-18",
+                "regime_latest": "2026-04-18",
+                "is_stale": false
+            },
+            ...
+        }
+
+    ``is_stale`` is True when either ohlcv_latest or regime_latest is more than
+    1 calendar day behind today (weekends/holidays are not accounted for here —
+    that is handled server-side by the data sync logic).
+    """
+    from datetime import date as date_cls
+    from sqlalchemy import select as sqla_select, func, text
+    from app.db.models import Stock, StockOHLCV, StockRegime
+
+    today = date_cls.today()
+
+    async with async_session_factory() as db:
+        # Latest OHLCV date per stock
+        ohlcv_q = (
+            sqla_select(StockOHLCV.stock_id, func.max(StockOHLCV.date).label("latest"))
+            .where(StockOHLCV.interval == "day")
+            .group_by(StockOHLCV.stock_id)
+        )
+        ohlcv_rows = (await db.execute(ohlcv_q)).all()
+        ohlcv_map = {r.stock_id: r.latest for r in ohlcv_rows}
+
+        # Latest regime date per stock
+        regime_q = (
+            sqla_select(StockRegime.stock_id, func.max(StockRegime.date).label("latest"))
+            .where(StockRegime.interval == "day")
+            .group_by(StockRegime.stock_id)
+        )
+        regime_rows = (await db.execute(regime_q)).all()
+        regime_map = {r.stock_id: r.latest for r in regime_rows}
+
+        # All active stocks
+        stocks_res = await db.execute(sqla_select(Stock).where(Stock.is_active == True))
+        stocks = stocks_res.scalars().all()
+
+    result: dict = {}
+    for stock in stocks:
+        ohlcv_latest = ohlcv_map.get(stock.id)
+        regime_latest = regime_map.get(stock.id)
+        is_stale = (
+            ohlcv_latest is None
+            or regime_latest is None
+            or (today - ohlcv_latest).days > 1
+            or (today - regime_latest).days > 1
+        )
+        result[stock.symbol] = {
+            "ohlcv_latest": ohlcv_latest.isoformat() if ohlcv_latest else None,
+            "regime_latest": regime_latest.isoformat() if regime_latest else None,
+            "is_stale": is_stale,
+        }
+
+    return result
 
 
 @router.delete("/{job_id}")
@@ -417,34 +576,44 @@ async def _purge_pipeline_data(job_id: str) -> dict:
 
 # ── Background pipeline runner ─────────────────────────────────────────────────
 
-async def _run_pipeline(job_id: str, symbols: list[str], skip_sync: bool = False, use_regime_pooling: bool = True) -> None:
+async def _run_pipeline(job_id: str, symbols: list[str], skip_sync: bool = False, use_regime_pooling: bool = True, force_sync: bool = False, resume_job_id: str | None = None) -> None:
     async with async_session_factory() as db:
         await crud.update_pipeline_job(db, job_id, status="running")
 
-    # Resume Logic: Only active when user explicitly skips sync (skip_sync=True).
-    # When skip_sync=False the user wants a fully fresh run — no resume shortcuts.
-    resume_from_prev = None
-    if skip_sync:
+    # Resume Logic — validate previous job artifacts before deciding what to skip.
+    # When resume_job_id is provided the symbol set must match exactly; any disk
+    # artifact that has been deleted since the previous run causes that stage (and
+    # all later stages) to be demoted back to pending so the pipeline re-runs them.
+
+    validated_stages: list[str] = []
+    existing_rl_id: int | None = None
+    existing_knn_id: int | None = None
+    existing_lstm_id: int | None = None
+    prev_sync_ok = False
+
+    if resume_job_id:
         async with async_session_factory() as db:
-            from sqlalchemy import select as sqla_select, and_, or_
-            from app.db.models import PipelineJob, RLModel
+            resume_from_prev = await crud.get_pipeline_job(db, resume_job_id)
 
-            q = sqla_select(PipelineJob).where(
-                PipelineJob.id != job_id
-            ).order_by(PipelineJob.created_at.desc())
+        if resume_from_prev is None:
+            raise RuntimeError(f"Resume job {resume_job_id} not found in database.")
 
-            res = await db.execute(q)
-            all_prev = res.scalars().all()
+        try:
+            validated_stages, existing_rl_id, existing_knn_id, existing_lstm_id = \
+                await _validate_resume_artifacts(resume_from_prev, symbols)
+        except ValueError as sym_err:
+            # Symbol-set mismatch — fail fast with a clear message
+            async with async_session_factory() as db:
+                await crud.update_pipeline_job(db, job_id, status="failed", error=str(sym_err))
+            raise RuntimeError(str(sym_err)) from sym_err
 
-            target_symbols_set = set(symbols)
-            for prev in all_prev:
-                if set(prev.symbols or []) == target_symbols_set:
-                    resume_from_prev = prev
-                    logger.info("Pipeline %s found candidate resume job %s", job_id, prev.id)
-                    break
-    else:
-        from sqlalchemy import select as sqla_select
-        from app.db.models import RLModel
+        prev_sync_ok = "data_sync" in validated_stages
+        logger.info(
+            "Pipeline %s resume from %s: validated stages=%s, "
+            "rl=%s knn=%s lstm=%s",
+            job_id, resume_job_id, validated_stages,
+            existing_rl_id, existing_knn_id, existing_lstm_id,
+        )
 
     try:
         # Resolve stock IDs for the given symbols
@@ -456,45 +625,29 @@ async def _run_pipeline(job_id: str, symbols: list[str], skip_sync: bool = False
             )
 
         # Stage 0 — Data Sync
-        # Only skip when user explicitly opted out (skip_sync=True) and prev sync succeeded.
-        prev_sync_ok = False
-        if skip_sync and resume_from_prev:
-            sync_stage = next((s for s in (resume_from_prev.stages or []) if s["name"] == "data_sync"), None)
-            if sync_stage and sync_stage["status"] == "completed":
-                prev_sync_ok = True
-
-        if skip_sync and prev_sync_ok:
-            await _update_stage(job_id, 0, status="completed", progress=100, message="Data sync skipped (user opted out — using previous sync).")
+        # Skip when: user opted out (skip_sync) OR resuming with valid prev sync,
+        # UNLESS force_sync=True which overrides both.
+        if (skip_sync or prev_sync_ok) and not force_sync:
+            await _update_stage(
+                job_id, 0, status="completed", progress=100,
+                message="Data sync skipped (using previous sync).",
+            )
         else:
-            # Run data sync: either fresh run (skip_sync=False) or skip_sync=True but no prev sync
             if await _is_cancelled(job_id):
                 raise asyncio.CancelledError()
-            await _stage_data_sync(job_id, stock_ids, symbols)
+            await _stage_data_sync(job_id, stock_ids, symbols, force_sync)
 
         # Stages 1–3 — CQL / BC / PPO
-        # Only reuse a previous RL model when user is explicitly skipping sync
-        # (i.e. intentionally resuming). A fresh run always retrains from scratch.
-        existing_rl_id = None
-        if skip_sync and resume_from_prev:
-            async with async_session_factory() as db:
-                rl_res = await db.execute(
-                    sqla_select(RLModel).where(
-                        (RLModel.training_config["pipeline_job_id"].as_string() == resume_from_prev.id),
-                        (RLModel.status == "completed")
-                    ).order_by(RLModel.created_at.desc())
-                )
-                m = rl_res.scalars().first()
-                if m:
-                    existing_rl_id = m.id
-                    logger.info("Resuming: using existing RL model #%s from job %s", existing_rl_id, resume_from_prev.id)
-
-        if existing_rl_id:
+        # Re-use previous RL model only when resume validation confirmed the artifact.
+        if existing_rl_id is not None:
             rl_model_id = existing_rl_id
-            await _update_stage(job_id, 3, status="completed", progress=100, message=f"Resumed: using existing RL model #{rl_model_id}")
             await _update_stage(job_id, 1, status="completed", progress=100, message="Resumed: CQL skipped.")
             await _update_stage(job_id, 2, status="completed", progress=100, message="Resumed: BC warmup skipped.")
+            await _update_stage(
+                job_id, 3, status="completed", progress=100,
+                message=f"Resumed: using existing RL model #{rl_model_id}",
+            )
         else:
-            # Normal flow — always runs on fresh run (skip_sync=False)
             # Stage 1 — CQL Pre-training
             if await _is_cancelled(job_id):
                 raise asyncio.CancelledError()
@@ -511,33 +664,29 @@ async def _run_pipeline(job_id: str, symbols: list[str], skip_sync: bool = False
             rl_model_id = await _stage_ppo_finetune(job_id, stock_ids, warmup_path)
 
         # Stage 4 — Ensemble Distillation
-        if await _is_cancelled(job_id):
-            raise asyncio.CancelledError()
-        knn_model_id, lstm_model_id = await _stage_ensemble_distill(job_id, rl_model_id, stock_ids)
-
-        # NEW: Automatically trigger a prediction run once models are distilled.
-        # This populates the "Live Trading" dashboard signals automatically.
-        try:
-            from app.ml.predictor import run_daily_predictions
-            async with async_session_factory() as db:
-                await run_daily_predictions(
-                    db,
-                    stock_ids=stock_ids,
-                    knn_model_id=knn_model_id,
-                    lstm_model_id=lstm_model_id,
-                    interval="day"
-                )
-            logger.info("Pipeline %s: Automatically triggered predictions after Stage 4", job_id)
-        except Exception as pred_exc:
-            logger.error("Pipeline %s: Failed to trigger auto-predictions: %s", job_id, pred_exc)
+        # Re-use previous KNN + LSTM only when resume validation confirmed both artifacts.
+        if existing_knn_id is not None and existing_lstm_id is not None:
+            knn_model_id = existing_knn_id
+            lstm_model_id = existing_lstm_id
+            await _update_stage(
+                job_id, 4, status="completed", progress=100,
+                message=f"Resumed: using existing KNN #{knn_model_id} + LSTM #{lstm_model_id}",
+            )
+        else:
+            if await _is_cancelled(job_id):
+                raise asyncio.CancelledError()
+            knn_model_id, lstm_model_id = await _stage_ensemble_distill(job_id, rl_model_id, stock_ids)
 
         # Stage 5 — Backtest
         if await _is_cancelled(job_id):
             raise asyncio.CancelledError()
         await _stage_backtest(job_id, rl_model_id, knn_model_id, lstm_model_id, stock_ids)
 
-        # Stage 6 — Ready
-        await _update_stage(job_id, 6, status="completed", progress=100, message="All models ready for live trading.")
+        # Stage 6 — Deploy: run predictions + train meta-classifier
+        if await _is_cancelled(job_id):
+            raise asyncio.CancelledError()
+        await _stage_deploy(job_id, rl_model_id, knn_model_id, lstm_model_id, stock_ids)
+
         async with async_session_factory() as db:
             await crud.update_pipeline_job(db, job_id, status="completed")
 
@@ -592,9 +741,140 @@ async def _resolve_stock_ids(symbols: list[str]) -> list[int]:
     return ids
 
 
+async def _validate_resume_artifacts(
+    prev_job,
+    symbols: list[str],
+) -> tuple[list[str], int | None, int | None, int | None]:
+    """Validate that a previous job's artifacts still exist on disk.
+
+    Returns
+    -------
+    (validated_stage_names, rl_model_id, knn_model_id, lstm_model_id)
+
+    ``validated_stage_names`` is the subset of the previous job's completed
+    stages whose disk artifacts still exist.  Missing artifacts cause that
+    stage (and all later stages) to be demoted back to pending.
+
+    Raises ``ValueError`` when the symbol sets differ — resume is not safe.
+    """
+    from sqlalchemy import select as sqla_select
+    from app.db.models import RLModel, KNNModel, LSTMModel
+
+    # ── 1. Symbol-set guard ───────────────────────────────────────────
+    prev_symbols = set(prev_job.symbols or [])
+    new_symbols = set(symbols)
+    if prev_symbols != new_symbols:
+        added = new_symbols - prev_symbols
+        removed = prev_symbols - new_symbols
+        parts = []
+        if added:
+            parts.append(f"added: {sorted(added)}")
+        if removed:
+            parts.append(f"removed: {sorted(removed)}")
+        raise ValueError(
+            f"Cannot resume: symbol set changed ({', '.join(parts)}). "
+            "Use 'Discard & Restart' to start a fresh pipeline with the new symbols."
+        )
+
+    # ── 2. Determine which stages completed in prev job ───────────────
+    prev_stages = {s["name"]: s for s in (prev_job.stages or [])}
+
+    rl_model_id: int | None = None
+    knn_model_id: int | None = None
+    lstm_model_id: int | None = None
+    validated: list[str] = []  # stage names whose artifacts are confirmed on disk
+
+    async with async_session_factory() as db:
+        # ── Stage 3: PPO / RL model ──────────────────────────────────
+        ppo_stage = prev_stages.get("ppo_finetune", {})
+        if ppo_stage.get("status") == "completed":
+            rl_res = await db.execute(
+                sqla_select(RLModel).where(
+                    RLModel.training_config["pipeline_job_id"].as_string() == prev_job.id,
+                    RLModel.status == "completed",
+                ).order_by(RLModel.created_at.desc())
+            )
+            rl_model = rl_res.scalars().first()
+            if rl_model and rl_model.model_path and Path(rl_model.model_path).exists():
+                rl_model_id = rl_model.id
+                validated += ["cql_pretrain", "bc_warmup", "ppo_finetune"]
+                logger.info(
+                    "Resume validation: RL model #%s artifact OK at %s",
+                    rl_model_id, rl_model.model_path,
+                )
+            else:
+                logger.warning(
+                    "Resume validation: RL model artifact missing for job %s — "
+                    "will retrain from stage 1",
+                    prev_job.id,
+                )
+
+        # ── Stage 4: KNN + LSTM ensemble distillation ────────────────
+        distill_stage = prev_stages.get("ensemble_distill", {})
+        if distill_stage.get("status") == "completed" and rl_model_id is not None:
+            knn_res = await db.execute(
+                sqla_select(KNNModel).where(
+                    KNNModel.source_rl_model_id == rl_model_id,
+                    KNNModel.status == "completed",
+                ).order_by(KNNModel.created_at.desc())
+            )
+            knn_model = knn_res.scalars().first()
+
+            lstm_res = await db.execute(
+                sqla_select(LSTMModel).where(
+                    LSTMModel.source_rl_model_id == rl_model_id,
+                    LSTMModel.status == "completed",
+                ).order_by(LSTMModel.created_at.desc())
+            )
+            lstm_model = lstm_res.scalars().first()
+
+            knn_ok = (
+                knn_model is not None
+                and knn_model.model_path
+                and Path(knn_model.model_path).exists()
+            )
+            lstm_ok = (
+                lstm_model is not None
+                and lstm_model.model_path
+                and Path(lstm_model.model_path).exists()
+            )
+            if knn_ok and lstm_ok:
+                knn_model_id = knn_model.id
+                lstm_model_id = lstm_model.id
+                validated.append("ensemble_distill")
+                logger.info(
+                    "Resume validation: KNN #%s + LSTM #%s artifacts OK",
+                    knn_model_id, lstm_model_id,
+                )
+            else:
+                missing = []
+                if not knn_ok:
+                    missing.append("KNN")
+                if not lstm_ok:
+                    missing.append("LSTM")
+                logger.warning(
+                    "Resume validation: %s artifact(s) missing for job %s — "
+                    "will re-distill from RL model",
+                    "/".join(missing), prev_job.id,
+                )
+
+        # ── Stage 5: Backtest ─────────────────────────────────────────
+        # Only mark backtest as completed if distillation artifacts are also valid.
+        bt_stage = prev_stages.get("backtest", {})
+        if bt_stage.get("status") == "completed" and knn_model_id and lstm_model_id:
+            validated.append("backtest")
+
+        # ── data_sync ────────────────────────────────────────────────
+        sync_stage = prev_stages.get("data_sync", {})
+        if sync_stage.get("status") == "completed":
+            validated.append("data_sync")
+
+    return validated, rl_model_id, knn_model_id, lstm_model_id
+
+
 # ── Stage implementations ─────────────────────────────────────────────────────
 
-async def _stage_data_sync(job_id: str, stock_ids: list[int], symbols: list[str]) -> None:
+async def _stage_data_sync(job_id: str, stock_ids: list[int], symbols: list[str], force_sync: bool = False) -> None:
     from app.db.database import async_session_factory
     from app.core import zerodha, data_service
 
@@ -630,7 +910,7 @@ async def _stage_data_sync(job_id: str, stock_ids: list[int], symbols: list[str]
 
             async with async_session_factory() as db:
                 try:
-                    res = await data_service.sync_and_compute(db, stock_id, interval=interval)
+                    res = await data_service.sync_and_compute(db, stock_id, interval=interval, force_full=force_sync)
                     if res.get("ohlcv_synced", 0) >= 0 and interval == "day":
                         synced += 1
                 except Exception as exc:
@@ -1255,3 +1535,254 @@ async def _stage_backtest(job_id: str, rl_model_id: int, knn_model_id: int | Non
     else:
         await _update_stage(job_id, 5, status="completed", progress=100,
                       message="Backtest could not generate results — check model artifacts.")
+
+async def _stage_deploy(job_id: str, rl_model_id: int, knn_model_id: int, lstm_model_id: int, stock_ids: list[int]) -> None:
+    """Stage 6 — Deploy: run predictions + attempt meta-classifier training.
+
+    This stage:
+    1. Runs run_daily_predictions so the Live Trading dashboard is populated
+       immediately after the pipeline completes (zero manual steps required).
+    2. Attempts to train the meta-classifier (XGBoost PoP gate) from historical
+       closed TradeSignal outcomes (target_hit / sl_hit).  Requires >= 50 samples;
+       skipped if insufficient history exists (first run on a fresh deployment).
+    3. Marks the pipeline job stage 6 as "completed".
+    """
+    from app.db.database import async_session_factory
+    from app.ml.predictor import run_daily_predictions
+
+    await _update_stage(job_id, 6, status="running", progress=0, message="Running daily predictions…")
+
+    # ── 1. Trigger predictions ──────────────────────────────────────────────
+    try:
+        async with async_session_factory() as db:
+            pred_result = await run_daily_predictions(
+                db,
+                stock_ids=stock_ids,
+                knn_model_id=knn_model_id,
+                lstm_model_id=lstm_model_id,
+                interval="day",
+                job_id=job_id,
+            )
+        signal_count = pred_result.get("signals", 0) if isinstance(pred_result, dict) else 0
+        logger.info(
+            "Pipeline %s: predictions complete — %s signal(s) generated",
+            job_id, signal_count,
+        )
+    except Exception as pred_exc:
+        logger.error("Pipeline %s: prediction run failed: %s", job_id, pred_exc, exc_info=True)
+        await _update_stage(
+            job_id, 6, status="failed", progress=30,
+            message=f"Prediction run failed: {pred_exc}",
+        )
+        raise
+
+    await _update_stage(
+        job_id, 6, status="running", progress=40,
+        message=f"Predictions done ({signal_count} signal(s)). Training MultiHorizon LSTM…",
+    )
+
+    # ── 2. MultiHorizon LSTM training ─────────────────────────────────────
+    # The "Train Model" button on the Live Trading page trains this model.
+    # By training it here, the user can click "Generate Signal" immediately
+    # after the pipeline completes with no manual steps.
+    #
+    # train_multi_horizon() is a synchronous CPU-bound PyTorch loop — running
+    # it inline in an async def would block the event loop for many minutes.
+    # Strategy:
+    #   a) Async: load stock data and assemble the numpy training arrays (DB I/O)
+    #   b) Executor: run the CPU-bound train_multi_horizon() off the event loop
+    #   c) Async: save the model file and register it in the DB
+    mh_status = "skipped"
+    try:
+        import numpy as np
+        import sqlalchemy as _sa
+        from app.db.models import Stock as _Stock, LSTMHorizonModel, ModelStatus as _MS
+        from app.core.data_service import get_model_ready_data
+        from app.core.normalizer import prepare_model_input
+        from app.ml.multi_horizon_lstm import (
+            build_training_data as _build_mh_data,
+            train_multi_horizon as _train_mh,
+            save_multi_horizon_model as _save_mh,
+        )
+
+        _seq_len = getattr(settings, "DEFAULT_SEQ_LEN_DAILY", 15)
+        _mh_dir = Path(settings.MODEL_DIR) / "lstm"
+
+        # a) Async data assembly ──────────────────────────────────────
+        _X_all, _yr_all, _yt_all = [], [], []
+        async with async_session_factory() as _db:
+            _stocks_res = await _db.execute(
+                _sa.select(_Stock).where(_Stock.id.in_(stock_ids), _Stock.is_active == True)  # noqa: E712
+            )
+            _stocks = _stocks_res.scalars().all()
+            logger.info("Pipeline %s MH-LSTM: building data from %d stocks", job_id, len(_stocks))
+            
+            for _i, _stock in enumerate(_stocks):
+                if _i % max(1, len(_stocks) // 10) == 0:
+                    await _update_stage(
+                        job_id, 6, status="running", progress=40 + int(20 * (_i / len(_stocks))),
+                        message=f"Predictions done ({signal_count} signal(s)). Gathering MH-LSTM data ({_i}/{len(_stocks)})...",
+                    )
+                try:
+                    _df, _fcols = await get_model_ready_data(_db, _stock.id, seq_len=_seq_len)
+                    if _df is None or len(_df) < _seq_len + 10:
+                        continue
+                    _close = _df["close"].values.astype("float32")
+                    _fmat = _df[_fcols].values.astype("float32")
+                    try:
+                        _Xs, _yr, _yt = _build_mh_data(_close, _fmat, seq_len=_seq_len)
+                        _X_all.append(_Xs)
+                        _yr_all.append(_yr)
+                        _yt_all.append(_yt)
+                    except ValueError:
+                        continue
+                except Exception as _de:
+                    logger.warning("Pipeline %s MH-LSTM skipping %s: %s", job_id, _stock.symbol, _de)
+
+        if not _X_all:
+            mh_status = "skipped (no training data available)"
+            logger.warning("Pipeline %s MH-LSTM: no training data assembled", job_id)
+        else:
+            _X_mh = np.concatenate(_X_all, axis=0)
+            _y_ret = np.concatenate(_yr_all, axis=0)
+            _y_trd = np.concatenate(_yt_all, axis=0)
+            logger.info("Pipeline %s MH-LSTM dataset: X=%s", job_id, _X_mh.shape)
+
+            await _update_stage(
+                job_id, 6, status="running", progress=60,
+                message=f"Training MH-LSTM meta-classifier ({len(_X_mh)} examples)...",
+            )
+
+            # b) CPU-bound training in executor ───────────────────────
+            _loop = asyncio.get_event_loop()
+
+            def _run_mh_train():
+                return _train_mh(
+                    _X_mh, _y_ret, _y_trd,
+                    hidden_size=256, num_layers=2, dropout=0.3,
+                    epochs=60, patience=10,
+                    log_fn=lambda m: logger.info("[MH-LSTM] %s", m),
+                )
+
+            _mh_model, _mh_metrics = await _loop.run_in_executor(_PIPELINE_EXECUTOR, _run_mh_train)
+
+            # c) Async save + DB registration ─────────────────────────
+            _mh_dir.mkdir(parents=True, exist_ok=True)
+            _save_res = _save_mh(_mh_model, _mh_metrics, _mh_dir, model_name="mh_lstm")
+            _mh_path = _save_res["model_path"]
+
+            async with async_session_factory() as _db2:
+                _mh_rec = LSTMHorizonModel(
+                    name=f"mh_lstm_{len(_X_mh)}s",
+                    hidden_size=256,
+                    num_layers=2,
+                    seq_len=_seq_len,
+                    horizon=_mh_model.horizon,
+                    model_path=_mh_path,
+                    accuracy=float(1.0 - _mh_metrics.get("best_val_loss", 1.0)),
+                    status=_MS.completed,
+                )
+                _db2.add(_mh_rec)
+                await _db2.commit()
+                logger.info("Pipeline %s MH-LSTM registered id=%d", job_id, _mh_rec.id)
+
+            mh_status = (
+                f"trained (val_loss={_mh_metrics.get('best_val_loss', 0):.4f}, "
+                f"n={len(_X_mh)})"
+            )
+
+    except Exception as mh_exc:
+        mh_status = f"failed ({mh_exc})"
+        logger.warning(
+            "Pipeline %s: MultiHorizon LSTM training failed (non-fatal): %s",
+            job_id, mh_exc, exc_info=True,
+        )
+
+    await _update_stage(
+        job_id, 6, status="running", progress=75,
+        message=f"MH-LSTM {mh_status}. Training meta-classifier…",
+    )
+
+    # ── 3. Meta-classifier training ────────────────────────────────────────
+    # Build training data from closed TradeSignal history.  sr_features are
+    # not stored in the DB so we fill them with 0.0 as a safe default.
+    meta_status = "skipped"
+    try:
+        import numpy as np
+        from sqlalchemy import select as sqla_select
+        from app.db.models import TradeSignal, SignalStatus
+        from app.ml.meta_classifier import MetaClassifier
+
+        async with async_session_factory() as db:
+            result = await db.execute(
+                sqla_select(TradeSignal).where(
+                    TradeSignal.status.in_([SignalStatus.target_hit, SignalStatus.sl_hit]),
+                    TradeSignal.confluence_score.isnot(None),
+                ).order_by(TradeSignal.signal_date.asc())
+            )
+            closed_signals = result.scalars().all()
+
+        if len(closed_signals) >= 50:
+            rows_X = []
+            rows_y = []
+            for sig in closed_signals:
+                net_return = 0.0
+                if sig.initial_rr_ratio and sig.execution_cost_pct is not None:
+                    net_return = (
+                        (sig.target_price - sig.entry_price) / sig.entry_price
+                        - sig.execution_cost_pct
+                    ) if sig.entry_price else 0.0
+                row = [
+                    sig.confluence_score or 0.0,
+                    sig.fqs_score or 0.0,
+                    sig.execution_cost_pct or 0.0,
+                    sig.initial_rr_ratio or 1.0,
+                    net_return,
+                    sig.lstm_mu or 0.0,
+                    sig.lstm_sigma or 0.0,
+                    sig.knn_median_return or 0.0,
+                    sig.knn_win_rate or 0.0,
+                    float(sig.regime_id or 0),
+                    # sr_features not persisted — use 0 defaults
+                    0.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+                ]
+                rows_X.append(row)
+                rows_y.append(1 if sig.status == SignalStatus.target_hit else 0)
+
+            X = np.array(rows_X, dtype=np.float32)
+            y = np.array(rows_y, dtype=np.int32)
+
+            mc = MetaClassifier()
+            metrics = mc.train(X, y)
+
+            meta_path = Path(settings.MODEL_DIR) / "meta_classifier.joblib"
+            mc.save(meta_path)
+
+            meta_status = (
+                f"trained (AUC={metrics['auc']:.3f}, "
+                f"acc={metrics['accuracy']:.3f}, "
+                f"n={metrics['n_train']+metrics['n_val']})"
+            )
+            logger.info("Pipeline %s: meta-classifier %s", job_id, meta_status)
+        else:
+            meta_status = (
+                f"skipped (only {len(closed_signals)} closed signal(s); "
+                "need >= 50 — will auto-train after live trading generates history)"
+            )
+            logger.info("Pipeline %s: meta-classifier %s", job_id, meta_status)
+
+    except Exception as mc_exc:
+        meta_status = f"failed ({mc_exc})"
+        logger.warning(
+            "Pipeline %s: meta-classifier training failed (non-fatal): %s",
+            job_id, mc_exc, exc_info=True,
+        )
+
+    await _update_stage(
+        job_id, 6, status="completed", progress=100,
+        message=(
+            f"All models ready for live trading. "
+            f"Signals: {signal_count}. MH-LSTM: {mh_status}. Meta-classifier: {meta_status}."
+        ),
+    )
+

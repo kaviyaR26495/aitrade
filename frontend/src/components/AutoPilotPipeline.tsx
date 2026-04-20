@@ -17,11 +17,11 @@ import { useState, useCallback, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Rocket, CheckCircle2, Loader2, AlertCircle,
-  ChevronRight, X, ExternalLink, RefreshCw, Layers, StopCircle, Trash2,
+  ChevronRight, X, ExternalLink, RefreshCw, Layers, StopCircle, Trash2, RotateCcw
 } from 'lucide-react';
 import { useAppStore } from '../store/appStore';
 import { useStartPipeline, usePipelineStatus, useUniverse, useTerminatePipeline } from '../hooks/useApi';
-import { listUniverseStocks } from '../services/api';
+import { listUniverseStocks, getLatestPipelineJob } from '../services/api';
 import type { PipelineStatus, PipelineStageStatus } from '../services/api';
 import { Button } from './ui';
 
@@ -49,9 +49,9 @@ const STAGE_DEFS: { name: string; label: string; description: string }[] = [
     description: 'Explore and refine the policy in simulated markets with attention-based feature extraction.',
   },
   {
-    name: 'meta_model_train',
-    label: 'Meta-Classifier Training (XGBoost)',
-    description: 'Train the Probability of Profit (PoP) Meta-Gate using the synthesized regression distributions of the LSTM and KNN models.',
+    name: 'ensemble_distill',
+    label: 'Ensemble Distillation (KNN + LSTM)',
+    description: 'Distil the RL policy into a KNN pattern-matcher and an LSTM return-distribution model.',
   },
   {
     name: 'backtest',
@@ -60,8 +60,8 @@ const STAGE_DEFS: { name: string; label: string; description: string }[] = [
   },
   {
     name: 'ready',
-    label: 'Ready for Live Trading',
-    description: 'All models validated. The ensemble is deployed and awaiting execution signals.',
+    label: 'Deploy & Live Signals',
+    description: 'Run the first prediction pass to populate Live Trading signals and train the XGBoost meta-classifier (PoP gate) from historical outcomes.',
   },
 ];
 
@@ -266,6 +266,8 @@ export default function AutoPilotPipeline() {
   
   // Pipeline configuration options
   const [shouldSync, setShouldSync] = useState(true);
+  const [forceSync, setForceSync] = useState(false);
+  const [resumeJobId, setResumeJobId] = useState<string | null>(null);
 
   const startMutation = useStartPipeline();
   const terminateMutation = useTerminatePipeline();
@@ -273,6 +275,23 @@ export default function AutoPilotPipeline() {
   const { data: universe, isLoading: universeLoading } = useUniverse();
 
   // Sync pipelineUniverse from backend if it's currently empty
+  // Auto-restore: if localStorage was cleared (e.g. old Resume button) but a
+  // recent failed/running job exists in the DB, re-populate the active job ID
+  // so the user sees the Resume button instead of a blank start panel.
+  useEffect(() => {
+    if (jobId) return; // Already tracking a job — nothing to restore
+    getLatestPipelineJob()
+      .then((res) => {
+        const latest = res.data;
+        // Only restore active/terminal jobs — not ones completed long ago
+        if (latest?.status && latest.status !== 'purged') {
+          setJobId(latest.job_id);
+        }
+      })
+      .catch(() => { /* no prior jobs — stay on start panel */ });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // run once on mount
+
   useEffect(() => {
     if (pipelineUniverse.length === 0 && universe) {
       // Fetch the full resolved list of symbols from the backend
@@ -319,11 +338,14 @@ export default function AutoPilotPipeline() {
       { 
         symbols: pipelineUniverse,
         skip_sync: !shouldSync,
-        use_regime_pooling: true // Always use pooling for better generalization
+        force_sync: forceSync,
+        use_regime_pooling: true, // Always use pooling for better generalization
+        resume_job_id: resumeJobId || undefined
       },
       {
         onSuccess: (data) => {
           setJobId(data.job_id);
+          setResumeJobId(null);
         },
         onError: (err: any) => {
           const msg =
@@ -334,7 +356,7 @@ export default function AutoPilotPipeline() {
         },
       },
     );
-  }, [pipelineUniverse, startMutation, addNotification]);
+  }, [pipelineUniverse, startMutation, addNotification, shouldSync, forceSync, resumeJobId]);
 
   const handleReset = useCallback(() => {
     setJobId(null);
@@ -387,6 +409,7 @@ export default function AutoPilotPipeline() {
 
   // Stop polling once cancelled
   const isTerminal = isComplete || isFailed || isCancelled;
+  const failedStageIndex = isFailed ? statusData?.stages?.findIndex((s: any) => s.status === 'failed') ?? -1 : -1;
 
   // Build stage rows — merge backend data with local defs
   const stageRows = STAGE_DEFS.map((def, i) => {
@@ -490,10 +513,25 @@ export default function AutoPilotPipeline() {
                 </p>
               </div>
             </label>
-            <div className="hidden sm:block h-8 w-px bg-indigo-500/10" />
-            <div className="flex-1 text-[10px] text-indigo-400/60 italic leading-tight">
-              Regime Pooling is enabled by default to optimize model generalization across the universe.
-            </div>
+            <label className="flex items-start gap-3 cursor-pointer group">
+              <div className="pt-0.5">
+                <input
+                  type="checkbox"
+                  checked={forceSync}
+                  disabled={!shouldSync}
+                  onChange={(e) => setForceSync(e.target.checked)}
+                  className="w-4 h-4 rounded border-[var(--border)] bg-[var(--bg-card)] text-indigo-600 focus:ring-indigo-500 focus:ring-offset-0 disabled:opacity-50"
+                />
+              </div>
+              <div className="flex-1">
+                <span className={`text-xs font-semibold ${!shouldSync ? 'text-gray-500' : 'text-[var(--text)] group-hover:text-indigo-400'} transition-colors`}>
+                  Force Full History Resync
+                </span>
+                <p className="text-[10px] text-[var(--text-dim)] leading-tight mt-0.5">
+                  Overwrites all data starting from the last 8 years. Otherwise, data sync is incremental (only fetches since last logged trade day).
+                </p>
+              </div>
+            </label>
           </div>
         </div>
       )}
@@ -531,47 +569,48 @@ export default function AutoPilotPipeline() {
           )}
         </div>
       ) : (
-        <div className="flex items-center justify-between gap-3">
-          <div className="flex items-center gap-2">
-            {isComplete ? (
-              <CheckCircle2 size={16} className="text-emerald-400" />
-            ) : isFailed ? (
-              <AlertCircle size={16} className="text-rose-400" />
-            ) : isCancelled ? (
-              <StopCircle size={16} className="text-amber-400" />
-            ) : (
-              <Loader2 size={16} className="animate-spin text-indigo-400" />
-            )}
-            <span className={`text-sm font-semibold ${isComplete ? 'text-emerald-400' : isFailed ? 'text-rose-400' : isCancelled ? 'text-amber-400' : 'text-[var(--text)]'}`}>
-              {isComplete ? 'Pipeline complete!' : isFailed ? 'Pipeline failed' : isCancelled ? 'Pipeline terminated' : isQueued ? 'Queued…' : 'Pipeline running…'}
-            </span>
-            <span className="text-xs text-[var(--text-dim)] font-mono">{jobId}</span>
-          </div>
+        <div className="flex flex-col gap-4">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              {isComplete ? (
+                <CheckCircle2 size={16} className="text-emerald-400" />
+              ) : isFailed ? (
+                <AlertCircle size={16} className="text-rose-400" />
+              ) : isCancelled ? (
+                <StopCircle size={16} className="text-amber-400" />
+              ) : (
+                <Loader2 size={16} className="animate-spin text-indigo-400" />
+              )}
+              <span className={`text-sm font-semibold ${isComplete ? 'text-emerald-400' : isFailed ? 'text-rose-400' : isCancelled ? 'text-amber-400' : 'text-[var(--text)]'}`}>
+                {isComplete ? 'Pipeline complete!' : isFailed ? `Pipeline failed at Step ${failedStageIndex + 1}` : isCancelled ? 'Pipeline terminated' : isQueued ? 'Queued…' : 'Pipeline running…'}
+              </span>
+              <span className="text-xs text-[var(--text-dim)] font-mono">{jobId}</span>
+            </div>
 
-          <div className="flex items-center gap-2">
-            {isTerminal && (
-              <button
-                type="button"
-                onClick={handleReset}
-                className="flex items-center gap-1.5 text-xs text-[var(--text-muted)] hover:text-[var(--text)] transition-colors"
-              >
-                <RefreshCw size={11} />
-                Run again
-              </button>
-            )}
-            {/* Terminate button — stop a running pipeline */}
-            {(isRunning || isQueued) && confirmAction !== 'terminate' && confirmAction !== 'purge' && (
-              <button
-                type="button"
-                onClick={() => setConfirmAction('terminate')}
-                className="flex items-center gap-1.5 text-xs text-amber-400 hover:text-amber-300 transition-colors"
-              >
-                <StopCircle size={12} />
-                Terminate
-              </button>
-            )}
-            {/* Delete All Data button — purge everything */}
-            {(isTerminal || isRunning || isQueued) && confirmAction !== 'purge' && confirmAction !== 'terminate' && (
+            <div className="flex items-center gap-2">
+              {isTerminal && !isFailed && (
+                <button
+                  type="button"
+                  onClick={handleReset}
+                  className="flex items-center gap-1.5 text-xs text-[var(--text-muted)] hover:text-[var(--text)] transition-colors"
+                >
+                  <RefreshCw size={11} />
+                  Run again
+                </button>
+              )}
+              {/* Terminate button — stop a running pipeline */}
+              {(isRunning || isQueued) && confirmAction !== 'terminate' && confirmAction !== 'purge' && (
+                <button
+                  type="button"
+                  onClick={() => setConfirmAction('terminate')}
+                  className="flex items-center gap-1.5 text-xs text-amber-400 hover:text-amber-300 transition-colors"
+                >
+                  <StopCircle size={12} />
+                  Terminate
+                </button>
+              )}
+              {/* Delete All Data button — purge everything */}
+              {(isTerminal || isRunning || isQueued) && confirmAction !== 'purge' && confirmAction !== 'terminate' && (
               <button
                 type="button"
                 onClick={() => setConfirmAction('purge')}
@@ -582,6 +621,45 @@ export default function AutoPilotPipeline() {
               </button>
             )}
           </div>
+          </div>
+          
+          {isFailed && (
+            <div className="flex flex-col sm:flex-row gap-3">
+              <Button size="md" variant="primary" className="flex-1 bg-indigo-500 hover:bg-indigo-400 text-white" disabled={startMutation.isPending} loading={startMutation.isPending} onClick={() => {
+                const prevJobId = jobId!;
+                setStartError(null);
+                startMutation.mutate(
+                  {
+                    // Use the failed job's own symbols — not the current UI universe.
+                    // The symbol-set guard will reject the resume if they differ.
+                    symbols: statusData?.symbols ?? pipelineUniverse,
+                    skip_sync: true,
+                    force_sync: false,
+                    use_regime_pooling: true,
+                    resume_job_id: prevJobId,
+                  },
+                  {
+                    onSuccess: (data) => {
+                      setJobId(data.job_id);
+                      setResumeJobId(null);
+                    },
+                    onError: (err: any) => {
+                      const msg = err?.response?.data?.detail ?? 'Failed to resume pipeline.';
+                      setStartError(msg);
+                      addNotification({ type: 'error', message: msg });
+                    },
+                  },
+                );
+              }}>
+                <RotateCcw size={16} className="mr-2" />
+                Resume from Step {failedStageIndex + 1}
+              </Button>
+              <Button size="md" variant="danger" className="flex-1" disabled={terminateMutation.isPending} onClick={() => setConfirmAction('purge')}>
+                <Trash2 size={16} className="mr-2" />
+                Discard & Restart
+              </Button>
+            </div>
+          )}
         </div>
       )}
 

@@ -1678,5 +1678,27 @@ async def import_model_bundle(
     return result
 
 
+@router.get("/mh-lstm/status")
+async def get_mh_lstm_status(db: AsyncSession = Depends(get_db)):
+    from app.db.models import LSTMHorizonModel
+    from sqlalchemy import select, desc
+    res = await db.execute(
+        select(LSTMHorizonModel)
+        .where(LSTMHorizonModel.status == "completed")
+        .order_by(desc(LSTMHorizonModel.created_at))
+        .limit(1)
+    )
+    model = res.scalar_one_or_none()
+    if model:
+        return {
+            "status": "trained",
+            "model_id": model.id,
+            "accuracy": model.accuracy,
+            "name": model.name,
+            "created_at": model.created_at
+        }
+    return {"status": "not_trained"}
+
+
 # Export endpoint needs UploadFile imported at route parse time
 from fastapi import UploadFile  # noqa: E402  (kept at bottom to avoid circular at module load)

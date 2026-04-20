@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import * as api from '../services/api';
 import type { PipelineRequest, PipelineStatus } from '../services/api';
@@ -415,13 +415,14 @@ export const useDeleteBacktestBatch = () => {
 };
 
 // ── Trading hooks ──
-export const usePredictionJob = (jobId: string | null) =>
-  useQuery({
+export const usePredictionJob = (jobId: string | null) => {
+  const qc = useQueryClient();
+  const query = useQuery({
     queryKey: ['prediction-job', jobId],
     queryFn: () => api.getPredictionJob(jobId!).then(r => r.data),
     enabled: !!jobId,
-    refetchInterval: (query) => {
-      const data = query.state.data;
+    refetchInterval: (q) => {
+      const data = q.state.data;
       if (!data) return 2000;
       if (data.status === 'completed' || data.status === 'cancelled' || data.status === 'failed') {
         return false;
@@ -429,6 +430,15 @@ export const usePredictionJob = (jobId: string | null) =>
       return 2000;
     },
   });
+
+  useEffect(() => {
+    if (query.data?.status === 'completed') {
+      qc.invalidateQueries({ queryKey: ['signals'] });
+    }
+  }, [query.data?.status, qc]);
+
+  return query;
+};
 
 export const useCancelPredictionJob = () => {
   const qc = useQueryClient();
@@ -458,6 +468,59 @@ export const useGenerateSignals = () => {
       qc.invalidateQueries({ queryKey: ['signals'] });
     },
   });
+};
+
+export const useTrainMhLstm = () => {
+  const [taskId, setTaskId] = useState<string | null>(null);
+  const [trainingState, setTrainingState] = useState<'idle' | 'queued' | 'running' | 'success' | 'failure'>('idle');
+
+  // Check if a completed model already exists in the database
+  const { data: statusData } = useQuery({
+    queryKey: ['mh-lstm-status'],
+    queryFn: () => api.getMhLstmStatus().then(r => r.data),
+    staleTime: 60_000,
+  });
+
+  useEffect(() => {
+    // Only promote to success if we are currently idle, we don't want to override active training UI
+    if (statusData?.status === 'trained' && trainingState === 'idle') {
+      setTrainingState('success');
+    }
+  }, [statusData, trainingState]);
+
+  const pollTaskStatus = useCallback(async (id: string) => {
+    const poll = async () => {
+      try {
+        const res = await api.getTaskStatus(id);
+        const state = res.data.state;
+        if (state === 'SUCCESS') {
+          setTrainingState('success');
+          setTaskId(null);
+        } else if (state === 'FAILURE') {
+          setTrainingState('failure');
+          setTaskId(null);
+        } else {
+          setTrainingState('running');
+          setTimeout(poll, 3000);
+        }
+      } catch {
+        setTimeout(poll, 5000);
+      }
+    };
+    poll();
+  }, []);
+
+  const mutation = useMutation({
+    mutationFn: () => api.trainMhLstm().then(r => r.data),
+    onSuccess: (data: { task_id: string; status: string }) => {
+      setTaskId(data.task_id);
+      setTrainingState('queued');
+      pollTaskStatus(data.task_id);
+    },
+    onError: () => setTrainingState('failure'),
+  });
+
+  return { ...mutation, trainingState, taskId };
 };
 
 export const useExecuteSignal = () => {
@@ -572,6 +635,11 @@ export const useTerminatePipeline = () => {
       api.terminatePipeline(jobId, purge).then(r => r.data),
     onSuccess: (_data, { jobId }) => {
       qc.invalidateQueries({ queryKey: ['pipeline-status', jobId] });
+      qc.invalidateQueries({ queryKey: ['rl-models'] });
+      qc.invalidateQueries({ queryKey: ['knn-models'] });
+      qc.invalidateQueries({ queryKey: ['lstm-models'] });
+      qc.invalidateQueries({ queryKey: ['ensemble-configs'] });
+      qc.invalidateQueries({ queryKey: ['backtests'] });
     },
   });
 };

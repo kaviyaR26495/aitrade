@@ -20,6 +20,7 @@ import os
 
 from celery import Celery
 from celery.schedules import crontab
+from celery.signals import worker_process_init
 from kombu import Queue
 
 # Allow overriding via environment variable (useful in Docker)
@@ -99,3 +100,42 @@ celery_app.conf.update(
     },
     timezone="UTC",
 )
+
+
+@worker_process_init.connect
+def _dispose_engine_on_fork(**kwargs):
+    """Replace the inherited SQLAlchemy async engine with a NullPool one after fork.
+
+    Celery uses prefork workers. The child inherits the parent's connection pool
+    whose internal futures are tied to the parent's event loop. Using NullPool
+    means each asyncio.run() call gets a fresh connection that is closed
+    immediately after use — no pool state to conflict across event loop
+    boundaries. This prevents 'Future attached to a different loop' errors.
+    """
+    import os
+    import asyncio
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+    from sqlalchemy.pool import NullPool
+    import app.db.database as _db_module
+
+    # Dispose old pooled connections from parent process
+    try:
+        loop = asyncio.new_event_loop()
+        loop.run_until_complete(_db_module.engine.dispose())
+        loop.close()
+    except Exception:
+        pass
+
+    # Replace engine + session factory with NullPool variants safe for forked workers
+    from app.config import settings
+    new_engine = create_async_engine(
+        settings.DATABASE_URL,
+        echo=False,
+        poolclass=NullPool,
+    )
+    _db_module.engine = new_engine
+    _db_module.async_session_factory = async_sessionmaker(
+        new_engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+    )

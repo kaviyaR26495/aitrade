@@ -35,9 +35,9 @@ logger = logging.getLogger(__name__)
 class SynthesizerConfig:
     """Tunable parameters for the signal synthesiser."""
     # Minimum predicted return to consider a BUY (after cost deduction)
-    min_net_return_pct: float = 0.02      # 2%
+    min_net_return_pct: float = 0.005     # 0.5%
     # Minimum R:R ratio (reward / risk)
-    min_rr_ratio: float = 2.0
+    min_rr_ratio: float = 1.2
     # κ-decay rate: R:R degrades by this factor per day
     kappa: float = 0.03
     # Maximum days before signal expires
