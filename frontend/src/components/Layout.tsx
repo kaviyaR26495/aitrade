@@ -15,10 +15,17 @@ const NOTIFICATION_STYLES = {
 };
 
 export default function Layout() {
-  const { notifications, removeNotification, retrainAlert, retrainDaysSince, retrainHasModels, setRetrainAlert, addNotification } = useAppStore();
+  const { notifications, removeNotification, retrainAlert, retrainDaysSince, retrainHasModels, setRetrainAlert, addNotification, checkRetrainStatus } = useAppStore();
   const location = useLocation();
   const mainRef = useRef<HTMLElement>(null);
   const [retrainLoading, setRetrainLoading] = useState(false);
+
+  // Re-check retrain status on mount so that models trained after the initial
+  // app load are detected and the banner is dismissed automatically.
+  useEffect(() => {
+    checkRetrainStatus();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Scroll to top on route change
   useEffect(() => {

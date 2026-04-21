@@ -1,9 +1,10 @@
 import { useMemo, useState, useRef, useEffect } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { Card, Button, Badge, StatCard, EmptyState, PageHeader, Table, Modal, Tooltip, SkeletonTable, type TableColumn } from '../components/ui';
-import { useSignals, useGenerateSignals, useTrainMhLstm, useExecuteSignal, useOrders, useUniverseStocks, usePredictionJob, useCancelPredictionJob, useSignalPreview } from '../hooks/useApi';
+import { useSignals, useGenerateSignals, useTrainMhLstm, useExecuteSignal, useOrders, useUniverseStocks, usePredictionJob, useCancelPredictionJob, useSignalPreview, useOhlcv, useIndicators } from '../hooks/useApi';
 import { useAppStore } from '../store/appStore';
-import { Crosshair, Play, Shield, XCircle, Loader2, Filter, Zap, ToggleLeft, ToggleRight, BrainCircuit } from 'lucide-react';
+import { Crosshair, Play, Shield, ShieldAlert, XCircle, Loader2, Filter, Zap, ToggleLeft, ToggleRight, BrainCircuit, CalendarDays, X, BarChart2 } from 'lucide-react';
+import LightweightCandleChart, { type IndicatorSeries, type PriceLevel } from '../components/LightweightCandleChart';
 
 type StatusFilter = 'ALL' | 'pending' | 'active' | 'target_hit' | 'sl_hit' | 'expired';
 
@@ -18,17 +19,25 @@ const STATUS_COLORS: Record<string, 'green' | 'blue' | 'yellow' | 'red' | 'gray'
 export default function LiveTrading() {
   const { addNotification } = useAppStore();
   const [interval] = useState('day');
-  const [targetDate, setTargetDate] = useState<string>(new Date().toISOString().split('T')[0]);
+  // Date range filter — both start as empty so all recent signals load on mount.
+  const [dateFrom, setDateFrom] = useState<string>('');
+  const [dateTo, setDateTo] = useState<string>('');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('ALL');
-  const [minPop, setMinPop] = useState('55');
+  const [minPop, setMinPop] = useState('0');
   const [symbolQuery, setSymbolQuery] = useState('');
+  // Separate date for signal generation (independent of the view date-range filter)
+  const [generateDate, setGenerateDate] = useState<string>(new Date().toISOString().split('T')[0]);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  // Chart pattern modal
+  const [selectedSignal, setSelectedSignal] = useState<any>(null);
   const qc = useQueryClient();
 
   // Signal generation job tracking
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const { data: job } = usePredictionJob(activeJobId);
   const cancelJob = useCancelPredictionJob();
+  // Remember the date passed to the generation job so we can snap the filter to it on completion.
+  const pendingGenerateDateRef = useRef<string | null>(null);
 
   // Stock filter for targeted generation
   const { data: universeStocks } = useUniverseStocks();
@@ -45,6 +54,9 @@ export default function LiveTrading() {
   useEffect(() => {
     if (job?.status === 'completed' || job?.status === 'failed' || job?.status === 'cancelled') {
       if (job.status === 'completed') {
+        pendingGenerateDateRef.current = null;
+        setDateFrom('');
+        setDateTo('');
         qc.invalidateQueries({ queryKey: ['signals'] });
         addNotification({ type: 'success', message: 'Signal generation completed' });
       } else if (job.status === 'cancelled') {
@@ -57,14 +69,16 @@ export default function LiveTrading() {
     }
   }, [job, addNotification, qc]);
 
-  // Fetch signals
+  // Fetch signals — min_pop is applied client-side so changing it never
+  // triggers a new network request and never hides data that was already fetched.
   const signalParams = useMemo(() => ({
-    target_date: targetDate,
+    date_from: dateFrom || undefined,
+    date_to: dateTo || undefined,
     status: statusFilter === 'ALL' ? undefined : statusFilter,
-    min_pop: Number(minPop) > 0 ? Number(minPop) / 100 : undefined,
-  }), [targetDate, statusFilter, minPop]);
+  }), [dateFrom, dateTo, statusFilter]);
 
   const { data: signals, isLoading } = useSignals(signalParams);
+
   const { data: orders } = useOrders(20);
   const generateSignals = useGenerateSignals();
   const trainMhLstm = useTrainMhLstm();
@@ -84,13 +98,15 @@ export default function LiveTrading() {
     }
   }, [trainMhLstm.trainingState, addNotification]);
 
-  // Filtered signals (symbol search is client-side)
+  // Filtered signals — symbol search and min_pop are applied client-side.
   const filteredSignals = useMemo(() => {
-    const all = signals ?? [];
+    let all = signals ?? [];
     const q = symbolQuery.trim().toLowerCase();
-    if (!q) return all;
-    return all.filter((s: any) => String(s.symbol ?? '').toLowerCase().includes(q));
-  }, [signals, symbolQuery]);
+    if (q) all = all.filter((s: any) => String(s.symbol ?? '').toLowerCase().includes(q));
+    const popThreshold = Number(minPop) / 100;
+    if (popThreshold > 0) all = all.filter((s: any) => (s.pop_score ?? 0) >= popThreshold);
+    return all;
+  }, [signals, symbolQuery, minPop]);
 
   // Stat aggregations
   const activeCount = filteredSignals.filter((s: any) => s.status === 'active').length;
@@ -104,9 +120,21 @@ export default function LiveTrading() {
 
   const signalColumns: TableColumn<any>[] = [
     {
+      key: 'direction',
+      label: 'Dir',
+      tooltip: 'Signal direction: LONG (target > entry) or SHORT (target < entry)',
+      align: 'center',
+      render: (s) => {
+        const isShort = s.target_price < s.entry_price;
+        return (
+          <Badge color={isShort ? 'red' : 'green'}>{isShort ? 'SHORT' : 'LONG'}</Badge>
+        );
+      },
+    },
+    {
       key: 'symbol',
       label: 'Symbol',
-      tooltip: 'Stock ticker symbol',
+      tooltip: 'Stock ticker symbol — click row to view chart',
       render: (s) => <span className="font-medium">{s.symbol}</span>,
     },
     {
@@ -237,8 +265,9 @@ export default function LiveTrading() {
     const stockIds = selectedStockIds.size > 0
       ? Array.from(selectedStockIds)
       : undefined;
+    pendingGenerateDateRef.current = generateDate;  // capture before async mutation
     generateSignals.mutate(
-      { interval, stock_ids: stockIds, target_date: targetDate, pop_threshold: Number(minPop) / 100 || 0.55 },
+      { interval, stock_ids: stockIds, target_date: generateDate, pop_threshold: Number(minPop) / 100 || 0.55 },
       {
         onSuccess: (res: any) => {
           setActiveJobId(res.job_id);
@@ -272,16 +301,53 @@ export default function LiveTrading() {
   return (
     <div className="space-y-8">
       <PageHeader title="Live Trading" description="Generate TPML signals and execute trades">
-        <div className="flex gap-2 items-center">
-          <div className="flex items-center gap-2 px-3 py-1.5 bg-[var(--bg-input)] border border-[var(--border)] rounded-[var(--radius-sm)] shadow-sm">
-            <span className="text-[10px] font-bold text-[var(--text-dim)] uppercase tracking-wider">Date</span>
+        <div className="flex gap-2 items-center flex-wrap">
+          {/* ── Date range ─────────────────────────────────── */}
+          <div className="flex items-center gap-1.5 px-3 py-1.5 bg-[var(--bg-input)] border border-[var(--border)] rounded-[var(--radius-sm)] shadow-sm">
+            <CalendarDays size={13} className="text-[var(--text-dim)] shrink-0" />
             <input
               type="date"
-              value={targetDate}
-              onChange={(e) => setTargetDate(e.target.value)}
+              title="From date"
+              value={dateFrom}
+              max={dateTo || undefined}
+              onChange={(e) => setDateFrom(e.target.value)}
               className="bg-transparent border-none p-0 text-xs font-medium focus:ring-0 cursor-pointer w-[110px]"
             />
+            <span className="text-[var(--text-dim)] text-xs select-none">→</span>
+            <input
+              type="date"
+              title="To date"
+              value={dateTo}
+              min={dateFrom || undefined}
+              onChange={(e) => setDateTo(e.target.value)}
+              className="bg-transparent border-none p-0 text-xs font-medium focus:ring-0 cursor-pointer w-[110px]"
+            />
+            {(dateFrom || dateTo) && (
+              <button
+                type="button"
+                title="Clear date filter"
+                onClick={() => { setDateFrom(''); setDateTo(''); }}
+                className="ml-1 text-[var(--text-dim)] hover:text-[var(--text)] transition-colors"
+              >
+                <X size={12} />
+              </button>
+            )}
           </div>
+
+          {/* ── Latest quick-select ───────────────────────── */}
+          <Tooltip content="Jump to the most recent signal date" side="bottom">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => {
+                setDateFrom('');
+                setDateTo('');
+              }}
+              className="h-9 gap-1.5 border border-[var(--border)] bg-[var(--bg-input)] hover:bg-[var(--bg-hover)] text-xs text-[var(--text-dim)]"
+            >
+              Latest
+            </Button>
+          </Tooltip>
 
           {activeJobId && (
             <div className="flex items-center gap-3 px-3 py-1.5 bg-[var(--bg-input)] border border-[var(--primary-dim)] rounded-[var(--radius-sm)] shadow-sm animate-in fade-in slide-in-from-right-4">
@@ -359,6 +425,17 @@ export default function LiveTrading() {
               {trainMhLstm.trainingState === 'idle' && 'Train Model'}
             </Button>
           </Tooltip>
+
+          {/* ── Generate-for date ──────────────────────── */}
+          <div className="flex items-center gap-1.5 px-3 py-1.5 bg-[var(--bg-input)] border border-[var(--primary-dim)] rounded-[var(--radius-sm)] shadow-sm" title="Date to generate signals for">
+            <Play size={11} className="text-[var(--primary)] shrink-0" />
+            <input
+              type="date"
+              value={generateDate}
+              onChange={(e) => setGenerateDate(e.target.value)}
+              className="bg-transparent border-none p-0 text-xs font-medium focus:ring-0 cursor-pointer w-[110px] text-[var(--text)]"
+            />
+          </div>
 
           <Button
             variant="primary"
@@ -440,6 +517,7 @@ export default function LiveTrading() {
           <Table<any>
             columns={signalColumns}
             data={filteredSignals}
+            onRowClick={(s) => setSelectedSignal(s)}
             emptyState={
               <EmptyState
                 icon={<Crosshair size={32} />}
@@ -569,6 +647,11 @@ export default function LiveTrading() {
         </Modal>
       )}
 
+      {/* Pattern Chart Modal */}
+      {selectedSignal && (
+        <SignalPatternModal signal={selectedSignal} onClose={() => setSelectedSignal(null)} />
+      )}
+
       {/* Stock Selector Modal */}
       <Modal
         open={showStockSelector}
@@ -638,5 +721,118 @@ export default function LiveTrading() {
         </div>
       </Modal>
     </div>
+  );
+}
+
+// ─── Pattern Chart Modal ──────────────────────────────────────────────────────
+function SignalPatternModal({ signal, onClose }: { signal: any; onClose: () => void }) {
+  const predictionDate = signal.signal_date as string;
+  const startDt = new Date(predictionDate + 'T00:00:00');
+  startDt.setDate(startDt.getDate() - 90);
+  const startDate = startDt.toISOString().split('T')[0];
+  const endDate = new Date().toISOString().split('T')[0];
+
+  const { data: ohlcv, isLoading: loadingOhlcv } = useOhlcv(signal.stock_id, 'day', startDate, endDate);
+  const { data: indicators, isLoading: loadingInd } = useIndicators(signal.stock_id, 'day', startDate, endDate);
+
+  const chartIndicators: IndicatorSeries[] = useMemo(() => {
+    const res: IndicatorSeries[] = [];
+    if (indicators) {
+      const sma50 = indicators.map((d: any) => ({ time: d.date, value: d.sma_50 })).filter((d: any) => d.value != null);
+      const sma200 = indicators.map((d: any) => ({ time: d.date, value: d.sma_200 })).filter((d: any) => d.value != null);
+      if (sma50.length)  res.push({ name: 'SMA 50',  color: '#3b82f6', data: sma50 });
+      if (sma200.length) res.push({ name: 'SMA 200', color: '#eab308', data: sma200 });
+    }
+    return res;
+  }, [indicators]);
+
+  const chartOhlcv = useMemo(() => (ohlcv ?? []).map((d: any) => ({
+    time: d.date, open: d.open, high: d.high, low: d.low, close: d.close,
+  })), [ohlcv]);
+
+  const priceLevels = useMemo(() => [
+    ...(signal.entry_price ? [{ price: signal.entry_price, color: '#94a3b8', title: 'Entry', lineStyle: 1 }] : []),
+    ...(signal.target_price ? [{ price: signal.target_price, color: '#10b981', title: 'Target', lineStyle: 2 }] : []),
+    ...((signal.current_stoploss ?? signal.stoploss_price) ? [{ price: (signal.current_stoploss ?? signal.stoploss_price) as number, color: '#ef4444', title: 'Stop-Loss', lineStyle: 2 }] : []),
+  ] as PriceLevel[], [signal.entry_price, signal.target_price, signal.current_stoploss, signal.stoploss_price]);
+
+  const isShort = signal.target_price < signal.entry_price;
+
+  return (
+    <Modal open onClose={onClose} title={`${signal.symbol} — Pattern Analysis`} size="2xl">
+      <div className="space-y-5">
+        {/* Signal summary row */}
+        <div className="flex flex-wrap items-center gap-6">
+          <div>
+            <div className="text-[10px] text-[var(--text-dim)] uppercase tracking-wider font-bold">Signal Date</div>
+            <div className="text-lg font-mono font-bold">{signal.signal_date}</div>
+          </div>
+          <div>
+            <div className="text-[10px] text-[var(--text-dim)] uppercase tracking-wider font-bold">Direction</div>
+            <Badge color={isShort ? 'red' : 'green'} >{isShort ? 'SHORT' : 'LONG'}</Badge>
+          </div>
+          <div>
+            <div className="text-[10px] text-[var(--text-dim)] uppercase tracking-wider font-bold">Entry</div>
+            <div className="font-mono font-bold">{signal.entry_price?.toFixed(2)}</div>
+          </div>
+          <div>
+            <div className="text-[10px] text-emerald-400 uppercase tracking-wider font-bold">Target</div>
+            <div className="font-mono font-bold text-emerald-400">{signal.target_price?.toFixed(2)}</div>
+          </div>
+          <div>
+            <div className="text-[10px] text-red-400 uppercase tracking-wider font-bold">Stop-Loss</div>
+            <div className="font-mono font-bold text-red-400">{(signal.current_stoploss ?? signal.stoploss_price)?.toFixed(2)}</div>
+          </div>
+          <div>
+            <div className="text-[10px] text-[var(--text-dim)] uppercase tracking-wider font-bold">R:R</div>
+            <div className="font-mono font-bold">{(signal.current_rr_ratio ?? signal.initial_rr_ratio)?.toFixed(1)}</div>
+          </div>
+          <div>
+            <div className="text-[10px] text-[var(--text-dim)] uppercase tracking-wider font-bold">PoP</div>
+            <div className="font-mono font-bold text-[var(--primary)]">{((signal.pop_score ?? 0) * 100).toFixed(0)}%</div>
+          </div>
+        </div>
+
+        {/* Chart */}
+        <div className="relative bg-[#0b0b14] rounded-2xl border border-[var(--border)] overflow-hidden" style={{ minHeight: 480 }}>
+          {loadingOhlcv || loadingInd ? (
+            <div className="absolute inset-0 flex flex-col items-center justify-center gap-3">
+              <div className="w-8 h-8 border-2 border-[var(--primary)] border-t-transparent rounded-full animate-spin" />
+              <span className="text-xs text-[var(--text-dim)] animate-pulse">Loading price data…</span>
+            </div>
+          ) : chartOhlcv.length > 0 ? (
+            <LightweightCandleChart
+              ohlcv={chartOhlcv}
+              indicators={chartIndicators}
+              height={480}
+              verticalLineDate={predictionDate}
+              priceLevels={priceLevels}
+            />
+          ) : (
+            <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-[var(--text-dim)]">
+              <ShieldAlert size={32} strokeWidth={1} />
+              <span className="text-xs">No OHLCV data found for this instrument.</span>
+            </div>
+          )}
+        </div>
+
+        {/* LSTM details */}
+        {(signal.lstm_mu != null || signal.knn_win_rate != null) && (
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+            {[
+              { label: 'LSTM μ return', value: signal.lstm_mu != null ? `${(signal.lstm_mu * 100).toFixed(2)}%` : '—' },
+              { label: 'LSTM σ', value: signal.lstm_sigma != null ? `${(signal.lstm_sigma * 100).toFixed(2)}%` : '—' },
+              { label: 'KNN median rtn', value: signal.knn_median_return != null ? `${(signal.knn_median_return * 100).toFixed(2)}%` : '—' },
+              { label: 'KNN win rate', value: signal.knn_win_rate != null ? `${(signal.knn_win_rate * 100).toFixed(0)}%` : '—' },
+            ].map(({ label, value }) => (
+              <div key={label} className="p-3 rounded-lg bg-[var(--bg-input)] border border-[var(--border)]">
+                <div className="text-[10px] text-[var(--text-dim)] uppercase font-bold">{label}</div>
+                <div className="font-mono font-bold mt-1">{value}</div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </Modal>
   );
 }

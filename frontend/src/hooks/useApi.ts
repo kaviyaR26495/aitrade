@@ -1,3 +1,4 @@
+import { useAppStore } from "../store/appStore";
 import { useEffect, useState, useCallback } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import * as api from '../services/api';
@@ -453,7 +454,7 @@ export const useCancelPredictionJob = () => {
 export const useOrders = (limit = 50) =>
   useQuery({ queryKey: ['orders', limit], queryFn: () => api.listOrders(limit).then(r => r.data) });
 
-export const useSignals = (params?: { target_date?: string; status?: string; min_pop?: number }) =>
+export const useSignals = (params?: { target_date?: string; date_from?: string; date_to?: string; status?: string; min_pop?: number }) =>
   useQuery({
     queryKey: ['signals', params],
     queryFn: () => api.getSignals(params).then(r => r.data),
@@ -612,10 +613,17 @@ export const useStartPipeline = () => {
   });
 };
 
-export const usePipelineStatus = (jobId: string | null) =>
-  useQuery<PipelineStatus>({
+export const usePipelineStatus = (jobId: string | null) => {
+  const setActivePipelineJobId = useAppStore((s) => s.setActivePipelineJobId);
+  return useQuery<PipelineStatus>({
     queryKey: ['pipeline-status', jobId],
-    queryFn: () => api.getPipelineStatus(jobId!).then(r => r.data),
+    queryFn: () => api.getPipelineStatus(jobId!).then(r => r.data).catch(e => {
+        if (e.response?.status === 404 && jobId) {
+          console.warn("Pipeline job not found (404), auto-clearing local cache.");
+          setActivePipelineJobId(null);
+        }
+        throw e;
+    }),
     enabled: !!jobId,
     retry: 1,
     refetchInterval: (query) => {
@@ -627,6 +635,7 @@ export const usePipelineStatus = (jobId: string | null) =>
       return 2000;
     },
   });
+};
 
 export const useTerminatePipeline = () => {
   const qc = useQueryClient();

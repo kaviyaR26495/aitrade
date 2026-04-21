@@ -161,7 +161,7 @@ export const listOrders = (limit?: number) =>
   api.get('/trading/orders', { params: { limit } });
 
 // ── TPML Signals ──
-export const getSignals = (params?: { target_date?: string; status?: string; min_pop?: number }) =>
+export const getSignals = (params?: { target_date?: string; date_from?: string; date_to?: string; status?: string; min_pop?: number }) =>
   api.get('/trading/signals', { params });
 export const generateSignals = (params: { interval?: string; stock_ids?: number[]; target_date?: string; pop_threshold?: number }) =>
   api.post('/trading/signals/generate', params);
@@ -232,7 +232,7 @@ export interface PipelineStatus {
   job_id: string;
   symbols: string[];
   /** Overall pipeline status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' */
-  status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+  status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | 'purged';
   /** 0-indexed index of the currently active stage */
   current_stage: number;
   stages: PipelineStageStatus[];

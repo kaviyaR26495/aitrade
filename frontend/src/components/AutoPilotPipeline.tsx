@@ -259,6 +259,7 @@ export default function AutoPilotPipeline() {
     addNotification,
     activePipelineJobId: jobId,
     setActivePipelineJobId: setJobId,
+    checkRetrainStatus,
   } = useAppStore();
 
   const [startError, setStartError] = useState<string | null>(null);
@@ -410,6 +411,13 @@ export default function AutoPilotPipeline() {
   // Stop polling once cancelled
   const isTerminal = isComplete || isFailed || isCancelled;
   const failedStageIndex = isFailed ? statusData?.stages?.findIndex((s: any) => s.status === 'failed') ?? -1 : -1;
+
+  // When the pipeline completes, re-check retrain status so the stale-model
+  // banner is automatically dismissed without requiring a page reload.
+  useEffect(() => {
+    if (isComplete) checkRetrainStatus();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isComplete]);
 
   // Build stage rows — merge backend data with local defs
   const stageRows = STAGE_DEFS.map((def, i) => {

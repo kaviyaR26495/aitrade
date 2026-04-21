@@ -686,23 +686,35 @@ async def generate_signals(
 async def get_signals(
     db: AsyncSession = Depends(get_db),
     target_date: date | None = Query(None),
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
     status: str | None = Query(None),
     min_pop: float = Query(0.0),
 ):
-    """Get trade signals with optional filters."""
+    """Get trade signals with optional filters.
+
+    Supports both a single ``target_date`` (exact match) and a half-open
+    ``date_from`` / ``date_to`` range filter.  When neither is supplied all
+    recent signals are returned (newest first, up to 200).
+    """
     from sqlalchemy import select, desc
     from app.db.models import TradeSignal, Stock
 
-    q = select(TradeSignal).order_by(desc(TradeSignal.created_at))
+    q = select(TradeSignal).order_by(desc(TradeSignal.signal_date), desc(TradeSignal.created_at))
 
     if target_date:
         q = q.where(TradeSignal.signal_date == target_date)
+    else:
+        if date_from:
+            q = q.where(TradeSignal.signal_date >= date_from)
+        if date_to:
+            q = q.where(TradeSignal.signal_date <= date_to)
     if status:
         q = q.where(TradeSignal.status == status)
     if min_pop > 0:
         q = q.where(TradeSignal.pop_score >= min_pop)
 
-    result = await db.execute(q.limit(200))
+    result = await db.execute(q.limit(500))
     signals = result.scalars().all()
 
     # Bulk resolve stock symbols

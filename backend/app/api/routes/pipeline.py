@@ -1563,7 +1563,7 @@ async def _stage_deploy(job_id: str, rl_model_id: int, knn_model_id: int, lstm_m
                 interval="day",
                 job_id=job_id,
             )
-        signal_count = pred_result.get("signals", 0) if isinstance(pred_result, dict) else 0
+        signal_count = pred_result.get("predictions_made", 0) if isinstance(pred_result, dict) else 0
         logger.info(
             "Pipeline %s: predictions complete — %s signal(s) generated",
             job_id, signal_count,

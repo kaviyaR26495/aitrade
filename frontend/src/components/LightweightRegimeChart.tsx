@@ -119,7 +119,7 @@ export default function LightweightRegimeChart({ data, height = 340, className }
 
     // Markers plugin — created once per chart instance; .setMarkers() used for updates
     const markersPlugin = createSeriesMarkers(priceSeries, []);
-    markersPluginRef.current = markersPlugin;
+    markersPluginRef.current = markersPlugin as any;
 
     // ── Regime histogram — thin coloured band at the bottom ─────────
     const regimeSeries = chart.addSeries(HistogramSeries, {
@@ -131,7 +131,7 @@ export default function LightweightRegimeChart({ data, height = 340, className }
     });
     regimeSeriesRef.current = regimeSeries;
 
-    _applyData(priceSeries, regimeSeries, markersPlugin, data);
+    _applyData(priceSeries, regimeSeries, markersPlugin as any, data);
     chart.timeScale().fitContent();
     chartRef.current = chart;
 

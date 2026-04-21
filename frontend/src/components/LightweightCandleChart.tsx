@@ -33,6 +33,13 @@ export interface TradeMarker {
   reason?: string;
 }
 
+export interface PriceLevel {
+  price: number;
+  color: string;
+  title: string;
+  lineStyle?: number; // 0=solid,1=dotted,2=dashed,3=large_dashed
+}
+
 interface Props {
   ohlcv: OhlcvPoint[];
   indicators?: IndicatorSeries[];
@@ -40,6 +47,7 @@ interface Props {
   height?: number;
   className?: string;
   verticalLineDate?: string;
+  priceLevels?: PriceLevel[];
 }
 
 function resolveCssVar(varName: string, fallback: string): string {
@@ -57,11 +65,29 @@ export default function LightweightCandleChart({
   height = 500,
   className,
   verticalLineDate,
+  priceLevels = [],
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const vertLineRef = useRef<HTMLDivElement>(null);
   const [legendData, setLegendData] = useState<any>(null);
+
+  const handleResetView = () => {
+    const chart = chartRef.current;
+    const el = containerRef.current;
+    if (!chart) return;
+    chart.timeScale().fitContent();
+
+    if (verticalLineDate && vertLineRef.current && el) {
+      const x = chart.timeScale().timeToCoordinate(verticalLineDate as Time);
+      if (x !== null && x > 0 && x < el.clientWidth) {
+        vertLineRef.current.style.display = 'block';
+        vertLineRef.current.style.left = `${x}px`;
+      } else {
+        vertLineRef.current.style.display = 'none';
+      }
+    }
+  };
 
   useEffect(() => {
     const el = containerRef.current;
@@ -108,8 +134,6 @@ export default function LightweightCandleChart({
         secondsVisible: false,
         rightOffset: 3,
         minBarSpacing: 1,
-        fixLeftEdge: true,
-        fixRightEdge: true,
       },
       handleScroll: {
         mouseWheel: true,
@@ -136,6 +160,18 @@ export default function LightweightCandleChart({
     });
 
     candleSeries.setData(ohlcv as any);
+
+    // Draw horizontal price levels (target, stop-loss, entry, etc.)
+    priceLevels.forEach((pl) => {
+      candleSeries.createPriceLine({
+        price: pl.price,
+        color: pl.color,
+        lineWidth: 1,
+        lineStyle: pl.lineStyle ?? 2,
+        axisLabelVisible: true,
+        title: pl.title,
+      });
+    });
 
     // Compute median close so we can detect indicators with a wildly different scale.
     // e.g. VWKAMA at 162 vs VOLTAS at 1380 — if plotted on the same axis the candles
@@ -239,13 +275,14 @@ export default function LightweightCandleChart({
     // ResizeObserver fires whenever the container changes size — including when
     // a modal finishes animating open and the element reaches its real width.
     // This is more reliable than window 'resize' for charts inside modals/dialogs.
+    let expectedWidth = el.clientWidth;
     const ro = new ResizeObserver((entries) => {
       const entry = entries[0];
       if (!entry) return;
-      const newWidth = entry.contentRect.width;
-      if (newWidth > 0) {
+      const newWidth = Math.trunc(entry.contentRect.width);
+      if (newWidth > 0 && Math.abs(expectedWidth - newWidth) > 1) {
+        expectedWidth = newWidth;
         chart.applyOptions({ width: newWidth });
-        chart.timeScale().fitContent();
         updateVertLine();
       }
     });
@@ -265,10 +302,18 @@ export default function LightweightCandleChart({
       }
       chart.remove();
     };
-  }, [ohlcv, indicators, trades, height, verticalLineDate]);
+  }, [ohlcv, indicators, trades, height, verticalLineDate, priceLevels]);
 
   return (
     <div ref={containerRef} className={`relative ${className}`} style={{ width: '100%', minHeight: height }}>
+      <button
+        type="button"
+        onClick={handleResetView}
+        className="absolute top-3 right-3 z-20 px-2 py-1 rounded-md border border-[var(--border)] bg-[var(--bg-card)]/80 backdrop-blur text-[10px] font-semibold text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--bg-hover)] transition-colors"
+        title="Reset zoom and pan"
+      >
+        Reset View
+      </button>
       {verticalLineDate && (
         <div 
           ref={vertLineRef}

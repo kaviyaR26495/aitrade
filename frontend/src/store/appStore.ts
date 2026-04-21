@@ -178,6 +178,7 @@ interface AppState {
   retrainDaysSince: number | null;
   retrainHasModels: boolean;
   setRetrainAlert: (v: boolean) => void;
+  checkRetrainStatus: () => Promise<void>;
 
   // Initialization
   isInitialized: boolean;
@@ -282,6 +283,23 @@ export const useAppStore = create<AppState>((set) => ({
   retrainDaysSince: null,
   retrainHasModels: true,
   setRetrainAlert: (retrainAlert) => set({ retrainAlert }),
+  checkRetrainStatus: async () => {
+    try {
+      const { getRetrainStatus } = await import('../services/api');
+      const res = await getRetrainStatus();
+      if (res.data.needs_retrain) {
+        set({
+          retrainAlert: true,
+          retrainDaysSince: res.data.days_since_retrain,
+          retrainHasModels: res.data.has_models ?? true,
+        });
+      } else {
+        set({ retrainAlert: false, retrainDaysSince: null });
+      }
+    } catch {
+      // non-critical — ignore
+    }
+  },
 
   isInitialized: true,
   error: null,
