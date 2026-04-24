@@ -2,7 +2,7 @@ import { Card, StatCard, Badge, EmptyState, PageHeader, ListItem } from '../comp
 import { useSignals, useHoldings, useRlModels, useOrders } from '../hooks/useApi';
 import { XAxis, YAxis, Tooltip, ResponsiveContainer, Area, AreaChart } from 'recharts';
 import { CHART_TOOLTIP_STYLE, CHART_LABEL_STYLE, CHART_AXIS_PROPS, CHART_GRID_PROPS } from '../components/ChartTheme';
-import { TrendingUp, Brain, Target, Zap, ArrowRight } from 'lucide-react';
+import { TrendingUp, Brain, Target, Zap, ArrowRight, Trash } from 'lucide-react';
 import { NavLink } from 'react-router-dom';
 
 const STATUS_COLORS: Record<string, 'green' | 'blue' | 'yellow' | 'red' | 'gray'> = {
@@ -98,6 +98,19 @@ export default function Dashboard() {
                       <span className="text-[var(--text-muted)] tabular-nums">₹{Number(s.entry_price).toFixed(0)} → ₹{Number(s.target_price).toFixed(0)}</span>
                       <span className="text-[var(--text-muted)] font-medium tabular-nums">PoP {(Number(s.pop_score) * 100).toFixed(0)}%</span>
                       <span className="text-[var(--text-muted)] tabular-nums">R:R {Number(s.initial_rr_ratio).toFixed(1)}</span>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (confirm('Delete this prediction signal?')) {
+                            // Using a direct fetch here to avoid breaking hooks rules if we didn't add useDeleteSignal top-level
+                            fetch(`/api/trading/signals/${s.id}`, { method: 'DELETE' }).then(() => window.location.reload());
+                          }
+                        }}
+                        className="ml-2 text-red-500/70 hover:text-red-400 p-1 rounded hover:bg-red-500/10 transition-colors"
+                        title="Delete signal"
+                      >
+                        <Trash size={14} />
+                      </button>
                     </div>
                   }
                 />

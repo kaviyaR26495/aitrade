@@ -690,7 +690,11 @@ async def run_target_price_predictions(
                 pop_score = meta_results[0].pop_score
 
             # ── 8. Final decision ─────────────────────────────────────
-            if candidate.is_buy and _meta_clf.should_trade(pop_score):
+            # When MetaClassifier has no trained model, bypass the PoP gate
+            # so that only synthesizer's is_buy gate applies. Once a model
+            # is trained (via /signals/train-model), the PoP filter re-engages.
+            pop_gate = (not _meta_clf.is_trained) or _meta_clf.should_trade(pop_score)
+            if candidate.is_buy and pop_gate:
                 signal = TradeSignal(
                     stock_id=stock.id,
                     signal_date=target_date,
@@ -711,19 +715,37 @@ async def run_target_price_predictions(
                     regime_id=regime_id,
                     status=SignalStatus.pending,
                 )
-                db.add(signal)
-                await db.flush()
-                signals_created.append({
-                    "signal_id": signal.id,
-                    "stock_id": stock.id,
-                    "symbol": stock.symbol,
-                    "entry": candidate.entry_price,
-                    "target": candidate.target_price,
-                    "stoploss": candidate.stoploss_price,
-                    "rr_ratio": candidate.initial_rr_ratio,
-                    "pop_score": pop_score,
-                    "fqs": fqs,
-                })
+                try:
+                    from sqlalchemy import delete
+                    async with db.begin_nested():
+                        # Delete any existing signal for this stock and date so we can overwrite it
+                        await db.execute(
+                            delete(TradeSignal).where(
+                                TradeSignal.stock_id == stock.id,
+                                TradeSignal.signal_date == target_date
+                            )
+                        )
+                        db.add(signal)
+                        await db.flush()
+                    signals_created.append({
+                        "signal_id": signal.id,
+                        "stock_id": stock.id,
+                        "symbol": stock.symbol,
+                        "entry": candidate.entry_price,
+                        "target": candidate.target_price,
+                        "stoploss": candidate.stoploss_price,
+                        "rr_ratio": candidate.initial_rr_ratio,
+                        "pop_score": pop_score,
+                        "fqs": fqs,
+                    })
+                except Exception as insert_err:
+                    # Duplicate key or other constraint — skip this stock
+                    logger.warning("Signal insert skipped for %s: %s", stock.symbol, insert_err)
+                    signals_rejected.append({
+                        "stock_id": stock.id,
+                        "symbol": stock.symbol,
+                        "reason": f"insert_skipped: {insert_err}",
+                    })
             else:
                 reason = candidate.reject_reason or f"PoP {pop_score:.3f} < {pop_threshold}"
                 signals_rejected.append({

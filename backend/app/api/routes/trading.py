@@ -756,6 +756,47 @@ async def get_signals(
     ]
 
 
+@router.delete("/signals/{signal_id}")
+async def delete_signal(signal_id: int, db: AsyncSession = Depends(get_db)):
+    """Delete a pending trade signal manually."""
+    from sqlalchemy import select, delete
+    from app.db.models import TradeSignal
+
+    signal = (await db.execute(
+        select(TradeSignal).where(TradeSignal.id == signal_id)
+    )).scalar_one_or_none()
+
+    if not signal:
+        raise HTTPException(status_code=404, detail="Signal not found")
+
+    await db.execute(delete(TradeSignal).where(TradeSignal.id == signal_id))
+    await db.commit()
+
+    return {"status": "deleted", "id": signal_id}
+
+
+@router.delete("/signals/date/{target_date}")
+async def delete_signals_by_date(target_date: str, db: AsyncSession = Depends(get_db)):
+    """Delete all pending trade signals for a specific date group."""
+    from sqlalchemy import delete
+    from app.db.models import TradeSignal
+    import datetime
+
+    try:
+        dt = datetime.datetime.strptime(target_date, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format, expected YYYY-MM-DD")
+
+    result = await db.execute(
+        delete(TradeSignal)
+        .where(TradeSignal.signal_date == target_date)
+        .where(TradeSignal.status == "pending")
+    )
+    await db.commit()
+    
+    return {"status": "deleted", "date": target_date, "count": result.rowcount}
+
+
 @router.get("/signals/{signal_id}/preview")
 async def preview_signal(signal_id: int, db: AsyncSession = Depends(get_db)):
     """Return estimated quantity and capital allocation without placing an order."""

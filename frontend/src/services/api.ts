@@ -175,6 +175,10 @@ export const getSignalPreview = (signalId: number) =>
   api.get<{ signal_id: number; quantity: number; entry_price: number; position_value: number }>(`/trading/signals/${signalId}/preview`);
 export const executeSignal = (signalId: number, dryRun = false) =>
   api.post(`/trading/signals/${signalId}/execute`, null, { params: { dry_run: dryRun } });
+export const deleteSignal = (signalId: number) =>
+  api.delete(`/trading/signals/${signalId}`);
+export const deleteSignalsByDate = (targetDate: string) =>
+  api.delete(`/trading/signals/date/${targetDate}`);
 
 // ── Portfolio ──
 export const getHoldings = () => api.get('/portfolio/holdings');

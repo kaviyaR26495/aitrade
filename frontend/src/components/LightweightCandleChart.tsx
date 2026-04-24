@@ -72,6 +72,25 @@ export default function LightweightCandleChart({
   const vertLineRef = useRef<HTMLDivElement>(null);
   const [legendData, setLegendData] = useState<any>(null);
 
+  const getPredictionX = (chart: IChartApi, width: number) => {
+    if (!verticalLineDate) return null;
+
+    const normalizedDate = verticalLineDate.split('T')[0];
+    let x = chart.timeScale().timeToCoordinate(normalizedDate as Time);
+
+    if (x === null) {
+      // Fallback: try to resolve the exact bar time from loaded OHLCV rows.
+      const matched = ohlcv.find((p) => p.time.split('T')[0] === normalizedDate);
+      if (matched) {
+        x = chart.timeScale().timeToCoordinate(matched.time as Time);
+      }
+    }
+
+    if (x === null) return null;
+    if (x < 0 || x > width) return null;
+    return x;
+  };
+
   const handleResetView = () => {
     const chart = chartRef.current;
     const el = containerRef.current;
@@ -79,8 +98,8 @@ export default function LightweightCandleChart({
     chart.timeScale().fitContent();
 
     if (verticalLineDate && vertLineRef.current && el) {
-      const x = chart.timeScale().timeToCoordinate(verticalLineDate as Time);
-      if (x !== null && x > 0 && x < el.clientWidth) {
+      const x = getPredictionX(chart, el.clientWidth);
+      if (x !== null) {
         vertLineRef.current.style.display = 'block';
         vertLineRef.current.style.left = `${x}px`;
       } else {
@@ -262,8 +281,8 @@ export default function LightweightCandleChart({
 
     const updateVertLine = () => {
       if (verticalLineDate && vertLineRef.current && chart) {
-        const x = chart.timeScale().timeToCoordinate(verticalLineDate as Time);
-        if (x !== null && x > 0 && x < el.clientWidth) {
+        const x = getPredictionX(chart, el.clientWidth);
+        if (x !== null) {
           vertLineRef.current.style.display = 'block';
           vertLineRef.current.style.left = `${x}px`;
         } else {
@@ -317,7 +336,7 @@ export default function LightweightCandleChart({
       {verticalLineDate && (
         <div 
           ref={vertLineRef}
-          className="absolute top-0 bottom-0 w-[1px] bg-[var(--primary)] z-0 hidden pointer-events-none"
+          className="absolute top-0 bottom-0 w-[1px] bg-[var(--primary)] z-10 hidden pointer-events-none"
           style={{ mixBlendMode: 'screen', opacity: 0.5, borderLeft: '1px dashed var(--primary)' }}
         >
           <div className="absolute top-0 left-2 text-[10px] text-[var(--primary)] font-mono font-bold whitespace-nowrap bg-[var(--bg-card)]/50 px-1 rounded">Prediction</div>

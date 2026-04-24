@@ -20,6 +20,8 @@ export default function Backtest() {
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
   const [initialCapital, setInitialCapital] = useState('100000');
+  const [stoplossPct, setStoplossPct] = useState('5.0');
+  const [targetPct, setTargetPct] = useState('');
   const [minConfidence, setMinConfidence] = useState('0.50');
   const [isBulkRunning, setIsBulkRunning] = useState(false);
   const shouldStopRef = useRef(false);  // ref so the async loop always reads the latest value
@@ -200,6 +202,8 @@ export default function Backtest() {
         start_date: startDate || undefined,
         end_date: endDate || undefined,
         initial_capital: parseFloat(initialCapital),
+        stoploss_pct: parseFloat(stoplossPct) || 5.0,
+        target_pct: targetPct ? parseFloat(targetPct) : undefined,
         min_confidence: parseFloat(minConfidence) || 0.50,
       },
       {
@@ -229,6 +233,8 @@ export default function Backtest() {
           start_date: startDate || undefined,
           end_date: endDate || undefined,
           initial_capital: parseFloat(initialCapital),
+          stoploss_pct: parseFloat(stoplossPct) || 5.0,
+          target_pct: targetPct ? parseFloat(targetPct) : undefined,
           min_confidence: parseFloat(minConfidence) || 0.50,
         });
         successCount++;
@@ -270,12 +276,12 @@ export default function Backtest() {
 
           {['ensemble', 'knn'].includes(modelType) && (
             <div className="flex-1 min-w-[150px]">
-              <Input value={knnName} onChange={setKnnName} label="KNN Name" placeholder="Latest" />
+               <Input value={knnName} onChange={setKnnName} label="KNN Name" placeholder="Latest" />
             </div>
           )}
           {['ensemble', 'lstm'].includes(modelType) && (
             <div className="flex-1 min-w-[150px]">
-              <Input value={lstmName} onChange={setLstmName} label="LSTM Name" placeholder="Latest" />
+               <Input value={lstmName} onChange={setLstmName} label="LSTM Name" placeholder="Latest" />
             </div>
           )}
 
@@ -291,6 +297,12 @@ export default function Backtest() {
           </div>
           <div className="w-28">
             <Input value={initialCapital} onChange={setInitialCapital} label="Capital" type="number" />
+          </div>
+          <div className="w-24">
+            <Input value={stoplossPct} onChange={setStoplossPct} label="Stoploss %" type="number" placeholder="5.0" />
+          </div>
+          <div className="w-24">
+            <Input value={targetPct} onChange={setTargetPct} label="Target %" type="number" placeholder="None" />
           </div>
           <div className="w-24">
             <Input value={minConfidence} onChange={setMinConfidence} label="Min Conf" type="number" placeholder="0.50" />

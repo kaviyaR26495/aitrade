@@ -1,9 +1,9 @@
 import { useMemo, useState, useRef, useEffect } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { Card, Button, Badge, StatCard, EmptyState, PageHeader, Table, Modal, Tooltip, SkeletonTable, type TableColumn } from '../components/ui';
-import { useSignals, useGenerateSignals, useTrainMhLstm, useExecuteSignal, useOrders, useUniverseStocks, usePredictionJob, useCancelPredictionJob, useSignalPreview, useOhlcv, useIndicators } from '../hooks/useApi';
+import { useSignals, useGenerateSignals, useTrainMhLstm, useExecuteSignal, useOrders, useUniverseStocks, usePredictionJob, useCancelPredictionJob, useSignalPreview, useOhlcv, useIndicators, useDeleteSignal, useDeleteSignalsByDate } from '../hooks/useApi';
 import { useAppStore } from '../store/appStore';
-import { Crosshair, Play, Shield, ShieldAlert, XCircle, Loader2, Filter, Zap, ToggleLeft, ToggleRight, BrainCircuit, CalendarDays, X, BarChart2 } from 'lucide-react';
+import { Crosshair, Play, Shield, ShieldAlert, XCircle, Loader2, Filter, Zap, ToggleLeft, ToggleRight, BrainCircuit, CalendarDays, BarChart2, ChevronLeft, ChevronRight, Trash } from 'lucide-react';
 import LightweightCandleChart, { type IndicatorSeries, type PriceLevel } from '../components/LightweightCandleChart';
 
 type StatusFilter = 'ALL' | 'pending' | 'active' | 'target_hit' | 'sl_hit' | 'expired';
@@ -16,12 +16,36 @@ const STATUS_COLORS: Record<string, 'green' | 'blue' | 'yellow' | 'red' | 'gray'
   expired: 'gray',
 };
 
+const REGIME_COLORS: Record<number, string> = {
+  0: '#22c55e',
+  1: '#a3e635',
+  2: '#ef4444',
+  3: '#991b1b',
+  4: '#6b7280',
+  5: '#eab308',
+};
+
+const REGIME_LABELS: Record<number, string> = {
+  0: 'Bull+LowVol',
+  1: 'Bull+HighVol',
+  2: 'Bear+LowVol',
+  3: 'Bear+HighVol',
+  4: 'Neutral+LowVol',
+  5: 'Neutral+HighVol',
+};
+
 export default function LiveTrading() {
   const { addNotification } = useAppStore();
   const [interval] = useState('day');
   // Date range filter — both start as empty so all recent signals load on mount.
   const [dateFrom, setDateFrom] = useState<string>('');
   const [dateTo, setDateTo] = useState<string>('');
+  const [isDateRangeOpen, setIsDateRangeOpen] = useState(false);
+  const [calendarMonth, setCalendarMonth] = useState<Date>(() => {
+    const now = new Date();
+    return new Date(now.getFullYear(), now.getMonth(), 1);
+  });
+  const dateRangeRef = useRef<HTMLDivElement>(null);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('ALL');
   const [minPop, setMinPop] = useState('0');
   const [symbolQuery, setSymbolQuery] = useState('');
@@ -49,14 +73,46 @@ export default function LiveTrading() {
   const [executeModal, setExecuteModal] = useState<any>(null);
   const [dryRun, setDryRun] = useState(true);
   const executeSignal = useExecuteSignal();
+  const deleteSignal = useDeleteSignal();
+  const deleteSignalsByDate = useDeleteSignalsByDate();
   const { data: signalPreview } = useSignalPreview(executeModal?.id ?? null);
+
+  useEffect(() => {
+    if (!isDateRangeOpen) return;
+
+    const onPointerDown = (e: MouseEvent) => {
+      const target = e.target as Node;
+      if (!dateRangeRef.current?.contains(target)) {
+        setIsDateRangeOpen(false);
+      }
+    };
+
+    document.addEventListener('mousedown', onPointerDown);
+    return () => document.removeEventListener('mousedown', onPointerDown);
+  }, [isDateRangeOpen]);
+
+  useEffect(() => {
+    if (!isDateRangeOpen) return;
+    const seed = dateFrom || dateTo;
+    if (!seed) return;
+    const parsed = new Date(`${seed}T00:00:00`);
+    if (!Number.isNaN(parsed.getTime())) {
+      setCalendarMonth(new Date(parsed.getFullYear(), parsed.getMonth(), 1));
+    }
+  }, [isDateRangeOpen, dateFrom, dateTo]);
 
   useEffect(() => {
     if (job?.status === 'completed' || job?.status === 'failed' || job?.status === 'cancelled') {
       if (job.status === 'completed') {
+        const capturedDate = pendingGenerateDateRef.current;
         pendingGenerateDateRef.current = null;
-        setDateFrom('');
-        setDateTo('');
+        if (capturedDate) {
+          setDateFrom(capturedDate);
+          setDateTo(capturedDate);
+        } else {
+          setDateFrom('');
+          setDateTo('');
+        }
         qc.invalidateQueries({ queryKey: ['signals'] });
         addNotification({ type: 'success', message: 'Signal generation completed' });
       } else if (job.status === 'cancelled') {
@@ -118,62 +174,148 @@ export default function LiveTrading() {
     ? filteredSignals.reduce((sum: number, s: any) => sum + (s.initial_rr_ratio ?? 0), 0) / filteredSignals.length
     : 0;
 
+  const dateRangeLabel = dateFrom && dateTo
+    ? `${dateFrom} to ${dateTo}`
+    : dateFrom
+      ? `From ${dateFrom}`
+      : dateTo
+        ? `Until ${dateTo}`
+        : 'Date Range';
+
+  const monthLabel = calendarMonth.toLocaleString('en-US', { month: 'long', year: 'numeric' });
+  const firstWeekday = new Date(calendarMonth.getFullYear(), calendarMonth.getMonth(), 1).getDay();
+  const daysInMonth = new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() + 1, 0).getDate();
+  const monthDays = Array.from({ length: daysInMonth }, (_, i) => {
+    const d = new Date(calendarMonth.getFullYear(), calendarMonth.getMonth(), i + 1);
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    return `${yyyy}-${mm}-${dd}`;
+  });
+
+  const handleRangeDateClick = (picked: string) => {
+    if (!dateFrom || (dateFrom && dateTo)) {
+      setDateFrom(picked);
+      setDateTo('');
+      return;
+    }
+
+    if (picked < dateFrom) {
+      setDateFrom(picked);
+      setDateTo('');
+    } else {
+      setDateTo(picked);
+    }
+  };
+
   const signalColumns: TableColumn<any>[] = [
     {
-      key: 'direction',
-      label: 'Dir',
-      tooltip: 'Signal direction: LONG (target > entry) or SHORT (target < entry)',
-      align: 'center',
+      key: 'symbol',
+      label: 'Symbol',
+      tooltip: 'Direction & Stock ticker symbol — click row to view chart',
+      sortable: true,
       render: (s) => {
         const isShort = s.target_price < s.entry_price;
         return (
-          <Badge color={isShort ? 'red' : 'green'}>{isShort ? 'SHORT' : 'LONG'}</Badge>
+          <div className="flex items-center gap-2">
+            <span className="font-medium text-[var(--text)]">{s.symbol}</span>
+            <Badge color={isShort ? 'red' : 'green'} size="sm">{isShort ? 'SHORT' : 'LONG'}</Badge>
+          </div>
         );
       },
     },
     {
-      key: 'symbol',
-      label: 'Symbol',
-      tooltip: 'Stock ticker symbol — click row to view chart',
-      render: (s) => <span className="font-medium">{s.symbol}</span>,
-    },
-    {
-      key: 'entry_price',
-      label: 'Entry',
-      tooltip: 'Suggested entry price',
-      align: 'right',
+      key: 'signal_date',
+      label: 'Date',
+      tooltip: 'Date when generated & days since active',
+      align: 'center',
       mono: true,
-      render: (s) => <span className="tabular-nums">{s.entry_price?.toFixed(2) ?? '—'}</span>,
+      sortable: true,
+      sortValue: (s) => {
+        const v = s.signal_date;
+        if (!v) return 0;
+        const ts = Date.parse(String(v));
+        return Number.isNaN(ts) ? 0 : ts;
+      },
+      render: (s) => {
+        const v = s.signal_date;
+        if (!v) return <span className="text-xs text-[var(--text-dim)]">—</span>;
+        const dateText = String(v).includes('T') ? String(v).split('T')[0] : String(v);
+        const parts = dateText.split('-');
+        const month = parts[1];
+        const day = parts[2];
+        const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+        const formatDt = month ? `${months[parseInt(month)-1]} ${day}` : dateText;
+        
+        const days = s.days_since_signal ?? 0;
+        const stale = days > 15;
+        
+        return (
+          <div className="flex flex-col items-center">
+            <span className="tabular-nums text-[11px] text-[var(--text-muted)]">{formatDt}</span>
+            <span className={`text-[10px] tabular-nums ${stale ? 'text-rose-400 font-bold' : 'text-[var(--text-dim)]'}`}>
+              {days}d
+            </span>
+          </div>
+        );
+      },
     },
     {
-      key: 'target_price',
-      label: 'Target',
-      tooltip: 'Target price (profit booking level)',
-      align: 'right',
-      mono: true,
-      render: (s) => <span className="tabular-nums text-emerald-400">{s.target_price?.toFixed(2) ?? '—'}</span>,
+      key: 'regime',
+      label: 'Regime',
+      tooltip: 'Market regime (Trend + Volatility)',
+      align: 'center',
+      sortable: true,
+      sortValue: (s) => s.regime_id ?? -1,
+      render: (s) => {
+        const regimeId = s.regime_id ?? -1;
+        if (regimeId < 0) return <span className="text-xs text-[var(--text-dim)]">—</span>;
+        const label = REGIME_LABELS[regimeId] || `R${regimeId}`;
+        const color = REGIME_COLORS[regimeId] || '#6b7280';
+        return (
+          <span 
+            className="text-[10px] uppercase tracking-wider font-semibold px-2 py-0.5 rounded shadow-sm whitespace-nowrap" 
+            style={{ backgroundColor: `${color}15`, color: color, border: `1px solid ${color}30` }}
+          >
+            {label}
+          </span>
+        );
+      },
     },
     {
-      key: 'stoploss_price',
-      label: 'SL',
-      tooltip: 'Stop-loss price (current trailing SL if active)',
+      key: 'levels',
+      label: 'Levels (Entry → Tgt)',
+      tooltip: 'Entry → Target (Stop Loss)',
       align: 'right',
       mono: true,
       render: (s) => {
         const sl = s.current_stoploss ?? s.stoploss_price;
-        return <span className="tabular-nums text-red-400">{sl?.toFixed(2) ?? '—'}</span>;
+        return (
+          <div className="flex flex-col items-end whitespace-nowrap leading-tight gap-0.5">
+            <div className="text-[11px]">
+              <span className="text-[var(--text-muted)]">₹{s.entry_price?.toFixed(2) ?? '—'}</span>
+              <span className="text-[var(--text-dim)] mx-1">→</span>
+              <span className="text-emerald-400 font-medium">₹{s.target_price?.toFixed(2) ?? '—'}</span>
+            </div>
+            <div className="text-[10px] text-red-500/80">
+              SL ₹{sl?.toFixed(2) ?? '—'}
+            </div>
+          </div>
+        );
       },
     },
     {
       key: 'initial_rr_ratio',
       label: 'R:R',
-      tooltip: 'Risk-Reward ratio (target distance / SL distance)',
+      tooltip: 'Risk-Reward ratio',
       align: 'center',
       mono: true,
+      sortable: true,
+      sortValue: (s) => s.current_rr_ratio ?? s.initial_rr_ratio,
       render: (s) => {
         const rr = s.current_rr_ratio ?? s.initial_rr_ratio;
         return (
-          <span className={`tabular-nums font-medium ${rr >= 2.5 ? 'text-emerald-400' : rr >= 1.5 ? 'text-amber-400' : 'text-red-400'}`}>
+          <span className={`tabular-nums font-semibold ${rr >= 2.5 ? 'text-emerald-400' : rr >= 1.5 ? 'text-amber-400' : 'text-red-400'}`}>
             {rr?.toFixed(1) ?? '—'}
           </span>
         );
@@ -182,79 +324,71 @@ export default function LiveTrading() {
     {
       key: 'pop_score',
       label: 'PoP%',
-      tooltip: 'Probability of Profit from meta-classifier',
+      tooltip: 'Probability of Profit (Hover for FQS)',
       align: 'center',
+      sortable: true,
       render: (s) => (
-        <span className={`font-medium tabular-nums ${s.pop_score >= 0.7 ? 'text-emerald-400' : s.pop_score >= 0.55 ? 'text-amber-400' : 'text-[var(--text-muted)]'}`}>
-          {((s.pop_score ?? 0) * 100).toFixed(0)}%
-        </span>
-      ),
-    },
-    {
-      key: 'fqs_score',
-      label: 'FQS',
-      tooltip: 'Final Quality Score — composite signal quality metric',
-      align: 'center',
-      mono: true,
-      render: (s) => (
-        <span className={`tabular-nums ${s.fqs_score >= 0.7 ? 'text-emerald-400' : 'text-[var(--text-dim)]'}`}>
-          {(s.fqs_score ?? 0).toFixed(2)}
-        </span>
+        <Tooltip content={`FQS: ${(s.fqs_score ?? 0).toFixed(2)}`} side="top">
+          <span className={`font-bold tabular-nums ${s.pop_score >= 0.7 ? 'text-emerald-400' : s.pop_score >= 0.55 ? 'text-amber-400' : 'text-[var(--text-muted)]'}`}>
+            {((s.pop_score ?? 0) * 100).toFixed(0)}%
+          </span>
+        </Tooltip>
       ),
     },
     {
       key: 'status',
       label: 'Status',
-      tooltip: 'Signal lifecycle status',
+      tooltip: 'Signal lifecycle status & trailing stop info',
       align: 'center',
+      sortable: true,
       render: (s) => (
-        <Badge color={STATUS_COLORS[s.status] ?? 'gray'}>{s.status}</Badge>
-      ),
-    },
-    {
-      key: 'days_since_signal',
-      label: 'Days',
-      tooltip: 'Trading days since signal was generated',
-      align: 'center',
-      mono: true,
-      render: (s) => {
-        const days = s.days_since_signal ?? 0;
-        const stale = days > 15;
-        return (
-          <span className={`text-xs tabular-nums ${stale ? 'text-rose-400 font-bold' : 'text-[var(--text-dim)]'}`}>
-            {days}{stale && ' (Stale)'}
-          </span>
-        );
-      },
-    },
-    {
-      key: 'trailing',
-      label: 'Trail',
-      tooltip: 'Trailing stop status (active / update count)',
-      align: 'center',
-      render: (s) => (
-        s.is_trailing_active
-          ? <Badge color="blue">↑{s.trailing_updates_count ?? 0}</Badge>
-          : <span className="text-xs text-[var(--text-dim)]">—</span>
+        <div className="flex flex-col items-center gap-1">
+          <Badge color={STATUS_COLORS[s.status] ?? 'gray'} size="sm">{s.status}</Badge>
+          {s.is_trailing_active && (
+            <span className="text-[9px] text-blue-400 font-bold uppercase tracking-wider">
+              Trail ↑{s.trailing_updates_count ?? 0}
+            </span>
+          )}
+        </div>
       ),
     },
     {
       key: 'execute',
-      label: '',
+      label: 'Actions',
       align: 'right',
       stopPropagation: true,
       render: (s) => (
-        s.status === 'pending' ? (
+        <div className="flex items-center justify-end gap-1">
+          {s.status === 'pending' && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={(e) => {
+                e.stopPropagation();
+                setExecuteModal(s);
+              }}
+              className="h-7 px-2 text-[11px] font-semibold text-[var(--primary)] bg-[var(--primary)]/10 hover:bg-[var(--primary)] hover:text-white transition-all shadow-sm rounded-sm"
+            >
+              <Zap size={11} className="mr-1" />
+              Exec
+            </Button>
+          )}
           <Button
             variant="ghost"
             size="sm"
-            onClick={() => setExecuteModal(s)}
-            className="h-7 px-2 text-xs text-[var(--primary)] hover:bg-[var(--primary-dim)]"
+            onClick={(e) => {
+              e.stopPropagation();
+              if (confirm('Delete this prediction signal?')) {
+                deleteSignal.mutate(s.id);
+              }
+            }}
+            className="h-7 px-1.5 text-[10px] text-[var(--text-muted)] hover:text-red-400 hover:bg-red-500/10 shrink-0"
+            title="Delete signal"
+            loading={deleteSignal.isPending && deleteSignal.variables === s.id}
           >
-            <Zap size={12} className="mr-1" />
-            Execute
+            {!(deleteSignal.isPending && deleteSignal.variables === s.id) && <Trash size={12} />}
           </Button>
-        ) : null
+        </div>
       ),
     },
   ];
@@ -303,34 +437,100 @@ export default function LiveTrading() {
       <PageHeader title="Live Trading" description="Generate TPML signals and execute trades">
         <div className="flex gap-2 items-center flex-wrap">
           {/* ── Date range ─────────────────────────────────── */}
-          <div className="flex items-center gap-1.5 px-3 py-1.5 bg-[var(--bg-input)] border border-[var(--border)] rounded-[var(--radius-sm)] shadow-sm">
-            <CalendarDays size={13} className="text-[var(--text-dim)] shrink-0" />
-            <input
-              type="date"
-              title="From date"
-              value={dateFrom}
-              max={dateTo || undefined}
-              onChange={(e) => setDateFrom(e.target.value)}
-              className="bg-transparent border-none p-0 text-xs font-medium focus:ring-0 cursor-pointer w-[110px]"
-            />
-            <span className="text-[var(--text-dim)] text-xs select-none">→</span>
-            <input
-              type="date"
-              title="To date"
-              value={dateTo}
-              min={dateFrom || undefined}
-              onChange={(e) => setDateTo(e.target.value)}
-              className="bg-transparent border-none p-0 text-xs font-medium focus:ring-0 cursor-pointer w-[110px]"
-            />
-            {(dateFrom || dateTo) && (
-              <button
-                type="button"
-                title="Clear date filter"
-                onClick={() => { setDateFrom(''); setDateTo(''); }}
-                className="ml-1 text-[var(--text-dim)] hover:text-[var(--text)] transition-colors"
-              >
-                <X size={12} />
-              </button>
+          <div ref={dateRangeRef} className="relative">
+            <button
+              type="button"
+              onClick={() => setIsDateRangeOpen((v) => !v)}
+              className="flex items-center gap-2 px-3 py-1.5 bg-[var(--bg-input)] border border-[var(--border)] rounded-[var(--radius-sm)] shadow-sm text-xs font-medium text-[var(--text)] hover:bg-[var(--bg-hover)] transition-colors"
+              title="Select date range"
+            >
+              <CalendarDays size={13} className="text-[var(--text-dim)] shrink-0" />
+              <span className="truncate max-w-[180px] text-left">{dateRangeLabel}</span>
+            </button>
+
+            {isDateRangeOpen && (
+              <div className="absolute top-full mt-2 left-0 z-40 w-[318px] p-3 rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--bg-card)] shadow-xl">
+                <div className="flex items-center justify-between mb-2">
+                  <button
+                    type="button"
+                    onClick={() => setCalendarMonth((prev) => new Date(prev.getFullYear(), prev.getMonth() - 1, 1))}
+                    className="h-7 w-7 inline-flex items-center justify-center rounded border border-[var(--border)] bg-[var(--bg-input)] hover:bg-[var(--bg-hover)]"
+                    title="Previous month"
+                  >
+                    <ChevronLeft size={14} />
+                  </button>
+                  <div className="text-xs font-semibold text-[var(--text)]">{monthLabel}</div>
+                  <button
+                    type="button"
+                    onClick={() => setCalendarMonth((prev) => new Date(prev.getFullYear(), prev.getMonth() + 1, 1))}
+                    className="h-7 w-7 inline-flex items-center justify-center rounded border border-[var(--border)] bg-[var(--bg-input)] hover:bg-[var(--bg-hover)]"
+                    title="Next month"
+                  >
+                    <ChevronRight size={14} />
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-7 gap-1 text-[10px] text-[var(--text-dim)] uppercase font-semibold mb-1">
+                  {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((d) => (
+                    <div key={d} className="h-6 flex items-center justify-center">{d}</div>
+                  ))}
+                </div>
+
+                <div className="grid grid-cols-7 gap-1">
+                  {Array.from({ length: firstWeekday }).map((_, idx) => (
+                    <div key={`pad-${idx}`} className="h-8" />
+                  ))}
+
+                  {monthDays.map((d) => {
+                    const dayNum = Number(d.slice(-2));
+                    const isStart = dateFrom === d;
+                    const isEnd = dateTo === d;
+                    const inRange = !!(dateFrom && dateTo && d >= dateFrom && d <= dateTo);
+                    const active = isStart || isEnd;
+
+                    return (
+                      <button
+                        key={d}
+                        type="button"
+                        onClick={() => handleRangeDateClick(d)}
+                        className={`h-8 rounded text-xs font-medium transition-colors ${
+                          active
+                            ? 'bg-[var(--primary)] text-black'
+                            : inRange
+                              ? 'bg-[var(--primary-dim)]/30 text-[var(--text)]'
+                              : 'bg-[var(--bg-input)] text-[var(--text)] hover:bg-[var(--bg-hover)]'
+                        }`}
+                        title={d}
+                      >
+                        {dayNum}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div className="mt-2 text-[10px] text-[var(--text-dim)]">
+                  {!dateFrom && !dateTo && 'Pick a start date, then an end date.'}
+                  {dateFrom && !dateTo && `Start: ${dateFrom} (select end date)`}
+                  {dateFrom && dateTo && `Range: ${dateFrom} to ${dateTo}`}
+                </div>
+
+                <div className="mt-3 flex items-center justify-between">
+                  <button
+                    type="button"
+                    onClick={() => { setDateFrom(''); setDateTo(''); }}
+                    className="text-xs text-[var(--text-dim)] hover:text-[var(--text)] transition-colors"
+                  >
+                    Clear range
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setIsDateRangeOpen(false)}
+                    className="text-xs px-2 py-1 rounded border border-[var(--border)] bg-[var(--bg-input)] hover:bg-[var(--bg-hover)]"
+                  >
+                    Done
+                  </button>
+                </div>
+              </div>
             )}
           </div>
 
@@ -446,6 +646,20 @@ export default function LiveTrading() {
           >
             {isSubmitting || activeJobId ? 'Generating...' : 'Generate Signals'}
           </Button>
+          
+          <Button
+            variant="danger"
+            onClick={() => {
+              if (confirm(`Are you sure you want to delete all pending signals for ${generateDate}?`)) {
+                deleteSignalsByDate.mutate(generateDate);
+              }
+            }}
+            icon={<Trash size={16} />}
+            loading={deleteSignalsByDate.isPending}
+            title={`Delete all pending signals for ${generateDate}`}
+          >
+            Delete
+          </Button>
         </div>
       </PageHeader>
 
@@ -517,6 +731,7 @@ export default function LiveTrading() {
           <Table<any>
             columns={signalColumns}
             data={filteredSignals}
+            compact={true}
             onRowClick={(s) => setSelectedSignal(s)}
             emptyState={
               <EmptyState

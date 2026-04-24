@@ -506,6 +506,7 @@ export interface TableColumn<T = any> {
   render?: (row: T, index: number) => ReactNode;
   mono?: boolean;
   sortable?: boolean;
+  sortValue?: (row: T) => string | number | null | undefined;
   stopPropagation?: boolean;
 }
 
@@ -524,9 +525,10 @@ export function Table<T extends Record<string, any>>({ columns, data, onRowClick
 
   const sortedData = useMemo(() => {
     if (!sortKey) return data;
+    const sortColumn = columns.find((col) => col.key === sortKey);
     return [...data].sort((a, b) => {
-      const av = a[sortKey];
-      const bv = b[sortKey];
+      const av = sortColumn?.sortValue ? sortColumn.sortValue(a) : a[sortKey];
+      const bv = sortColumn?.sortValue ? sortColumn.sortValue(b) : b[sortKey];
       if (av == null && bv == null) return 0;
       if (av == null) return 1;
       if (bv == null) return -1;
@@ -535,7 +537,7 @@ export function Table<T extends Record<string, any>>({ columns, data, onRowClick
         : String(av).localeCompare(String(bv));
       return sortDir === 'asc' ? diff : -diff;
     });
-  }, [data, sortKey, sortDir]);
+  }, [columns, data, sortKey, sortDir]);
 
   const handleSort = (key: string) => {
     if (sortKey === key) {

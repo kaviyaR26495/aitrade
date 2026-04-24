@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 class SynthesizerConfig:
     """Tunable parameters for the signal synthesiser."""
     # Minimum predicted return to consider a BUY (after cost deduction)
-    min_net_return_pct: float = 0.005     # 0.5%
+    min_net_return_pct: float = 0.01      # 1.0% (Increased from 0.5%)
     # Minimum R:R ratio (reward / risk)
     min_rr_ratio: float = 1.2
     # κ-decay rate: R:R degrades by this factor per day
@@ -58,7 +58,7 @@ class SynthesizerConfig:
     # less-liquid stocks.  Higher = more aggressive cost penalty.
     vol_slippage_scale: float = 0.5
     # Stoploss ATR multiplier
-    sl_atr_multiplier: float = 1.5
+    sl_atr_multiplier: float = 2.0  # Increased from 1.5 for wider SL
     # Target rounding to tick size
     tick_size: float = 0.05
     # Paper-trading dry-run: write signals to DB but never call Kite APIs
@@ -270,9 +270,12 @@ def synthesize_signal(
     atr_sl = current_price - config.sl_atr_multiplier * atr
 
     # If nearest support is above ATR-SL, tighten SL to just below support
+    # but ensure we still give it at least 1% breathing room so it evaluates
+    # actual market noise and doesn't get whipsawed by minor supports.
     if sr_result.nearest_support is not None:
         sup_low = sr_result.nearest_support.price_low
-        if sup_low > atr_sl:
+        min_sl_dist = current_price * 0.01  # Minimum 1% stoploss
+        if sup_low > atr_sl and (current_price - sup_low) > min_sl_dist:
             atr_sl = sup_low - 0.002 * sup_low  # small buffer below support
 
     stoploss_price = _round_to_tick(atr_sl, config.tick_size)

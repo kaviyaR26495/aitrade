@@ -101,6 +101,27 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+import traceback
+import logging
+from fastapi import Request
+
+error_logger = logging.getLogger("http_errors")
+error_logger.setLevel(logging.ERROR)
+fh = logging.FileHandler("http_errors.log")
+fh.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - [%(name)s] - %(message)s"))
+error_logger.addHandler(fh)
+
+@app.middleware("http")
+async def log_errors(request: Request, call_next):
+    try:
+        response = await call_next(request)
+        if response.status_code >= 400:
+            error_logger.error(f"HTTP {response.status_code} | {request.method} {request.url}")
+        return response
+    except Exception as exc:
+        error_logger.error(f"HTTP 500 | {request.method} {request.url} | Exception: {str(exc)}\n{traceback.format_exc()}")
+        raise
+
 # ── Route registration ────────────────────────────────────────────────
 from app.api.routes import auth, config as config_routes, data, regime, models, backtest, trading, portfolio, chat, pipeline, indices, training, fundamentals, sentiment, agents  # noqa: E402
 

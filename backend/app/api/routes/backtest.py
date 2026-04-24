@@ -402,7 +402,16 @@ async def _run_live_inference(
     # Resolve matched patterns from KNN for explainability
     matched_patterns = []
     if hasattr(knn_model, "_query"):
-        _, indices = knn_model._query(np.ascontiguousarray(X_all.reshape(len(X_all), -1), dtype=np.float32))
+        X_q = X_all.reshape(len(X_all), -1).astype(np.float64)
+        if knn_norm_params is not None:
+            mean = np.asarray(knn_norm_params["mean"], dtype=np.float64)
+            scale = np.asarray(knn_norm_params["scale"], dtype=np.float64)
+            X_q = (X_q - mean) / np.where(scale > 0, scale, 1.0)
+            if "pca_components" in knn_norm_params:
+                pca_mean = np.asarray(knn_norm_params["pca_mean"], dtype=np.float64)
+                pca_comp = np.asarray(knn_norm_params["pca_components"], dtype=np.float64)
+                X_q = (X_q - pca_mean) @ pca_comp.T
+        _, indices = knn_model._query(np.ascontiguousarray(X_q, dtype=np.float32))
         # indices is (n_samples, k)
         # We need to map these back to GoldenPattern IDs if possible.
         # This requires the KNN model to have a mapping of its training indices to DB IDs.

@@ -536,6 +536,22 @@ export const useExecuteSignal = () => {
   });
 };
 
+export const useDeleteSignal = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (signalId: number) => api.deleteSignal(signalId).then(r => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['signals'] }),
+  });
+};
+
+export const useDeleteSignalsByDate = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (targetDate: string) => api.deleteSignalsByDate(targetDate).then(r => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['signals'] }),
+  });
+};
+
 export const useSignalPreview = (signalId: number | null) =>
   useQuery({
     queryKey: ['signal-preview', signalId],
