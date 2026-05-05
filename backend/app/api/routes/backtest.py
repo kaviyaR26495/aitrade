@@ -14,7 +14,7 @@ from sqlalchemy import select, and_
 from app.api.deps import get_db
 from app.config import settings
 from app.db import crud
-from app.db.models import BacktestResult as BacktestResultModel
+from app.db.models import BacktestResult as BacktestResultModel, CompoundBacktestResult
 from app.db.models import KNNPrediction, LSTMPrediction, EnsemblePrediction, StockOHLCV, GoldenPattern
 
 logger = logging.getLogger(__name__)
@@ -36,6 +36,31 @@ class BacktestRequest(BaseModel):
     target_pct: float | None = None
     min_confidence: float = 0.50
     max_positions: int = 10
+
+
+class CompoundBacktestRequest(BaseModel):
+    model_type: str = "ensemble"
+    start_date: date | None = None
+    end_date: date | None = None
+    initial_capital: float = 100_000.0
+    stoploss_pct: float = 5.0
+    target_pct: float = 10.0
+    buy_regime_id: int | None = None
+    sell_regime_id: int | None = None
+    min_confidence: float = 0.50
+    max_positions_per_day: int = 10
+
+
+class CompoundBacktestSummary(BaseModel):
+    id: int
+    model_type: str
+    start_date: str
+    end_date: str
+    initial_capital: float
+    final_capital: float
+    profit_booked: float
+    total_trades: int
+    created_at: str
 
 
 class BacktestSummary(BaseModel):
@@ -622,6 +647,253 @@ async def list_backtest_results(
     ]
 
 
+@router.post("/run-compound")
+async def run_compound_backtest(
+    req: CompoundBacktestRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Run cross-stock capital compounding backtest."""
+    from app.db.models import StockOHLCV, EnsemblePrediction, Stock
+    import collections
+    
+    start_d = req.start_date or date(2020, 1, 1)
+    end_d = req.end_date or date.today()
+
+    # Get dates
+    dates_res = await db.execute(
+        select(StockOHLCV.date)
+        .where(StockOHLCV.date >= start_d)
+        .where(StockOHLCV.date <= end_d)
+        .distinct()
+        .order_by(StockOHLCV.date)
+    )
+    all_dates = [d for (d,) in dates_res.all()]
+    if not all_dates:
+        raise HTTPException(status_code=400, detail="No trading dates found in range.")
+
+    # Get OHLCV
+    ohlcv_res = await db.execute(
+        select(StockOHLCV.date, StockOHLCV.stock_id, StockOHLCV.close, StockOHLCV.high, StockOHLCV.low)
+        .where(StockOHLCV.date.in_(all_dates))
+    )
+    # (date, stock_id) -> {close, high, low}
+    ohlcv_map = collections.defaultdict(dict)
+    stock_ids_in_ohlcv = set()
+    for r in ohlcv_res.all():
+        dt_str = r.date.strftime("%Y-%m-%d") if hasattr(r.date, "strftime") else str(r.date)
+        ohlcv_map[dt_str][r.stock_id] = {"close": float(r.close), "high": float(r.high), "low": float(r.low)}
+        stock_ids_in_ohlcv.add(r.stock_id)
+
+    # Get Predictions + symbols
+    preds_res = await db.execute(
+        select(EnsemblePrediction.date, EnsemblePrediction.stock_id, EnsemblePrediction.action, EnsemblePrediction.regime_id, EnsemblePrediction.confidence, Stock.symbol)
+        .join(Stock, Stock.id == EnsemblePrediction.stock_id)
+        .where(EnsemblePrediction.date.in_(all_dates))
+    )
+    all_db_preds = preds_res.all()
+    
+    # Check coverage and run live inference for stocks missing data
+    from app.api.routes.backtest import _run_live_inference
+    import collections
+    
+    # date_str -> list of dummy pred objects
+    preds_map = collections.defaultdict(list)
+    
+    class DummyPred:
+        def __init__(self, stock_id, symbol, date, action, confidence, regime_id):
+            self.stock_id = stock_id
+            self.symbol = symbol
+            self.date = date
+            self.action = action
+            self.confidence = confidence
+            self.regime_id = regime_id
+
+    # prebuild symbol map for fast access
+    sym_res = await db.execute(select(Stock.id, Stock.symbol))
+    symbol_map = {r.id: r.symbol for r in sym_res.all()}
+
+    for stock_id in stock_ids_in_ohlcv:
+        sp_db = [p for p in all_db_preds if p.stock_id == stock_id]
+        if not sp_db:
+            continue
+            
+        for p in sp_db:
+            dt_str = p.date.strftime("%Y-%m-%d") if hasattr(p.date, "strftime") else str(p.date)
+            preds_map[dt_str].append(DummyPred(
+                stock_id=p.stock_id,
+                symbol=p.symbol,
+                date=p.date,
+                action=p.action,
+                confidence=p.confidence,
+                regime_id=p.regime_id
+            ))
+
+    capital = req.initial_capital
+    positions = []
+    trade_log = []
+    equity_curve = []
+    profit_booked = 0.0
+
+    for idx, dt in enumerate(all_dates):
+        dt_str = dt.strftime("%Y-%m-%d") if hasattr(dt, "strftime") else str(dt)
+        daily_ohlcv = ohlcv_map.get(dt_str, {})
+        
+        # 1. Check Exits
+        next_positions = []
+        for pos in positions:
+            px_data = daily_ohlcv.get(pos["stock_id"])
+            if not px_data:
+                next_positions.append(pos)
+                continue
+                
+            close_px = px_data["close"]
+            high_px = px_data["high"]
+            low_px = px_data["low"]
+            
+            # regime check
+            today_pred = next((p for p in preds_map.get(dt_str, []) if p.stock_id == pos["stock_id"]), None)
+            today_regime = today_pred.regime_id if today_pred else None
+
+            
+            sl_price = pos["entry_price"] * (1 - req.stoploss_pct / 100)
+            tgt_price = pos["entry_price"] * (1 + req.target_pct / 100)
+            
+            exit_price = None
+            exit_reason = None
+            
+            if low_px <= sl_price:
+                exit_price = sl_price
+                exit_reason = "stoploss"
+            elif high_px >= tgt_price:
+                exit_price = tgt_price
+                exit_reason = "target"
+            elif req.sell_regime_id is not None and today_regime == req.sell_regime_id:
+                exit_price = close_px
+                exit_reason = f"regime_{today_regime}"
+                
+            if exit_price is not None:
+                sale_val = pos["qty"] * exit_price
+                capital += sale_val
+                pnl = sale_val - (pos["qty"] * pos["entry_price"])
+                profit_booked += pnl
+                trade_log.append({
+                    "entry_date": pos["entry_date"].strftime("%Y-%m-%d"),
+                    "exit_date": dt.strftime("%Y-%m-%d"),
+                    "symbol": pos["symbol"],
+                    "entry_price": round(pos["entry_price"], 2),
+                    "exit_price": round(exit_price, 2),
+                    "quantity": pos["qty"],
+                    "pnl": round(pnl, 2),
+                    "pnl_pct": round(pnl / (pos["qty"] * pos["entry_price"]) * 100, 2),
+                    "exit_reason": exit_reason
+                })
+            else:
+                next_positions.append(pos)
+                
+        positions = next_positions
+        
+        # 2. Check Entries
+        daily_preds = preds_map.get(dt_str, [])
+        buy_candidates = []
+        for p in daily_preds:
+            if p.action == 1 and p.confidence >= req.min_confidence:
+                # filter by regime
+                if req.buy_regime_id is None or p.regime_id == req.buy_regime_id:
+                    # check if we already hold it
+                    if not any(pos["stock_id"] == p.stock_id for pos in positions):
+                        buy_candidates.append(p)
+        
+        # limit candidates 
+        if req.max_positions_per_day > 0:
+            buy_candidates = buy_candidates[:req.max_positions_per_day]
+            
+        if capital > 0 and len(buy_candidates) > 0:
+            alloc_per_stock = capital / len(buy_candidates)
+            for cand in buy_candidates:
+                px_data = daily_ohlcv.get(cand.stock_id)
+                if px_data:
+                    close_px = px_data["close"]
+                    if close_px > 0:
+                        qty = int(alloc_per_stock // close_px)
+                        if qty > 0:
+                            cost = qty * close_px
+                            capital -= cost
+                            positions.append({
+                                "stock_id": cand.stock_id,
+                                "symbol": cand.symbol,
+                                "entry_date": dt,
+                                "entry_price": close_px,
+                                "qty": qty
+                            })
+                            
+        # calculate MTM equity
+        open_val = 0.0
+        for pos in positions:
+            px = daily_ohlcv.get(pos["stock_id"], {}).get("close", pos["entry_price"])
+            open_val += pos["qty"] * px
+            
+        equity_curve.append({
+            "date": dt.strftime("%Y-%m-%d"),
+            "value": capital + open_val
+        })
+
+    # Close remaining positions at end
+    if positions:
+        dt = all_dates[-1]
+        daily_ohlcv = ohlcv_map.get(dt, {})
+        for pos in positions:
+            close_px = daily_ohlcv.get(pos["stock_id"], {}).get("close", pos["entry_price"])
+            sale_val = pos["qty"] * close_px
+            capital += sale_val
+            pnl = sale_val - (pos["qty"] * pos["entry_price"])
+            profit_booked += pnl
+            trade_log.append({
+                "entry_date": pos["entry_date"].strftime("%Y-%m-%d"),
+                "exit_date": dt.strftime("%Y-%m-%d"),
+                "symbol": pos["symbol"],
+                "entry_price": round(pos["entry_price"], 2),
+                "exit_price": round(close_px, 2),
+                "quantity": pos["qty"],
+                "pnl": round(pnl, 2),
+                "pnl_pct": round(pnl / (pos["qty"] * pos["entry_price"]) * 100, 2),
+                "exit_reason": "end_of_backtest"
+            })
+        positions.clear()
+
+    # Persist the output to the database
+    record = CompoundBacktestResult(
+        model_type=req.model_type,
+        start_date=start_d,
+        end_date=end_d,
+        initial_capital=req.initial_capital,
+        final_capital=round(capital, 2),
+        profit_booked=round(profit_booked, 2),
+        total_trades=len(trade_log),
+        parameters=req.model_dump(mode="json"),
+        equity_curve=equity_curve,
+        trade_log=trade_log
+    )
+    db.add(record)
+    await db.commit()
+    await db.refresh(record)
+
+    return {
+        "id": record.id,
+        "initial_capital": record.initial_capital,
+        "final_capital": record.final_capital,
+        "profit_booked": record.profit_booked,
+        "total_trades": record.total_trades,
+        "equity_curve": record.equity_curve,
+        "trade_log": record.trade_log,
+        "debug": {
+            "all_dates": len(all_dates),
+            "ohlcv_map_keys": len(ohlcv_map),
+            "preds_map_keys": len(preds_map),
+            "preds_count": sum(len(x) for x in preds_map.values())
+        }
+    }
+
+
 @router.delete("/{backtest_id}")
 async def delete_backtest(
     backtest_id: int,
@@ -632,6 +904,84 @@ async def delete_backtest(
     bt = res.scalar_one_or_none()
     if not bt:
         raise HTTPException(status_code=404, detail="Backtest not found")
+    await db.delete(bt)
+    await db.commit()
+    return {"deleted": backtest_id}
+
+
+@router.get("/compound-results", response_model=list[CompoundBacktestSummary])
+async def get_compound_backtests(
+    db: AsyncSession = Depends(get_db),
+    limit: int = 50,
+):
+    """Get list of compound backtest results (without massive JSON payloads)."""
+    q = select(
+        CompoundBacktestResult.id,
+        CompoundBacktestResult.model_type,
+        CompoundBacktestResult.start_date,
+        CompoundBacktestResult.end_date,
+        CompoundBacktestResult.initial_capital,
+        CompoundBacktestResult.final_capital,
+        CompoundBacktestResult.profit_booked,
+        CompoundBacktestResult.total_trades,
+        CompoundBacktestResult.created_at
+    ).order_by(CompoundBacktestResult.created_at.desc()).limit(limit)
+
+    res = await db.execute(q)
+    rows = res.all()
+
+    return [
+        CompoundBacktestSummary(
+            id=r.id,
+            model_type=r.model_type,
+            start_date=str(r.start_date),
+            end_date=str(r.end_date),
+            initial_capital=r.initial_capital,
+            final_capital=r.final_capital,
+            profit_booked=r.profit_booked,
+            total_trades=r.total_trades,
+            created_at=str(r.created_at)
+        ) for r in rows
+    ]
+
+
+@router.get("/compound-results/{backtest_id}")
+async def get_compound_backtest(
+    backtest_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Get complete details of a compound backtest run."""
+    res = await db.execute(select(CompoundBacktestResult).where(CompoundBacktestResult.id == backtest_id))
+    bt = res.scalar_one_or_none()
+    if not bt:
+        raise HTTPException(status_code=404, detail="Compound Backtest not found")
+
+    return {
+        "id": bt.id,
+        "model_type": bt.model_type,
+        "start_date": str(bt.start_date),
+        "end_date": str(bt.end_date),
+        "initial_capital": bt.initial_capital,
+        "final_capital": bt.final_capital,
+        "profit_booked": bt.profit_booked,
+        "total_trades": bt.total_trades,
+        "parameters": bt.parameters,
+        "equity_curve": bt.equity_curve,
+        "trade_log": bt.trade_log,
+        "created_at": str(bt.created_at)
+    }
+
+
+@router.delete("/compound-results/{backtest_id}")
+async def delete_compound_backtest(
+    backtest_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete a compound backtest result."""
+    res = await db.execute(select(CompoundBacktestResult).where(CompoundBacktestResult.id == backtest_id))
+    bt = res.scalar_one_or_none()
+    if not bt:
+        raise HTTPException(status_code=404, detail="Compound Backtest not found")
     await db.delete(bt)
     await db.commit()
     return {"deleted": backtest_id}

@@ -524,9 +524,10 @@ export function Table<T extends Record<string, any>>({ columns, data, onRowClick
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
 
   const sortedData = useMemo(() => {
-    if (!sortKey) return data;
+    const safeData = data || [];
+    if (!sortKey) return safeData;
     const sortColumn = columns.find((col) => col.key === sortKey);
-    return [...data].sort((a, b) => {
+    return [...safeData].sort((a, b) => {
       const av = sortColumn?.sortValue ? sortColumn.sortValue(a) : a[sortKey];
       const bv = sortColumn?.sortValue ? sortColumn.sortValue(b) : b[sortKey];
       if (av == null && bv == null) return 0;

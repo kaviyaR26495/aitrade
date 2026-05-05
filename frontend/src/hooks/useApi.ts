@@ -399,6 +399,37 @@ export const useRunBacktest = () => {
   });
 };
 
+export const useCompoundBacktests = () =>
+  useQuery({
+    queryKey: ['compound-backtests'],
+    queryFn: () => api.listCompoundBacktests().then(r => r.data),
+    staleTime: 5 * 60 * 1000,
+  });
+
+export const useCompoundBacktestDetail = (id: number | null) =>
+  useQuery({
+    queryKey: ['compound-backtest-detail', id],
+    queryFn: () => api.getCompoundBacktest(id!).then(r => r.data),
+    enabled: !!id,
+    staleTime: 5 * 60 * 1000,
+  });
+
+export const useRunCompoundBacktest = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (params: Record<string, unknown>) => api.runCompoundBacktest(params).then(r => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['compound-backtests'] }),
+  });
+};
+
+export const useDeleteCompoundBacktest = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: number) => api.deleteCompoundBacktest(id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['compound-backtests'] }),
+  });
+};
+
 export const useDeleteBacktest = () => {
   const qc = useQueryClient();
   return useMutation({

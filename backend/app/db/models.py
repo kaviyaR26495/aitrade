@@ -469,6 +469,24 @@ class BacktestResult(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist)
 
 
+
+class CompoundBacktestResult(Base):
+    __tablename__ = "compound_backtest_results"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    model_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    start_date: Mapped[date] = mapped_column(Date, nullable=False)
+    end_date: Mapped[date] = mapped_column(Date, nullable=False)
+    initial_capital: Mapped[float] = mapped_column(Float, nullable=False)
+    final_capital: Mapped[float] = mapped_column(Float, nullable=False)
+    profit_booked: Mapped[float] = mapped_column(Float, nullable=False)
+    total_trades: Mapped[int] = mapped_column(Integer, nullable=False)
+    parameters: Mapped[dict] = mapped_column(JSON, nullable=False)  # SL, target, regimes, max_positions
+    equity_curve: Mapped[dict] = mapped_column(JSON, nullable=False)
+    trade_log: Mapped[dict] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist)
+
+
 # ── Trade Orders ───────────────────────────────────────────────────────
 
 class TradeOrder(Base):

@@ -145,8 +145,13 @@ export const listAllModels = () => api.get('/models/all');
 // ── Backtest ──
 export const runBacktest = (params: Record<string, unknown>) =>
   api.post('/backtest/run', params);
+export const runCompoundBacktest = (params: Record<string, unknown>) =>
+  api.post('/backtest/run-compound', params);
 export const getBacktestResults = (id: number) => api.get(`/backtest/results/${id}`);
 export const listBacktestResults = () => api.get('/backtest/results');
+export const getCompoundBacktest = (id: number) => api.get(`/backtest/compound-results/${id}`);
+export const listCompoundBacktests = () => api.get('/backtest/compound-results');
+export const deleteCompoundBacktest = (id: number) => api.delete(`/backtest/compound-results/${id}`);
 export const getTradePatterns = (backtestId: number, tradeIdx: number) =>
   api.get(`/backtest/${backtestId}/trades/${tradeIdx}/patterns`);
 export const deleteBacktest = (id: number) => api.delete(`/backtest/${id}`);

@@ -3,6 +3,7 @@ import { Card, Button, Select, SearchableSelect, Input, Badge, StatCard, EmptySt
 import { useUniverseStocks, useBacktestResults, useBacktestDetail, useRunBacktest, useOhlcv, useIndicators, useDeleteBacktestBatch } from '../hooks/useApi';
 import { useAppStore } from '../store/appStore';
 import LightweightCandleChart from '../components/LightweightCandleChart';
+import CapitalSimulator from '../components/CapitalSimulator';
 import { Square, BarChart3, Play, Search, X, Trash2, ChevronDown, ChevronRight } from 'lucide-react';
 
 export default function Backtest() {
@@ -11,6 +12,8 @@ export default function Backtest() {
   const runBacktest = useRunBacktest();
   const deleteBatch = useDeleteBacktestBatch();
   const { addNotification } = useAppStore();
+
+  const [activeTab, setActiveTab] = useState<'standard' | 'simulator'>('standard');
 
   // ── Run form state ──
   const [modelType, setModelType] = useState('ensemble');
@@ -262,7 +265,24 @@ export default function Backtest() {
     <div className="space-y-6">
       <PageHeader title="Backtest" description="Test strategies against historical data" />
 
-      {/* ── Run Configuration (Compact Horizontal) ── */}
+      <div className="flex gap-4 border-b border-[var(--border)] mb-4">
+        <button
+          className={`py-2 px-4 border-b-2 font-medium text-sm transition-colors ${activeTab === 'standard' ? 'border-[var(--primary)] text-[var(--primary)]' : 'border-transparent text-[var(--text-dim)] hover:text-[var(--text)]'}`}
+          onClick={() => setActiveTab('standard')}
+        >
+          Standard Backtest
+        </button>
+        <button
+          className={`py-2 px-4 border-b-2 font-medium text-sm transition-colors ${activeTab === 'simulator' ? 'border-[var(--primary)] text-[var(--primary)]' : 'border-transparent text-[var(--text-dim)] hover:text-[var(--text)]'}`}
+          onClick={() => setActiveTab('simulator')}
+        >
+          Capital Simulator
+        </button>
+      </div>
+
+      {activeTab === 'standard' ? (
+        <>
+          {/* ── Run Configuration (Compact Horizontal) ── */}
       <Card title="Backtest Configuration" data-guide-id="backtest-config">
         <div className="flex flex-wrap items-end gap-3">
           <div className="flex-1 min-w-[180px]">
@@ -720,6 +740,10 @@ export default function Backtest() {
           </Modal>
         );
       })()}
+      </>
+      ) : (
+        <CapitalSimulator />
+      )}
     </div>
   );
 }
