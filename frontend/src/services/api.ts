@@ -157,6 +157,17 @@ export const getTradePatterns = (backtestId: number, tradeIdx: number) =>
 export const deleteBacktest = (id: number) => api.delete(`/backtest/${id}`);
 export const deleteBacktestBatch = (ids: number[]) => api.delete('/backtest/batch/delete', { data: { ids } });
 
+// ── Backfill ──
+export const startBackfill = (params: {
+  start_date: string;
+  end_date: string;
+  ensemble_config_id?: number | null;
+  override_existing: boolean;
+}) => api.post('/backfill/start', params);
+export const getBackfillStatus = () => api.get('/backfill/status');
+export const stopBackfill = () => api.post('/backfill/stop', {});
+export const getBackfillCoverage = () => api.get('/backfill/coverage');
+
 // ── Trading ──
 export const getPredictionJob = (jobId: string) =>
   api.get(`/trading/predictions/jobs/${jobId}`);

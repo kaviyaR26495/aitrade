@@ -303,6 +303,7 @@ async def get_stock_features(
     end_date: date | None = None,
     normalize: bool = True,
     use_weekly_context: bool = True,
+    row_limit: int | None = None,
 ) -> pd.DataFrame:
     """
     Get full feature matrix for a stock (OHLCV + indicators + regimes).
@@ -324,7 +325,7 @@ async def get_stock_features(
 
     Returns a DataFrame with all features, optionally normalized.
     """
-    rows = await crud.get_full_stock_features(db, stock_id, interval, start_date, end_date)
+    rows = await crud.get_full_stock_features(db, stock_id, interval, start_date, end_date, row_limit=row_limit)
     if not rows:
         return pd.DataFrame()
 
@@ -351,7 +352,7 @@ async def get_stock_features(
     # add information and would require weekly-of-weekly data.
     if use_weekly_context and interval == "day":
         try:
-            weekly_ohlcv_rows = await crud.get_ohlcv_as_dicts(db, stock_id, "week")
+            weekly_ohlcv_rows = await crud.get_ohlcv_as_dicts(db, stock_id, "week", row_limit=row_limit)
             if weekly_ohlcv_rows:
                 from app.core.data_pipeline import ohlcv_to_dataframe
                 weekly_df = ohlcv_to_dataframe(weekly_ohlcv_rows)
@@ -469,6 +470,7 @@ async def get_model_ready_data(
     start_date: date | None = None,
     end_date: date | None = None,
     use_weekly_context: bool = True,
+    row_limit: int | None = None,
 ) -> tuple[pd.DataFrame, list[str]]:
     """
     Get normalized feature DataFrame and feature column list for model input.
@@ -476,6 +478,7 @@ async def get_model_ready_data(
     df = await get_stock_features(
         db, stock_id, interval, start_date, end_date,
         normalize=True, use_weekly_context=use_weekly_context,
+        row_limit=row_limit,
     )
     if df.empty:
         return df, []

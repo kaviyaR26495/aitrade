@@ -14,6 +14,7 @@ import Settings from './pages/Settings';
 import ThemeShowcase from './components/ThemeShowcase';
 import StockSelector from './pages/StockSelector';
 import AuthCallback from './pages/AuthCallback';
+import BackfillPredictions from './pages/BackfillPredictions';
 import { useAppStore } from './store/appStore';
 
 export default function App() {
@@ -36,6 +37,7 @@ export default function App() {
           <Route path="/models" element={<ModelStudio />} />
           <Route path="/patterns" element={<PatternLab />} />
           <Route path="/backtest" element={<Backtest />} />
+          <Route path="/backfill" element={<BackfillPredictions />} />
           <Route path="/trading" element={<LiveTrading />} />
           <Route path="/portfolio" element={<Portfolio />} />
           <Route path="/settings" element={<Settings />} />

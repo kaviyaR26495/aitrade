@@ -446,6 +446,48 @@ export const useDeleteBacktestBatch = () => {
   });
 };
 
+// ── Backfill hooks ──
+export const useBackfillStatus = (enabled = true) =>
+  useQuery({
+    queryKey: ['backfill-status'],
+    queryFn: () => api.getBackfillStatus().then(r => r.data),
+    refetchInterval: (q) => {
+      if (!enabled) return false;
+      const status = q.state.data?.status;
+      if (status === 'running' || status === 'stopping') return 2000;
+      return false;
+    },
+    enabled,
+  });
+
+export const useBackfillCoverage = () =>
+  useQuery({
+    queryKey: ['backfill-coverage'],
+    queryFn: () => api.getBackfillCoverage().then(r => r.data),
+    staleTime: 10_000,
+  });
+
+export const useStartBackfill = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (params: { start_date: string; end_date: string; ensemble_config_id?: number | null; override_existing: boolean }) =>
+      api.startBackfill(params).then(r => r.data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['backfill-status'] });
+    },
+  });
+};
+
+export const useStopBackfill = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.stopBackfill().then(r => r.data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['backfill-status'] });
+    },
+  });
+};
+
 // ── Trading hooks ──
 export const usePredictionJob = (jobId: string | null) => {
   const qc = useQueryClient();

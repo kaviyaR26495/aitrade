@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections import defaultdict
 from datetime import date, timedelta
 
@@ -23,6 +24,17 @@ from app.ml import predictor
 
 START = date(2026, 4, 1)
 END   = date(2026, 4, 30)
+
+
+def _gpu_info() -> str:
+    """Return a short GPU/CPU status string for display."""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return f"GPU: {torch.cuda.get_device_name(0)} ({round(torch.cuda.get_device_properties(0).total_memory/1e9,1)} GB)"
+        return "CPU (no CUDA)"
+    except Exception:
+        return "CPU"
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -61,6 +73,7 @@ async def get_universe_count(db) -> int:
 async def main():
     print(f"\n{'='*60}")
     print(f"  Backfill & Backtest: {START}  →  {END}")
+    print(f"  Compute: {_gpu_info()}")
     print(f"{'='*60}\n")
 
     async with async_session_factory() as db:
@@ -98,6 +111,7 @@ async def main():
         for target_date in missing_dates:
             print(f"\n   ▶  Generating for {target_date} ...")
             try:
+                t0 = time.time()
                 async with async_session_factory() as db:
                     result = await predictor.run_daily_predictions(
                         db,
@@ -105,8 +119,9 @@ async def main():
                         interval="day",
                         agreement_required=False,  # looser gate so more signals populate
                     )
+                elapsed = time.time() - t0
                 n = len(result.get("results", []))
-                print(f"      ✅  {target_date}: {n} predictions generated & stored.")
+                print(f"      ✅  {target_date}: {n} predictions in {elapsed:.1f}s")
             except Exception as exc:
                 print(f"      ❌  {target_date}: generation failed — {exc}")
 

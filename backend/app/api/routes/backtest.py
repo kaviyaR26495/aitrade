@@ -684,14 +684,24 @@ async def run_compound_backtest(
         ohlcv_map[dt_str][r.stock_id] = {"close": float(r.close), "high": float(r.high), "low": float(r.low)}
         stock_ids_in_ohlcv.add(r.stock_id)
 
-    # Get Predictions + symbols
+    # Get Predictions + symbols — include ensemble_config_id so we can dedup below
     preds_res = await db.execute(
-        select(EnsemblePrediction.date, EnsemblePrediction.stock_id, EnsemblePrediction.action, EnsemblePrediction.regime_id, EnsemblePrediction.confidence, Stock.symbol)
+        select(EnsemblePrediction.date, EnsemblePrediction.stock_id, EnsemblePrediction.action, EnsemblePrediction.regime_id, EnsemblePrediction.confidence, Stock.symbol, EnsemblePrediction.ensemble_config_id)
         .join(Stock, Stock.id == EnsemblePrediction.stock_id)
         .where(EnsemblePrediction.date.in_(all_dates))
     )
-    all_db_preds = preds_res.all()
-    
+    _raw_preds = preds_res.all()
+
+    # Dedup: if multiple ensemble configs cover the same (stock_id, date) keep
+    # the row from the highest config_id (most recently trained model).
+    _best: dict[tuple, object] = {}
+    for row in _raw_preds:
+        key = (row.stock_id, row.date)
+        existing = _best.get(key)
+        if existing is None or row.ensemble_config_id > existing.ensemble_config_id:
+            _best[key] = row
+    all_db_preds = list(_best.values())
+
     # Check coverage and run live inference for stocks missing data
     from app.api.routes.backtest import _run_live_inference
     import collections
@@ -727,6 +737,20 @@ async def run_compound_backtest(
                 confidence=p.confidence,
                 regime_id=p.regime_id
             ))
+
+    # Compute actual prediction coverage
+    all_pred_dates = sorted(preds_map.keys())
+    prediction_start_date = all_pred_dates[0] if all_pred_dates else None
+    prediction_end_date = all_pred_dates[-1] if all_pred_dates else None
+    requested_start_str = str(start_d)
+    coverage_warning = None
+    if prediction_start_date and prediction_start_date > requested_start_str:
+        coverage_warning = (
+            f"Predictions only available from {prediction_start_date}. "
+            f"No signals exist for {requested_start_str} → {prediction_start_date}. "
+            f"Results reflect {prediction_start_date} – {prediction_end_date} only."
+        )
+        logger.info("Compound backtest coverage gap: requested %s but predictions start %s", requested_start_str, prediction_start_date)
 
     capital = req.initial_capital
     positions = []
@@ -885,6 +909,9 @@ async def run_compound_backtest(
         "total_trades": record.total_trades,
         "equity_curve": record.equity_curve,
         "trade_log": record.trade_log,
+        "prediction_start_date": prediction_start_date,
+        "prediction_end_date": prediction_end_date,
+        "coverage_warning": coverage_warning,
         "debug": {
             "all_dates": len(all_dates),
             "ohlcv_map_keys": len(ohlcv_map),

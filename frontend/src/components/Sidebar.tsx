@@ -2,7 +2,7 @@ import { NavLink } from 'react-router-dom';
 import {
   LayoutDashboard, Database, Layers, BrainCircuit, Search,
   BarChart3, Crosshair, Briefcase, Settings, ChevronLeft, ChevronRight,
-  TrendingUp, Palette, ListChecks,
+  TrendingUp, Palette, ListChecks, History,
 } from 'lucide-react';
 import { useAppStore } from '../store/appStore';
 import { usePipelineStatus } from '../hooks/useApi';
@@ -45,6 +45,7 @@ const NAV_SECTIONS = [
     label: 'Execution',
     items: [
       { to: '/backtest', icon: BarChart3, label: 'Backtest' },
+      { to: '/backfill', icon: History, label: 'Backfill Predictions' },
       { to: '/trading', icon: Crosshair, label: 'Live Trading' },
       { to: '/portfolio', icon: Briefcase, label: 'Portfolio' },
     ],

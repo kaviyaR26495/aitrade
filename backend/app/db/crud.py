@@ -152,6 +152,7 @@ async def get_ohlcv_as_dicts(
     interval: str,
     start_date: date | None = None,
     end_date: date | None = None,
+    row_limit: int | None = None,
 ) -> list[dict]:
     """Return OHLCV rows as plain dicts via ``mappings()``.
 
@@ -177,6 +178,19 @@ async def get_ohlcv_as_dicts(
         q = q.where(StockOHLCV.date >= start_date)
     if end_date:
         q = q.where(StockOHLCV.date <= end_date)
+    if row_limit is not None:
+        # Fetch only the most recent N rows
+        date_sub = (
+            select(StockOHLCV.date)
+            .where(
+                StockOHLCV.stock_id == stock_id,
+                StockOHLCV.interval == interval,
+            )
+            .order_by(StockOHLCV.date.desc())
+            .limit(row_limit)
+            .subquery()
+        )
+        q = q.where(StockOHLCV.date.in_(select(date_sub)))
     q = q.order_by(StockOHLCV.date)
     result = await db.execute(q)
     return [dict(row) for row in result.mappings().all()]
@@ -338,6 +352,7 @@ async def get_full_stock_features(
     interval: str,
     start_date: date | None = None,
     end_date: date | None = None,
+    row_limit: int | None = None,
 ) -> list[dict]:
     """Fetch OHLCV + Indicators + Regimes in a single fast JOIN query.
 
@@ -385,6 +400,20 @@ async def get_full_stock_features(
         stmt = stmt.where(StockOHLCV.date >= start_date)
     if end_date:
         stmt = stmt.where(StockOHLCV.date <= end_date)
+    if row_limit:
+        # Fetch only the most-recent N rows using a subquery so the JOIN
+        # is performed on the trimmed date range, keeping the result small.
+        from sqlalchemy import select as _sa_select
+        date_sub = (
+            _sa_select(StockOHLCV.date)
+            .where(StockOHLCV.stock_id == stock_id, StockOHLCV.interval == interval)
+        )
+        if end_date:
+            date_sub = date_sub.where(StockOHLCV.date <= end_date)
+        if start_date:
+            date_sub = date_sub.where(StockOHLCV.date >= start_date)
+        date_sub = date_sub.order_by(StockOHLCV.date.desc()).limit(row_limit).subquery()
+        stmt = stmt.where(StockOHLCV.date.in_(_sa_select(date_sub)))
     stmt = stmt.order_by(StockOHLCV.date)
 
     result = await db.execute(stmt)
@@ -822,6 +851,34 @@ async def get_stock_ensemble_weight(
     )
     result = await db.execute(q)
     return result.scalar_one_or_none()
+
+
+async def bulk_get_stock_ensemble_weights(
+    db: AsyncSession,
+    ensemble_config_id: int,
+) -> dict[int, StockEnsembleWeights]:
+    """Return a {stock_id: weight_row} map for an ensemble config in one query.
+
+    Use this instead of calling get_stock_ensemble_weight() in a per-stock loop
+    to avoid N+1 database round-trips during prediction runs.
+    """
+    from sqlalchemy import func as _func
+    sub = (
+        select(
+            StockEnsembleWeights.stock_id,
+            _func.max(StockEnsembleWeights.id).label("max_id"),
+        )
+        .where(StockEnsembleWeights.ensemble_config_id == ensemble_config_id)
+        .group_by(StockEnsembleWeights.stock_id)
+        .subquery()
+    )
+    q = select(StockEnsembleWeights).join(
+        sub,
+        (StockEnsembleWeights.stock_id == sub.c.stock_id)
+        & (StockEnsembleWeights.id == sub.c.max_id),
+    )
+    result = await db.execute(q)
+    return {row.stock_id: row for row in result.scalars().all()}
 
 
 # ── Trade Order CRUD ──────────────────────────────────────────────────

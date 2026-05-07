@@ -11,6 +11,7 @@ the feature pipeline remains unaffected.
 from __future__ import annotations
 
 import logging
+import time
 from datetime import date, datetime
 from typing import TYPE_CHECKING
 
@@ -36,6 +37,31 @@ _NSE_HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
     "Referer": "https://www.nseindia.com/",
 }
+
+# ── Process-level caches ──────────────────────────────────────────────────────
+# These eliminate redundant HTTP requests and DB scans when the same date range
+# is requested for hundreds of stocks in a single prediction run.
+# TTL = 30 minutes — safe for intraday use; training runs always get fresh data.
+_CACHE_TTL = 1800.0  # seconds
+
+_fii_cache:            dict[tuple, tuple[float, pd.DataFrame]] = {}  # key→(ts, df)
+_sector_breadth_cache: dict[tuple, tuple[float, pd.DataFrame]] = {}
+_sector_roc_cache:     dict[tuple, tuple[float, pd.DataFrame]] = {}
+_market_flag_cache:    dict[tuple, tuple[float, pd.DataFrame]] = {}
+_rs_index_cache:       dict[tuple, tuple[float, list]]         = {}  # key→(ts, rows)
+
+
+def _cache_get(store: dict, key: tuple):
+    """Return cached value if still fresh, else None."""
+    entry = store.get(key)
+    if entry and (time.monotonic() - entry[0]) < _CACHE_TTL:
+        return entry[1]
+    return None
+
+
+def _cache_set(store: dict, key: tuple, value) -> None:
+    store[key] = (time.monotonic(), value)
+
 
 
 def _parse_nse_date(s: str) -> date | None:
@@ -64,11 +90,16 @@ async def fetch_fii_dii(
     start_date: date,
     end_date: date,
 ) -> pd.DataFrame:
-    """Fetch FII/DII net trade from NSE API.
+    """Fetch FII/DII net trade from NSE API (result cached for 30 min).
 
     Returns a DataFrame with columns: date, fii_net, dii_net,
     fii_net_norm, dii_net_norm.  Falls back to zeros on any error.
     """
+    _key = (start_date, end_date)
+    cached = _cache_get(_fii_cache, _key)
+    if cached is not None:
+        return cached
+
     zero_index = pd.bdate_range(start=start_date, end=end_date)
     zero_df = pd.DataFrame({
         "date": zero_index.date,
@@ -111,13 +142,18 @@ async def fetch_fii_dii(
             return zero_df
 
         df = pd.DataFrame(rows).sort_values("date").reset_index(drop=True)
+        # NSE API sometimes returns duplicate dates — keep last entry per date
+        df = df.drop_duplicates(subset=["date"], keep="last").reset_index(drop=True)
         df["fii_net_norm"] = _rolling_zscore(df["fii_net"])
         df["dii_net_norm"] = _rolling_zscore(df["dii_net"])
         df = df[(df["date"] >= start_date) & (df["date"] <= end_date)]
-        return df.reset_index(drop=True)
+        result = df.reset_index(drop=True)
+        _cache_set(_fii_cache, _key, result)
+        return result
 
     except Exception as exc:
         logger.warning("FII/DII fetch failed (%s); using zero fill.", exc)
+        _cache_set(_fii_cache, _key, zero_df)  # cache failures too — avoid hammering NSE
         return zero_df
 
 
@@ -131,7 +167,13 @@ async def compute_sector_breadth(
 
     Returns DataFrame with columns: date, sector_breadth_pct.
     Falls back to a constant 0.5 when fewer than 3 sector stocks are available.
+    Result is cached for 30 min so 499 stocks sharing a sector only run once.
     """
+    _key = (sector, start_date, end_date)
+    cached = _cache_get(_sector_breadth_cache, _key)
+    if cached is not None:
+        return cached
+
     stocks = await crud.get_stocks_by_sector(db, sector)
 
     bdate_index = pd.bdate_range(start=start_date, end=end_date)
@@ -170,7 +212,9 @@ async def compute_sector_breadth(
     df["sector_breadth_pct"] = (
         df["sector_breadth_pct"].rolling(5, min_periods=1).mean()
     )
-    return df.reset_index(drop=True)
+    result = df.reset_index(drop=True)
+    _cache_set(_sector_breadth_cache, _key, result)
+    return result
 
 
 async def enrich_with_market_context(
@@ -318,13 +362,16 @@ async def compute_rs_5d(
     end_date = date_col.max()
 
     try:
-        rows = await crud.get_index_ohlcv(db, benchmark_symbol, "day", start_date, end_date)
-        if len(rows) < 6:
-            return pd.Series(0.0, index=df.index)
-
-        bdf = pd.DataFrame([{"date": r.date, "close": r.close} for r in rows])
-        bdf = bdf.sort_values("date").reset_index(drop=True)
-        bdf["bench_roc_5"] = bdf["close"].pct_change(5) * 100
+        _bench_key = (benchmark_symbol, start_date, end_date)
+        bdf = _cache_get(_rs_index_cache, _bench_key)
+        if bdf is None:
+            rows = await crud.get_index_ohlcv(db, benchmark_symbol, "day", start_date, end_date)
+            if len(rows) < 6:
+                return pd.Series(0.0, index=df.index)
+            bdf = pd.DataFrame([{"date": r.date, "close": r.close} for r in rows])
+            bdf = bdf.sort_values("date").reset_index(drop=True)
+            bdf["bench_roc_5"] = bdf["close"].pct_change(5) * 100
+            _cache_set(_rs_index_cache, _bench_key, bdf)
 
         bdf["date"] = pd.to_datetime(bdf["date"])
         df_dt = pd.to_datetime(df["date"])
@@ -353,6 +400,11 @@ async def compute_sector_roc_avg(
     Returns DataFrame with columns: date, sector_roc_avg.
     Fallback: 0.0 when fewer than 3 sector stocks are available or on error.
     """
+    _key = (sector, start_date, end_date)
+    cached = _cache_get(_sector_roc_cache, _key)
+    if cached is not None:
+        return cached
+
     fallback_df = pd.DataFrame({
         "date": pd.bdate_range(start=start_date, end=end_date).date,
         "sector_roc_avg": 0.0,
@@ -375,13 +427,16 @@ async def compute_sector_roc_avg(
             logger.debug("Skipping stock %s for sector_roc_avg: %s", stock.symbol, exc)
 
     if not date_vals:
+        _cache_set(_sector_roc_cache, _key, fallback_df)
         return fallback_df
 
     dates_sorted = sorted(date_vals.keys())
     avgs = [sum(date_vals[d]) / len(date_vals[d]) for d in dates_sorted]
     out = pd.DataFrame({"date": dates_sorted, "sector_roc_avg": avgs})
     out["sector_roc_avg"] = out["sector_roc_avg"].rolling(5, min_periods=1).mean()
-    return out.reset_index(drop=True)
+    result = out.reset_index(drop=True)
+    _cache_set(_sector_roc_cache, _key, result)
+    return result
 
 
 async def compute_market_regime_flag(
@@ -399,6 +454,11 @@ async def compute_market_regime_flag(
     Returns DataFrame with columns: date, market_above_sma200.
     Fallback: 0.5 (neutral / unknown) when fewer than 200 bars are available.
     """
+    _key = (start_date, end_date, benchmark_symbol)
+    cached = _cache_get(_market_flag_cache, _key)
+    if cached is not None:
+        return cached
+
     bdate_index = pd.bdate_range(start=start_date, end=end_date)
     fallback_df = pd.DataFrame({
         "date": bdate_index.date,
@@ -421,7 +481,9 @@ async def compute_market_regime_flag(
         bdf.loc[bdf["sma_200"].isna(), "market_above_sma200"] = 0.5
 
         out = bdf[bdf["date"] >= start_date][["date", "market_above_sma200"]].reset_index(drop=True)
+        _cache_set(_market_flag_cache, _key, out)
         return out
     except Exception as exc:
         logger.warning("market_above_sma200 computation failed (%s); using 0.5.", exc)
+        _cache_set(_market_flag_cache, _key, fallback_df)
         return fallback_df

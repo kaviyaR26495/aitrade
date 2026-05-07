@@ -205,6 +205,12 @@ export default function CapitalSimulator() {
 
       {activeResults && (
         <>
+          {activeResults.coverage_warning && (
+            <div className="flex items-start gap-3 rounded-[var(--radius)] border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-300">
+              <span className="mt-0.5 text-amber-400 shrink-0">⚠</span>
+              <span>{activeResults.coverage_warning}</span>
+            </div>
+          )}
           <div className="grid grid-cols-2 md:grid-cols-5 gap-5">
             <Card className="p-5 flex flex-col items-center justify-center">
               <span className="text-[var(--text-dim)] uppercase text-xs font-bold tracking-wider">Final Account Val</span>

@@ -123,7 +123,7 @@ async def log_errors(request: Request, call_next):
         raise
 
 # ── Route registration ────────────────────────────────────────────────
-from app.api.routes import auth, config as config_routes, data, regime, models, backtest, trading, portfolio, chat, pipeline, indices, training, fundamentals, sentiment, agents  # noqa: E402
+from app.api.routes import auth, config as config_routes, data, regime, models, backtest, trading, portfolio, chat, pipeline, indices, training, fundamentals, sentiment, agents, backfill  # noqa: E402
 
 app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
 app.include_router(config_routes.router, prefix="/api/config", tags=["config"])
@@ -140,6 +140,7 @@ app.include_router(training.router, prefix="/api/training", tags=["training"])
 app.include_router(fundamentals.router, prefix="/api/fundamentals", tags=["fundamentals"])
 app.include_router(sentiment.router, prefix="/api/sentiment", tags=["sentiment"])
 app.include_router(agents.router)
+app.include_router(backfill.router, prefix="/api/backfill", tags=["backfill"])
 
 
 @app.get("/api/health")
