@@ -12,6 +12,8 @@ export default defineConfig({
     },
   },
   server: {
+    host: '0.0.0.0',
+    allowedHosts: ['nueroalgo.in', 'www.nueroalgo.in'],
     proxy: {
       '/api': 'http://localhost:8000',
     },

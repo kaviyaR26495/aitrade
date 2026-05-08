@@ -18,7 +18,7 @@ start_backend() {
   echo "Starting backend..."
   source "$VENV"
   cd "$BACKEND_DIR"
-  uvicorn app.main:app --reload --port 8000 &
+  uvicorn app.main:app --host 0.0.0.0 --reload --port 8000 &
   echo $! > "$BACKEND_PID_FILE"
   cd -
   echo "Backend started (PID $(cat $BACKEND_PID_FILE)) at http://127.0.0.1:8000"
@@ -31,7 +31,7 @@ start_frontend() {
   fi
   echo "Starting frontend..."
   cd "$FRONTEND_DIR"
-  npm run dev &
+  npm run dev -- --host 0.0.0.0 &
   echo $! > "$FRONTEND_PID_FILE"
   cd -
   echo "Frontend started (PID $(cat $FRONTEND_PID_FILE)) at http://localhost:5173"
