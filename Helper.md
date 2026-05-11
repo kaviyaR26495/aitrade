@@ -1,28 +1,7 @@
-# Start all (Redis + Backend + Frontend + Celery Worker + Celery Beat)
+# AItrade Helper Guide
 
-sudo systemctl start redis-server
-./servers.sh start
+## Error Logging
 
-# Stop all
+- **HTTP & Server Error Logs:** `/home/karthi/work/aitrade/backend/http_errors.log`
 
-./servers.sh stop
-
-# Restart specific server
-
-./servers.sh restart backend
-./servers.sh restart frontend
-./servers.sh restart celery
-
-# Check status
-
-./servers.sh status
-
-# Targets: backend | frontend | celery | all (default)
-
-# Note: Redis must be running before starting Celery. If data sync appears stuck, check Redis:
-
-# sudo systemctl status redis-server
-
-# sudo systemctl start redis-server
-
-# ./servers.sh restart celery
+This file securely logs all requests returning a status sequence of 4xx and 5xx (including uncaught server crashes). Refer to this file to easily debug and fix exceptions.

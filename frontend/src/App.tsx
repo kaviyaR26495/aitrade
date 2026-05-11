@@ -15,6 +15,8 @@ import ThemeShowcase from './components/ThemeShowcase';
 import StockSelector from './pages/StockSelector';
 import AuthCallback from './pages/AuthCallback';
 import BackfillPredictions from './pages/BackfillPredictions';
+import Login from './pages/Login';
+import AdminDashboard from './pages/AdminDashboard';
 import { useAppStore } from './store/appStore';
 
 export default function App() {
@@ -29,8 +31,10 @@ export default function App() {
     <ErrorBoundary>
       <Routes>
         <Route path="/token" element={<AuthCallback />} />
+        <Route path="/" element={<Login />} />
         <Route element={<Layout />}>
-          <Route path="/" element={<Dashboard />} />
+          <Route path="/admin" element={<AdminDashboard />} />
+          <Route path="/dashboard" element={<Dashboard />} />
           <Route path="/data" element={<DataManager />} />
           <Route path="/stocks" element={<StockSelector />} />
           <Route path="/regime" element={<RegimeAnalysis />} />

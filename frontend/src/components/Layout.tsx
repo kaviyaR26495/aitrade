@@ -1,4 +1,4 @@
-import { Outlet, useLocation } from 'react-router-dom';
+import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useEffect, useRef, useState } from 'react';
 import Sidebar from './Sidebar';
 import ChatBot from './ChatBot';
@@ -17,8 +17,15 @@ const NOTIFICATION_STYLES = {
 export default function Layout() {
   const { notifications, removeNotification, retrainAlert, retrainDaysSince, retrainHasModels, setRetrainAlert, addNotification, checkRetrainStatus } = useAppStore();
   const location = useLocation();
+  const navigate = useNavigate();
   const mainRef = useRef<HTMLElement>(null);
   const [retrainLoading, setRetrainLoading] = useState(false);
+
+  useEffect(() => {
+    if (!localStorage.getItem('aitrade-logged-in')) {
+      navigate('/');
+    }
+  }, [navigate, location.pathname]);
 
   // Re-check retrain status on mount so that models trained after the initial
   // app load are detected and the banner is dismissed automatically.

@@ -399,7 +399,7 @@ export default function Settings() {
       <Card title="Chat Assistant" data-guide-id="chat-config-section">
         <div className="space-y-4">
           <div className="flex items-center gap-2 text-sm text-[var(--text-muted)]">
-            <span>Configure the LLM provider for the AITrade chatbot assistant.</span>
+            <span>Configure the LLM provider for the Nueroalgo.in chatbot assistant.</span>
             {chatConfigured
               ? <span className="inline-flex items-center gap-1.5 text-xs font-medium text-emerald-400"><span className="w-1.5 h-1.5 rounded-full bg-emerald-400" /> Configured</span>
               : <span className="inline-flex items-center gap-1.5 text-xs font-medium text-amber-400"><span className="w-1.5 h-1.5 rounded-full bg-amber-400" /> Not configured</span>}

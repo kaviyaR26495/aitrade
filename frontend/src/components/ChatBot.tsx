@@ -239,7 +239,7 @@ export default function ChatBot() {
         <button
           onClick={() => setIsOpen(true)}
           className="fixed bottom-6 right-6 z-40 w-13 h-13 rounded-full bg-gradient-to-br from-[var(--primary)] to-indigo-700 text-white shadow-[var(--shadow-glow)] flex items-center justify-center transition-all hover:scale-110 hover:shadow-[0_0_24px_rgba(99,102,241,0.5)]"
-          title="AITrade Assistant"
+          title="Nueroalgo.in Assistant"
         >
           <MessageCircle size={22} />
         </button>
@@ -254,7 +254,7 @@ export default function ChatBot() {
               <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-[var(--primary)] to-indigo-700 flex items-center justify-center">
                 <MessageCircle size={14} className="text-white" />
               </div>
-              <span className="font-semibold text-sm tracking-tight">AITrade Assistant</span>
+              <span className="font-semibold text-sm tracking-tight">Nueroalgo.in Assistant</span>
               {configured && (
                 <span className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.5)]" title="LLM configured" />
               )}
@@ -359,7 +359,7 @@ export default function ChatBot() {
                 <div className="w-12 h-12 mx-auto mb-3 rounded-2xl bg-[var(--primary-subtle)] flex items-center justify-center">
                   <MessageCircle size={24} className="text-[var(--primary)]" />
                 </div>
-                <p className="text-sm font-medium mb-1">Hi! I'm the AITrade Assistant.</p>
+                <p className="text-sm font-medium mb-1">Hi! I'm the Nueroalgo.in Assistant.</p>
                 <p className="text-xs text-[var(--text-muted)] leading-relaxed">Ask me anything about the app, or how to perform a task. I can even navigate you to the right page!</p>
                 {!configured && (
                   <button
@@ -416,7 +416,7 @@ export default function ChatBot() {
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={handleKeyDown}
-                placeholder="Ask about AITrade..."
+                placeholder="Ask about Nueroalgo.in..."
                 disabled={streaming}
                 className="flex-1 bg-[var(--bg-input)] border border-[var(--border)] rounded-[var(--radius)] px-3 py-2 text-sm text-[var(--text)] focus:outline-none focus:ring-2 focus:ring-[var(--primary)]/40 focus:border-[var(--primary)] disabled:opacity-50 transition-all"
               />
