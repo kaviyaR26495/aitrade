@@ -60,6 +60,7 @@ export default function AdminDashboard() {
   const [profilePhone, setProfilePhone] = useState('');
 
   const currentUserRole = localStorage.getItem('aitrade-current-role');
+  const currentUser = localStorage.getItem('aitrade-current-user');
   const navigate = useNavigate();
   const { addNotification } = useAppStore();
 
@@ -220,7 +221,7 @@ export default function AdminDashboard() {
         addNotification({ type: 'error', message: 'Account already exists' });
         return;
       }
-      storedData.push({ username, password, email, phone, role, permissions });
+      storedData.push({ username, password, email, phone, role, permissions, createdBy: currentUser });
       const displayRole = role === 'admin' ? 'Admin' : 'User';
       addNotification({ type: 'success', message: `${displayRole} ${username} created successfully!` });
     } else {
@@ -471,14 +472,14 @@ export default function AdminDashboard() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[var(--border)]">
-                    {accounts.filter(a => currentUserRole === 'admin' ? (a.role !== 'super_admin' && a.role !== 'admin') : true).length === 0 ? (
+                    {accounts.filter(a => currentUserRole === 'admin' ? (a.role !== 'super_admin' && a.role !== 'admin' && a.createdBy === currentUser) : true).length === 0 ? (
                       <tr>
                         <td colSpan={8} className="px-6 py-8 text-center text-[var(--text-muted)]">
                           No user accounts created yet. Click "Create New" to add one.
                         </td>
                       </tr>
                     ) : (
-                      accounts.filter(a => currentUserRole === 'admin' ? (a.role !== 'super_admin' && a.role !== 'admin') : true).map((account, index) => (
+                      accounts.filter(a => currentUserRole === 'admin' ? (a.role !== 'super_admin' && a.role !== 'admin' && a.createdBy === currentUser) : true).map((account, index) => (
                         <tr key={account.username} className="hover:bg-[var(--bg-hover)] transition-colors">
                           <td className="px-6 py-4 text-[var(--text-muted)] font-medium">
                             {index + 1}
