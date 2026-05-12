@@ -22,9 +22,9 @@ gymnasium==1.0.0
 d3rlpy>=2.4.0
 # Install PyTorch with CUDA 12.4 support (run: pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124)
 # Plain `pip install torch` installs CPU-only; the line below ensures the right build is recorded.
-torch==2.6.0+cu124
-torchvision==0.21.0+cu124
-torchaudio==2.6.0+cu124
+torch>=2.9.0
+torchvision
+torchaudio
 
 # ML - Distillation
 scikit-learn==1.6.1
