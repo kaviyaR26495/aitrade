@@ -360,8 +360,8 @@ export default function AdminDashboard() {
                       <td className="px-6 py-4 text-[var(--text)] font-medium capitalize">{roleObj.name.replace('_', ' ')}</td>
                       <td className="px-6 py-4">
                         <span className={`px-2.5 py-1 text-xs font-medium rounded-full ${(roleObj.permissions || []).length === SIDEBAR_OPTIONS.length
-                            ? 'bg-emerald-500/10 text-emerald-400'
-                            : 'bg-blue-500/10 text-blue-400'
+                          ? 'bg-emerald-500/10 text-emerald-400'
+                          : 'bg-blue-500/10 text-blue-400'
                           }`}>
                           {(roleObj.permissions || []).length} modules
                         </span>
@@ -455,8 +455,8 @@ export default function AdminDashboard() {
             </div>
           )}
 
-          {/* View for activeTab === 'admin' or 'user' or 'super_admin' */}
-          {(activeTab === 'super_admin' || activeTab === 'admin' || activeTab === 'user') && (
+          {/* View for activeTab === 'admin' or 'user' */}
+          {activeTab !== 'super_admin' && activeTab !== 'roles' && activeTab !== 'profile' && (
             <div className="bg-[var(--bg-elevated)] border border-[var(--border)] rounded-xl shadow-sm overflow-hidden mt-4">
               <table className="w-full text-left border-collapse">
                 <thead>
@@ -471,44 +471,14 @@ export default function AdminDashboard() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[var(--border)]">
-                  {accounts.filter(a => {
-                    // 1. Role match for the tab
-                    const isStandardUser = a.role !== 'super_admin' && a.role !== 'admin';
-                    if (activeTab === 'super_admin' && a.role !== 'super_admin') return false;
-                    if (activeTab === 'admin' && a.role !== 'admin') return false;
-                    if (activeTab === 'user' && !isStandardUser) return false;
-
-                    // 2. Hierarchy Filter
-                    if (currentUserRole === 'admin') {
-                      // Admin only sees users they created
-                      return a.role !== 'super_admin' && a.role !== 'admin' && a.createdBy === currentUser;
-                    }
-                    if (currentUserRole === 'super_admin') {
-                      // Super Admin only sees accounts they created
-                      return a.createdBy === currentUser;
-                    }
-                    return false;
-                  }).length === 0 ? (
+                  {accounts.filter(a => currentUserRole === 'admin' ? (a.role !== 'super_admin' && a.role !== 'admin' && a.createdBy === currentUser) : true).length === 0 ? (
                     <tr>
                       <td colSpan={8} className="px-6 py-8 text-center text-[var(--text-muted)]">
-                        No {activeTab.replace('_', ' ')} accounts found. Click "Create New" to add one.
+                        No user accounts created yet. Click "Create New" to add one.
                       </td>
                     </tr>
                   ) : (
-                    accounts.filter(a => {
-                      const isStandardUser = a.role !== 'super_admin' && a.role !== 'admin';
-                      if (activeTab === 'super_admin' && a.role !== 'super_admin') return false;
-                      if (activeTab === 'admin' && a.role !== 'admin') return false;
-                      if (activeTab === 'user' && !isStandardUser) return false;
-
-                      if (currentUserRole === 'admin') {
-                        return a.role !== 'super_admin' && a.role !== 'admin' && a.createdBy === currentUser;
-                      }
-                      if (currentUserRole === 'super_admin') {
-                        return a.createdBy === currentUser;
-                      }
-                      return false;
-                    }).map((account, index) => (
+                    accounts.filter(a => currentUserRole === 'admin' ? (a.role !== 'super_admin' && a.role !== 'admin' && a.createdBy === currentUser) : true).map((account, index) => (
                       <tr key={account.username} className="hover:bg-[var(--bg-hover)] transition-colors">
                         <td className="px-6 py-4 text-[var(--text-muted)] font-medium">
                           {index + 1}
@@ -524,15 +494,15 @@ export default function AdminDashboard() {
                         </td>
                         <td className="px-6 py-4">
                           <span className={`px-2.5 py-1 text-xs font-medium rounded-full ${account.role === 'super_admin' ? 'bg-amber-500/10 text-amber-400' :
-                              account.role === 'admin' ? 'bg-purple-500/10 text-purple-400' : 'bg-blue-500/10 text-blue-400'
+                            account.role === 'admin' ? 'bg-purple-500/10 text-purple-400' : 'bg-blue-500/10 text-blue-400'
                             }`}>
                             {account.role?.replace('_', ' ') || 'user'}
                           </span>
                         </td>
                         <td className="px-6 py-4">
                           <span className={`px-2.5 py-1 text-xs font-medium rounded-full ${(account.permissions || []).length === SIDEBAR_OPTIONS.length
-                              ? 'bg-emerald-500/10 text-emerald-400'
-                              : 'bg-blue-500/10 text-blue-400'
+                            ? 'bg-emerald-500/10 text-emerald-400'
+                            : 'bg-blue-500/10 text-blue-400'
                             }`}>
                             {(account.permissions || []).length} modules
                           </span>
