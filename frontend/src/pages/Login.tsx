@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useAppStore } from '../store/appStore';
 import { Eye, EyeOff } from 'lucide-react';
+import * as api from '../services/api';
 
 export default function Login() {
   const [username, setUsername] = useState('');
@@ -21,11 +22,21 @@ export default function Login() {
     }
   }, []);
 
-  const handleLogin = (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!username || !password) {
       setError('Please enter both username and password');
       return;
+    }
+
+    // Sync from backend to ensure data is shared across devices
+    try {
+      const res = await api.getSharedUsers();
+      if (res.data && Array.isArray(res.data) && res.data.length > 0) {
+        localStorage.setItem('aitrade-users', JSON.stringify(res.data));
+      }
+    } catch (err) {
+      console.warn('Backend sync failed, using local storage');
     }
 
     const storedUsersStr = localStorage.getItem('aitrade-users');
@@ -37,10 +48,18 @@ export default function Login() {
         username,
         password,
         role: 'super_admin',
-        permissions: ['*']
+        permissions: ['*'],
+        createdBy: 'system' // First user is system-created
       };
       storedUsers = [superAdminUser];
       localStorage.setItem('aitrade-users', JSON.stringify(storedUsers));
+      
+      // Save to backend so it's shared
+      try {
+        await api.saveSharedUsers(storedUsers);
+      } catch (err) {
+        console.error('Failed to save first user to backend');
+      }
       
       localStorage.setItem('aitrade-logged-in', 'true');
       localStorage.setItem('aitrade-current-user', username);

@@ -98,3 +98,45 @@ async def auth_status(db: AsyncSession = Depends(get_db)):
         return {"authenticated": False}
 
     return {"authenticated": True}
+
+
+@router.get("/users")
+async def get_shared_users(db: AsyncSession = Depends(get_db)):
+    """Fetch the shared users list from DB settings."""
+    users_json = await crud.get_setting(db, "SHARED_USERS")
+    if not users_json:
+        return []
+    import json
+    try:
+        return json.loads(users_json)
+    except:
+        return []
+
+
+@router.post("/users")
+async def save_shared_users(users: list, db: AsyncSession = Depends(get_db)):
+    """Save the shared users list to DB settings."""
+    import json
+    await crud.set_setting(db, "SHARED_USERS", json.dumps(users))
+    return {"status": "success"}
+
+
+@router.get("/roles")
+async def get_shared_roles(db: AsyncSession = Depends(get_db)):
+    """Fetch the shared roles list from DB settings."""
+    roles_json = await crud.get_setting(db, "SHARED_ROLES")
+    if not roles_json:
+        return []
+    import json
+    try:
+        return json.loads(roles_json)
+    except:
+        return []
+
+
+@router.post("/roles")
+async def save_shared_roles(roles: list, db: AsyncSession = Depends(get_db)):
+    """Save the shared roles list to DB settings."""
+    import json
+    await crud.set_setting(db, "SHARED_ROLES", json.dumps(roles))
+    return {"status": "success"}

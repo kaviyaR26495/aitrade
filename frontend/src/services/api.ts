@@ -57,6 +57,10 @@ export const getLoginUrl = () => api.get('/auth/login-url');
 export const getAuthStatus = () => api.get('/auth/status');
 export const zerodhaCallback = (requestToken: string, state?: string) =>
   api.get('/auth/callback', { params: { request_token: requestToken, state } });
+export const getSharedUsers = () => api.get<any[]>('/auth/users');
+export const saveSharedUsers = (users: any[]) => api.post('/auth/users', users);
+export const getSharedRoles = () => api.get<any[]>('/auth/roles');
+export const saveSharedRoles = (roles: any[]) => api.post('/auth/roles', roles);
 
 // ── Config ──
 export const getConfig = () => api.get('/config/');

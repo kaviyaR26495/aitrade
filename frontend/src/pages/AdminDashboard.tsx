@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useAppStore } from '../store/appStore';
 import { Shield, Plus, LogOut, Trash2, User, TrendingUp, Edit2, X, ShieldCheck, Eye, EyeOff } from 'lucide-react';
+import * as api from '../services/api';
 
 export default function AdminDashboard() {
   const [searchParams] = useSearchParams();
@@ -31,7 +32,7 @@ export default function AdminDashboard() {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [email, setEmail] = useState('');
-  const [phone, setPhone] = useState('');
+
   const SIDEBAR_OPTIONS = [
     { id: 'dashboard', label: 'Dashboard' },
     { id: 'data', label: 'Data Manager' },
@@ -45,6 +46,7 @@ export default function AdminDashboard() {
     { id: 'settings', label: 'Settings' },
     { id: 'theme', label: 'Appearance' },
     { id: 'create_user', label: 'Create User' },
+    { id: 'create_admin', label: 'Create Admin' },
     { id: 'create_super_admin', label: 'Create Super Admin' }
   ];
 
@@ -57,7 +59,7 @@ export default function AdminDashboard() {
   const [profileUsername, setProfileUsername] = useState('');
   const [profilePassword, setProfilePassword] = useState('');
   const [profileEmail, setProfileEmail] = useState('');
-  const [profilePhone, setProfilePhone] = useState('');
+
 
   const currentUserRole = localStorage.getItem('aitrade-current-role');
   const currentUser = localStorage.getItem('aitrade-current-user');
@@ -76,7 +78,7 @@ export default function AdminDashboard() {
           setProfileUsername(me.username);
           setProfilePassword(me.password || '');
           setProfileEmail(me.email || '');
-          setProfilePhone(me.phone || '');
+
         }
       }
     }
@@ -113,24 +115,49 @@ export default function AdminDashboard() {
   }, [navigate, tabParam]);
 
 
-  const loadData = () => {
-    const storedUsersStr = localStorage.getItem('aitrade-users');
-    if (storedUsersStr) {
-      setAccounts(JSON.parse(storedUsersStr));
-    } else {
-      setAccounts([]);
+  const loadData = async () => {
+    // 1. Sync Users from backend
+    try {
+      const res = await api.getSharedUsers();
+      if (res.data && Array.isArray(res.data)) {
+        setAccounts(res.data);
+        localStorage.setItem('aitrade-users', JSON.stringify(res.data));
+      } else {
+        const storedUsersStr = localStorage.getItem('aitrade-users');
+        if (storedUsersStr) setAccounts(JSON.parse(storedUsersStr));
+      }
+    } catch (err) {
+      console.error('Failed to load shared users:', err);
+      const storedUsersStr = localStorage.getItem('aitrade-users');
+      if (storedUsersStr) setAccounts(JSON.parse(storedUsersStr));
     }
-    const storedRolesStr = localStorage.getItem('aitrade-roles');
-    if (storedRolesStr) {
-      setCustomRoles(JSON.parse(storedRolesStr));
-    } else {
-      const initialRoles = [
-        { name: 'super_admin', permissions: SIDEBAR_OPTIONS.map(o => o.id) },
-        { name: 'admin', permissions: SIDEBAR_OPTIONS.map(o => o.id) },
-        { name: 'user', permissions: ['dashboard', 'trading', 'portfolio'] }
-      ];
-      setCustomRoles(initialRoles);
-      localStorage.setItem('aitrade-roles', JSON.stringify(initialRoles));
+
+    // 2. Sync Roles from backend
+    try {
+      const res = await api.getSharedRoles();
+      if (res.data && Array.isArray(res.data) && res.data.length > 0) {
+        setCustomRoles(res.data);
+        localStorage.setItem('aitrade-roles', JSON.stringify(res.data));
+      } else {
+        const storedRolesStr = localStorage.getItem('aitrade-roles');
+        if (storedRolesStr) {
+          setCustomRoles(JSON.parse(storedRolesStr));
+        } else {
+          const initialRoles = [
+            { name: 'super_admin', permissions: SIDEBAR_OPTIONS.map(o => o.id) },
+            { name: 'admin', permissions: SIDEBAR_OPTIONS.map(o => o.id) },
+            { name: 'user', permissions: ['dashboard', 'trading', 'portfolio'] }
+          ];
+          setCustomRoles(initialRoles);
+          localStorage.setItem('aitrade-roles', JSON.stringify(initialRoles));
+          // Save initial roles to backend
+          api.saveSharedRoles(initialRoles).catch(() => { });
+        }
+      }
+    } catch (err) {
+      console.error('Failed to load shared roles:', err);
+      const storedRolesStr = localStorage.getItem('aitrade-roles');
+      if (storedRolesStr) setCustomRoles(JSON.parse(storedRolesStr));
     }
   };
 
@@ -139,7 +166,7 @@ export default function AdminDashboard() {
     setUsername('');
     setPassword('');
     setEmail('');
-    setPhone('');
+
     setRole(forceRole || (activeTab === 'admin' ? 'admin' : 'user'));
     setPermissions(SIDEBAR_OPTIONS.map(o => o.id)); // Default all checked
     setIsModalOpen(true);
@@ -160,7 +187,7 @@ export default function AdminDashboard() {
     setIsRoleModalOpen(true);
   };
 
-  const handleRoleSubmit = (e: React.FormEvent) => {
+  const handleRoleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!roleName) {
       addNotification({ type: 'error', message: 'Please provide role name' });
@@ -180,14 +207,30 @@ export default function AdminDashboard() {
     }
     setCustomRoles(updatedRoles);
     localStorage.setItem('aitrade-roles', JSON.stringify(updatedRoles));
+
+    // Save to backend
+    try {
+      await api.saveSharedRoles(updatedRoles);
+    } catch (err) {
+      console.error('Failed to sync roles to backend');
+    }
+
     setIsRoleModalOpen(false);
   };
 
-  const handleDeleteRole = (nameToDelete: string) => {
+  const handleDeleteRole = async (nameToDelete: string) => {
     if (window.confirm(`Are you sure you want to delete role ${nameToDelete}?`)) {
       const updatedRoles = customRoles.filter(r => r.name !== nameToDelete);
       setCustomRoles(updatedRoles);
       localStorage.setItem('aitrade-roles', JSON.stringify(updatedRoles));
+
+      // Save to backend
+      try {
+        await api.saveSharedRoles(updatedRoles);
+      } catch (err) {
+        console.error('Failed to sync deleted role to backend');
+      }
+
       addNotification({ type: 'info', message: `Role ${nameToDelete} deleted` });
     }
   };
@@ -198,18 +241,17 @@ export default function AdminDashboard() {
     setUsername(account.username);
     setPassword(account.password || '');
     setEmail(account.email || '');
-    setPhone(account.phone || '');
+
     setRole(account.role || 'user');
     setPermissions(account.permissions || SIDEBAR_OPTIONS.map(o => o.id));
     setIsModalOpen(true);
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!username) { addNotification({ type: 'error', message: 'Please enter username' }); return; }
     if (!email) { addNotification({ type: 'error', message: 'Please enter email id' }); return; }
-    if (!phone) { addNotification({ type: 'error', message: 'Please enter phone number' }); return; }
-    if (phone.length !== 10) { addNotification({ type: 'error', message: 'Phone number must be exactly 10 digits' }); return; }
+
     if (!password) { addNotification({ type: 'error', message: 'Please enter password' }); return; }
 
     const storageKey = 'aitrade-users';
@@ -221,7 +263,7 @@ export default function AdminDashboard() {
         addNotification({ type: 'error', message: 'Account already exists' });
         return;
       }
-      storedData.push({ username, password, email, phone, role, permissions, createdBy: currentUser });
+      storedData.push({ username, password, email, role, permissions, createdBy: currentUser });
       const displayRole = role === 'admin' ? 'Admin' : 'User';
       addNotification({ type: 'success', message: `${displayRole} ${username} created successfully!` });
     } else {
@@ -233,23 +275,30 @@ export default function AdminDashboard() {
       }
 
       storedData = storedData.map((u: any) =>
-        u.username === editingOldUsername ? { ...u, username, password, email, phone, role, permissions } : u
+        u.username === editingOldUsername ? { ...u, username, password, email, role, permissions } : u
       );
       const displayRole = role === 'admin' ? 'Admin' : 'User';
       addNotification({ type: 'success', message: `${displayRole} ${username} updated successfully!` });
     }
 
     localStorage.setItem(storageKey, JSON.stringify(storedData));
+
+    // Save to backend
+    try {
+      await api.saveSharedUsers(storedData);
+    } catch (err) {
+      console.error('Failed to sync users to backend');
+    }
+
     setIsModalOpen(false);
     loadData();
   };
 
-  const handleProfileUpdate = (e: React.FormEvent) => {
+  const handleProfileUpdate = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!profileUsername) { addNotification({ type: 'error', message: 'Please enter username' }); return; }
     if (!profileEmail) { addNotification({ type: 'error', message: 'Please enter email id' }); return; }
-    if (!profilePhone) { addNotification({ type: 'error', message: 'Please enter phone number' }); return; }
-    if (profilePhone.length !== 10) { addNotification({ type: 'error', message: 'Phone number must be exactly 10 digits' }); return; }
+
     if (!profilePassword) { addNotification({ type: 'error', message: 'Please enter password' }); return; }
 
     const currentUser = localStorage.getItem('aitrade-current-user');
@@ -270,16 +319,28 @@ export default function AdminDashboard() {
     storedData[meIndex].username = profileUsername;
     storedData[meIndex].password = profilePassword;
     storedData[meIndex].email = profileEmail;
-    storedData[meIndex].phone = profilePhone;
+
 
     localStorage.setItem(storageKey, JSON.stringify(storedData));
-    localStorage.setItem('aitrade-current-user', profileUsername); // Update active session
+
+    // Update current user in session if username changed
+    if (profileUsername !== currentUser) {
+      localStorage.setItem('aitrade-current-user', profileUsername);
+    }
+
+    // Save to backend
+    try {
+      await api.saveSharedUsers(storedData);
+    } catch (err) {
+      console.error('Failed to sync profile update to backend');
+    }
+
     addNotification({ type: 'success', message: 'Profile updated successfully!' });
     loadData();
   };
 
-  const handleDelete = (usernameToDelete: string) => {
-    if (window.confirm(`Are you sure you want to delete ${usernameToDelete}?`)) {
+  const handleDelete = async (usernameToDelete: string) => {
+    if (window.confirm(`Are you sure you want to delete account ${usernameToDelete}?`)) {
       const storageKey = 'aitrade-users';
       const storedDataStr = localStorage.getItem(storageKey);
       let storedData = storedDataStr ? JSON.parse(storedDataStr) : [];
@@ -287,6 +348,13 @@ export default function AdminDashboard() {
       const userToDelete = storedData.find((u: any) => u.username === usernameToDelete);
       storedData = storedData.filter((u: any) => u.username !== usernameToDelete);
       localStorage.setItem(storageKey, JSON.stringify(storedData));
+
+      // Save to backend
+      try {
+        await api.saveSharedUsers(storedData);
+      } catch (err) {
+        console.error('Failed to sync user deletion to backend');
+      }
 
       const displayRole = userToDelete?.role === 'admin' ? 'Admin' : 'User';
       addNotification({ type: 'info', message: `${displayRole} ${usernameToDelete} deleted` });
@@ -313,7 +381,6 @@ export default function AdminDashboard() {
 
               <button
                 onClick={() => activeTab === 'roles' ? handleOpenRoleModal() : handleOpenCreateModal()}
-
                 className="flex items-center gap-2 bg-[var(--primary)] hover:bg-[var(--primary-hover)] text-white px-4 py-2 rounded-lg font-medium transition-colors shadow-sm"
               >
                 <Plus size={18} />
@@ -393,13 +460,13 @@ export default function AdminDashboard() {
               </div>
               <form onSubmit={handleProfileUpdate} className="space-y-4">
                 <div>
-                  <label className="block text-sm font-medium text-[var(--text-secondary)] mb-1">Username</label>
+                  <label className="block text-sm font-medium text-[var(--text-secondary)] mb-1">Username / Phone Number</label>
                   <input
                     type="text"
                     value={profileUsername}
                     onChange={(e) => setProfileUsername(e.target.value)}
                     className="w-full bg-[var(--bg)] border border-[var(--border)] rounded-lg px-4 py-2 text-[var(--text)] focus:outline-none focus:border-[var(--primary)] transition-colors"
-                    placeholder="Enter username"
+                    placeholder="Enter username or phone number"
                   />
                 </div>
                 <div>
@@ -412,18 +479,7 @@ export default function AdminDashboard() {
                     placeholder="Enter email id"
                   />
                 </div>
-                <div>
-                  <label className="block text-sm font-medium text-[var(--text-secondary)] mb-1">Phone Number</label>
-                  <input
-                    type="text"
-                    value={profilePhone}
-                    onChange={(e) => setProfilePhone(e.target.value.replace(/\D/g, '').slice(0, 10))}
-                    pattern="[0-9]{10}"
-                    maxLength={10}
-                    className="w-full bg-[var(--bg)] border border-[var(--border)] rounded-lg px-4 py-2 text-[var(--text)] focus:outline-none focus:border-[var(--primary)] transition-colors"
-                    placeholder="Enter 10-digit phone number"
-                  />
-                </div>
+
                 <div>
                   <label className="block text-sm font-medium text-[var(--text-secondary)] mb-1">Password</label>
                   <div className="relative">
@@ -464,7 +520,6 @@ export default function AdminDashboard() {
                     <th className="px-6 py-4 text-xs font-semibold text-[var(--text-muted)] uppercase tracking-wider w-20">S.No</th>
                     <th className="px-6 py-4 text-xs font-semibold text-[var(--text-muted)] uppercase tracking-wider">Username</th>
                     <th className="px-6 py-4 text-xs font-semibold text-[var(--text-muted)] uppercase tracking-wider">Email</th>
-                    <th className="px-6 py-4 text-xs font-semibold text-[var(--text-muted)] uppercase tracking-wider">Phone</th>
                     <th className="px-6 py-4 text-xs font-semibold text-[var(--text-muted)] uppercase tracking-wider">Role</th>
                     <th className="px-6 py-4 text-xs font-semibold text-[var(--text-muted)] uppercase tracking-wider">Access</th>
                     <th className="px-6 py-4 text-xs font-semibold text-[var(--text-muted)] uppercase tracking-wider text-right w-32">Actions</th>
@@ -488,9 +543,6 @@ export default function AdminDashboard() {
                         </td>
                         <td className="px-6 py-4 text-[var(--text-muted)] text-sm">
                           {account.email || '-'}
-                        </td>
-                        <td className="px-6 py-4 text-[var(--text-muted)] text-sm">
-                          {account.phone || '-'}
                         </td>
                         <td className="px-6 py-4">
                           <span className={`px-2.5 py-1 text-xs font-medium rounded-full ${account.role === 'super_admin' ? 'bg-amber-500/10 text-amber-400' :
@@ -572,7 +624,7 @@ export default function AdminDashboard() {
                     <label key={option.id} className="flex items-center gap-2 cursor-pointer group">
                       <input
                         type="checkbox"
-                        disabled={currentUserRole === 'admin' && option.id === 'create_super_admin'}
+                        disabled={currentUserRole === 'admin' && (option.id === 'create_super_admin' || option.id === 'create_admin')}
                         checked={permissions.includes(option.id)}
                         onChange={(e) => {
                           if (e.target.checked) setPermissions([...permissions, option.id]);
@@ -614,13 +666,13 @@ export default function AdminDashboard() {
 
             <form onSubmit={handleSubmit} className="p-6 space-y-4">
               <div>
-                <label className="block text-sm font-medium text-[var(--text-secondary)] mb-1">Username</label>
+                <label className="block text-sm font-medium text-[var(--text-secondary)] mb-1">Username / Phone Number</label>
                 <input
                   type="text"
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
                   className="w-full bg-[var(--bg)] border border-[var(--border)] rounded-lg px-4 py-2 text-[var(--text)] focus:outline-none focus:border-[var(--primary)] transition-colors"
-                  placeholder="Enter username"
+                  placeholder="Enter username or phone number"
                 />
               </div>
               <div>
@@ -652,18 +704,7 @@ export default function AdminDashboard() {
                   placeholder="Enter email id"
                 />
               </div>
-              <div>
-                <label className="block text-sm font-medium text-[var(--text-secondary)] mb-1">Phone Number</label>
-                <input
-                  type="text"
-                  value={phone}
-                  onChange={(e) => setPhone(e.target.value.replace(/\D/g, '').slice(0, 10))}
-                  pattern="[0-9]{10}"
-                  maxLength={10}
-                  className="w-full bg-[var(--bg)] border border-[var(--border)] rounded-lg px-4 py-2 text-[var(--text)] focus:outline-none focus:border-[var(--primary)] transition-colors"
-                  placeholder="Enter 10-digit phone number"
-                />
-              </div>
+
               <div>
                 <label className="block text-sm font-medium text-[var(--text-secondary)] mb-1">Role</label>
 
@@ -686,49 +727,7 @@ export default function AdminDashboard() {
 
               </div>
 
-              <div className="pt-2">
-                <div className="flex items-center justify-between mb-2">
-                  <label className="block text-sm font-medium text-[var(--text-secondary)]">Sidebar Access</label>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const selectableOptions = currentUserRole === 'admin'
-                        ? SIDEBAR_OPTIONS.filter(o => o.id !== 'create_super_admin')
-                        : SIDEBAR_OPTIONS;
-                      if (permissions.length >= selectableOptions.length) {
-                        setPermissions([]);
-                      } else {
-                        setPermissions(selectableOptions.map(o => o.id));
-                      }
-                    }}
-                    className="text-xs text-[var(--primary)] hover:underline"
-                  >
-                    {permissions.length === SIDEBAR_OPTIONS.length ? 'Deselect All' : 'Select All'}
-                  </button>
-                </div>
-                <div className="bg-[var(--bg)] border border-[var(--border)] rounded-lg p-3 grid grid-cols-2 gap-2 max-h-48 overflow-y-auto">
-                  {SIDEBAR_OPTIONS.map(option => (
-                    <label key={option.id} className="flex items-center gap-2 cursor-pointer group">
-                      <input
-                        type="checkbox"
-                        disabled={currentUserRole === 'admin' && option.id === 'create_super_admin'}
-                        checked={permissions.includes(option.id)}
-                        onChange={(e) => {
-                          if (e.target.checked) {
-                            setPermissions([...permissions, option.id]);
-                          } else {
-                            setPermissions(permissions.filter(p => p !== option.id));
-                          }
-                        }}
-                        className="w-4 h-4 rounded border-[var(--border)] text-[var(--primary)] focus:ring-[var(--primary)] bg-[var(--bg-elevated)]"
-                      />
-                      <span className="text-sm text-[var(--text-muted)] group-hover:text-[var(--text)] transition-colors">
-                        {option.label}
-                      </span>
-                    </label>
-                  ))}
-                </div>
-              </div>
+
 
               <div className="pt-4 flex items-center gap-3">
                 <button
