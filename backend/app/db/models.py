@@ -466,6 +466,7 @@ class BacktestResult(Base):
     profit_factor: Mapped[float | None] = mapped_column(Float, nullable=True)
     trades_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     trade_log: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist)
 
 
 # ── Trade Orders ───────────────────────────────────────────────────────
@@ -575,4 +576,167 @@ class PredictionJob(Base):
     batch_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist, onupdate=now_ist)
+
+
+# ── Point-in-Time Fundamental Data ────────────────────────────────────
+# PIT guarantee: each row represents what was *known* on that specific date.
+# Never backfill past dates — only insert forward as new data arrives.
+
+class StockFundamentalPIT(Base):
+    """Daily snapshot of fundamental metrics — one row per (stock, date)."""
+    __tablename__ = "stock_fundamentals_pit"
+    __table_args__ = (
+        UniqueConstraint("stock_id", "date", name="uq_fundamental_pit"),
+        Index("ix_fundamental_pit_stock_date", "stock_id", "date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    stock_id: Mapped[int] = mapped_column(Integer, ForeignKey("stocks_list.id"), nullable=False)
+    date: Mapped[date] = mapped_column(Date, nullable=False)
+    # Valuation ratios
+    pe_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)       # trailingPE
+    forward_pe: Mapped[float | None] = mapped_column(Float, nullable=True)     # forwardPE
+    pb_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)       # priceToBook
+    dividend_yield: Mapped[float | None] = mapped_column(Float, nullable=True) # dividendYield
+    # Quality metrics
+    roe: Mapped[float | None] = mapped_column(Float, nullable=True)            # returnOnEquity (0–1)
+    debt_equity: Mapped[float | None] = mapped_column(Float, nullable=True)    # debtToEquity
+    # Source tag: 'yfinance' | 'nsepython'
+    source: Mapped[str] = mapped_column(String(20), default="yfinance")
+    ingested_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist)
+
+
+class FundamentalSectorStats(Base):
+    """Daily sector-level PE aggregates for cross-sectional z-score computation."""
+    __tablename__ = "fundamental_sector_stats"
+    __table_args__ = (
+        UniqueConstraint("sector", "date", name="uq_sector_stats"),
+        Index("ix_sector_stats_date", "date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    sector: Mapped[str] = mapped_column(String(100), nullable=False)
+    date: Mapped[date] = mapped_column(Date, nullable=False)
+    sector_pe_avg: Mapped[float | None] = mapped_column(Float, nullable=True)
+    sector_pe_std: Mapped[float | None] = mapped_column(Float, nullable=True)
+    stock_count: Mapped[int] = mapped_column(Integer, default=0)
+    computed_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist)
+
+
+class StockFundamentalZScore(Base):
+    """Derived, ML-ready bounded z-scores — refreshed nightly."""
+    __tablename__ = "stock_fundamental_zscores"
+    __table_args__ = (
+        UniqueConstraint("stock_id", "date", name="uq_fundamental_zscore"),
+        Index("ix_fundamental_zscore_stock_date", "stock_id", "date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    stock_id: Mapped[int] = mapped_column(Integer, ForeignKey("stocks_list.id"), nullable=False)
+    date: Mapped[date] = mapped_column(Date, nullable=False)
+    # Z-scores: bounded ±3, zero-filled when insufficient history
+    pe_zscore_3y: Mapped[float | None] = mapped_column(Float, nullable=True)    # vs stock's own 3yr rolling mean
+    pe_zscore_sector: Mapped[float | None] = mapped_column(Float, nullable=True) # vs sector peers today
+    # Normalised quality signals (0–1)
+    roe_norm: Mapped[float | None] = mapped_column(Float, nullable=True)         # ROE clipped 0–100%, then /100
+    debt_equity_norm: Mapped[float | None] = mapped_column(Float, nullable=True) # D/E clipped 0–5, then /5, inverted
+    computed_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist)
+
+
+# ── Sentiment Data ─────────────────────────────────────────────────────
+
+class StockSentiment(Base):
+    """Daily aggregated news sentiment per stock — produced by the
+    FinBERT-triage + LLM-judgment pipeline."""
+    __tablename__ = "stock_sentiment"
+    __table_args__ = (
+        UniqueConstraint("stock_id", "date", name="uq_sentiment"),
+        Index("ix_sentiment_stock_date", "stock_id", "date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    stock_id: Mapped[int] = mapped_column(Integer, ForeignKey("stocks_list.id"), nullable=False)
+    date: Mapped[date] = mapped_column(Date, nullable=False)
+    headline_count: Mapped[int] = mapped_column(Integer, default=0)
+    neutral_filtered_count: Mapped[int] = mapped_column(Integer, default=0)
+    avg_finbert_score: Mapped[float | None] = mapped_column(Float, nullable=True)  # raw FinBERT [-1,1]
+    llm_impact_score: Mapped[float | None] = mapped_column(Float, nullable=True)   # LLM impact [-1,1]
+    llm_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ingested_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist)
+
+
+# ── Multi-Horizon LSTM Predictions ────────────────────────────────────
+
+class LSTMHorizonModel(Base):
+    """Registry entry for a trained multi-horizon LSTM model."""
+    __tablename__ = "lstm_horizon_models"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    source_rl_model_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("rl_models.id"), nullable=True)
+    hidden_size: Mapped[int] = mapped_column(Integer, default=256)
+    num_layers: Mapped[int] = mapped_column(Integer, default=2)
+    seq_len: Mapped[int] = mapped_column(Integer, default=15)
+    horizon: Mapped[int] = mapped_column(Integer, default=10)   # forecast steps
+    model_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    norm_params_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    accuracy: Mapped[float | None] = mapped_column(Float, nullable=True)
+    status: Mapped[ModelStatus] = mapped_column(Enum(ModelStatus), default=ModelStatus.pending)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist)
+
+
+class LSTMHorizonPrediction(Base):
+    """10-day rolling forecast sequences — one row per (model, stock, date)."""
+    __tablename__ = "lstm_horizon_predictions"
+    __table_args__ = (
+        UniqueConstraint("model_id", "stock_id", "prediction_date", name="uq_horizon_pred"),
+        Index("ix_horizon_pred_date", "prediction_date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    model_id: Mapped[int] = mapped_column(Integer, ForeignKey("lstm_horizon_models.id"), nullable=False)
+    stock_id: Mapped[int] = mapped_column(Integer, ForeignKey("stocks_list.id"), nullable=False)
+    prediction_date: Mapped[date] = mapped_column(Date, nullable=False)
+    # Per-horizon action (0=HOLD, 1=BUY, 2=SELL) and confidence (0-1)
+    h1_action: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    h1_conf: Mapped[float | None] = mapped_column(Float, nullable=True)
+    h2_action: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    h2_conf: Mapped[float | None] = mapped_column(Float, nullable=True)
+    h3_action: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    h3_conf: Mapped[float | None] = mapped_column(Float, nullable=True)
+    h4_action: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    h4_conf: Mapped[float | None] = mapped_column(Float, nullable=True)
+    h5_action: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    h5_conf: Mapped[float | None] = mapped_column(Float, nullable=True)
+    h6_action: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    h6_conf: Mapped[float | None] = mapped_column(Float, nullable=True)
+    h7_action: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    h7_conf: Mapped[float | None] = mapped_column(Float, nullable=True)
+    h8_action: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    h8_conf: Mapped[float | None] = mapped_column(Float, nullable=True)
+    h9_action: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    h9_conf: Mapped[float | None] = mapped_column(Float, nullable=True)
+    h10_action: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    h10_conf: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Fraction of h1–h10 steps agreeing with h1 direction
+    trend_durability_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist)
+
+
+# ── Regime-Stratified Ensemble Map ────────────────────────────────────
+
+class RegimeEnsembleMap(Base):
+    """Maps each of the 6 regime IDs to its dedicated EnsembleConfig.
+
+    The prediction engine uses this table to select the correct
+    regime-stratified model pair rather than the global ensemble.
+    Falls back to global ensemble when no row exists for a regime.
+    """
+    __tablename__ = "regime_ensemble_map"
+
+    regime_id: Mapped[int] = mapped_column(Integer, primary_key=True)   # 0-5
+    ensemble_config_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("ensemble_configs.id"), nullable=False
+    )
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist, onupdate=now_ist)

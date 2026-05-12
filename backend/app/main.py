@@ -40,6 +40,14 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         _log.warning("Startup stock list sync failed (non-fatal): %s", exc)
 
+    # Startup — check Celery broker connectivity (non-blocking)
+    try:
+        from app.workers.celery_app import celery_app as _celery
+        _celery.control.inspect(timeout=1.0).ping()
+        _log.info("Celery broker reachable.")
+    except Exception:
+        _log.warning("Celery broker not reachable — scheduled tasks will not run until Redis is available.")
+
     yield
     # Shutdown
     await engine.dispose()
@@ -61,7 +69,7 @@ app.add_middleware(
 )
 
 # ── Route registration ────────────────────────────────────────────────
-from app.api.routes import auth, config as config_routes, data, regime, models, backtest, trading, portfolio, chat, pipeline, indices, training  # noqa: E402
+from app.api.routes import auth, config as config_routes, data, regime, models, backtest, trading, portfolio, chat, pipeline, indices, training, fundamentals, sentiment, agents  # noqa: E402
 
 app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
 app.include_router(config_routes.router, prefix="/api/config", tags=["config"])
@@ -75,6 +83,9 @@ app.include_router(chat.router, prefix="/api/chat", tags=["chat"])
 app.include_router(pipeline.router, prefix="/api/pipeline", tags=["pipeline"])
 app.include_router(indices.router, prefix="/api/indices", tags=["indices"])
 app.include_router(training.router, prefix="/api/training", tags=["training"])
+app.include_router(fundamentals.router, prefix="/api/fundamentals", tags=["fundamentals"])
+app.include_router(sentiment.router, prefix="/api/sentiment", tags=["sentiment"])
+app.include_router(agents.router)
 
 
 @app.get("/api/health")

@@ -21,12 +21,21 @@ def ensemble_predict(
     knn_weight: float = 0.5,
     lstm_weight: float = 0.5,
     agreement_required: bool = True,
+    confidence_override_threshold: float = 0.85,
+    weak_hold_threshold: float = 0.55,
 ) -> list[dict[str, Any]]:
     """
     Combine KNN and LSTM predictions.
 
     knn_preds, lstm_preds: (n,) with class labels 0=HOLD, 1=BUY, 2=SELL
     knn_probs, lstm_probs: (n, 3) with class probabilities
+
+    confidence_override_threshold: if one model's directional confidence exceeds
+        this value and the other model predicts a weak HOLD (confidence below
+        ``weak_hold_threshold``), the strong signal overrides the agreement
+        requirement.  Only applies to HOLD-vs-directional cases, never to
+        hard BUY-vs-SELL conflicts.
+    weak_hold_threshold: max confidence for a HOLD to be considered "weak".
 
     Returns list of prediction dicts.
     """
@@ -46,6 +55,27 @@ def ensemble_predict(
 
         both_agree = int(knn_preds[i]) == int(lstm_preds[i])
 
+        # ── Confidence-weighted override ─────────────────────────────
+        # When one model is strongly directional (>= confidence_override_threshold)
+        # and the other predicts a weak HOLD (< weak_hold_threshold), the high-
+        # confidence signal takes precedence without requiring agreement.
+        # Hard BUY-vs-SELL conflicts are never overridden.
+        override_applied = False
+        if agreement_required and not both_agree:
+            knn_a = int(knn_preds[i])
+            lstm_a = int(lstm_preds[i])
+            knn_conf = float(knn_probs[i].max())
+            lstm_conf = float(lstm_probs[i].max())
+            is_hold_vs_dir = (knn_a == 0) != (lstm_a == 0)  # exactly one is HOLD
+            if is_hold_vs_dir:
+                direction = lstm_a if knn_a == 0 else knn_a
+                strong_conf = lstm_conf if knn_a == 0 else knn_conf
+                weak_conf = knn_conf if knn_a == 0 else lstm_conf
+                if strong_conf >= confidence_override_threshold and weak_conf < weak_hold_threshold:
+                    action = direction
+                    confidence = float(combined_probs[direction])
+                    override_applied = True
+
         # Directional agreement check (replaces exact-label agreement).
         #
         # Three cases when agreement_required=True:
@@ -57,7 +87,7 @@ def ensemble_predict(
         #
         # This preserves the precision filter while avoiding the "deadlock" where
         # KNN (geometric) and LSTM (temporal) rarely agree on the exact same candle.
-        if agreement_required and not both_agree:
+        if agreement_required and not both_agree and not override_applied:
             knn_a = int(knn_preds[i])
             lstm_a = int(lstm_preds[i])
             hard_conflict = (knn_a != 0 and lstm_a != 0 and knn_a != lstm_a)
@@ -85,6 +115,7 @@ def ensemble_predict(
             "lstm_action": int(lstm_preds[i]),
             "lstm_confidence": round(float(lstm_probs[i].max()), 4),
             "agreement": both_agree,
+            "override_applied": override_applied,
             "combined_probs": {
                 "hold": round(float(combined_probs[0]), 4),
                 "buy": round(float(combined_probs[1]), 4),

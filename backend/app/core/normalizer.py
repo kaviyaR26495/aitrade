@@ -50,6 +50,15 @@ ML_DAILY_FEATURES: list[str] = [
     "dow_sin", "dow_cos",
     "month_sin", "month_cos",
     "day_sin", "day_cos",
+    # ── Fundamental z-scores (from stock_fundamental_zscores) ─────────
+    # Already z-scored / normalised; NaN filled with 0.0 when missing
+    "pe_zscore_3y",       # PE vs 3-year rolling mean (z-score)
+    "pe_zscore_sector",   # PE vs current sector mean (z-score)
+    "roe_norm",           # ROE normalised to [-1, +1] via sigmoid
+    "debt_equity_norm",   # D/E normalised to [-1, +1] via sigmoid
+    # ── Sentiment score (from stock_sentiment) ────────────────────────
+    # Composite of FinBERT avg + LLM impact, clipped to [-1, +1]
+    "sentiment_score",
 ]
 
 ML_WEEKLY_FEATURES: list[str] = [
@@ -60,7 +69,7 @@ ML_WEEKLY_FEATURES: list[str] = [
 ]
 
 # Combined list — used by get_feature_columns() and as the final model input filter.
-ML_FEATURES: list[str] = ML_DAILY_FEATURES + ML_WEEKLY_FEATURES  # 38 total
+ML_FEATURES: list[str] = ML_DAILY_FEATURES + ML_WEEKLY_FEATURES  # 43 total
 
 
 # Columns excluded from normalization (already scaled or categorical)

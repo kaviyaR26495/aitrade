@@ -175,6 +175,8 @@ interface AppState {
 
   // Retrain alert — shown when models are stale (> 30 days since last CT run)
   retrainAlert: boolean;
+  retrainDaysSince: number | null;
+  retrainHasModels: boolean;
   setRetrainAlert: (v: boolean) => void;
 
   // Initialization
@@ -277,6 +279,8 @@ export const useAppStore = create<AppState>((set) => ({
   isAuthRefreshing: false,
 
   retrainAlert: false,
+  retrainDaysSince: null,
+  retrainHasModels: true,
   setRetrainAlert: (retrainAlert) => set({ retrainAlert }),
 
   isInitialized: true,
@@ -301,14 +305,40 @@ export const useAppStore = create<AppState>((set) => ({
         const { getRetrainStatus } = await import('../services/api');
         const retrainRes = await getRetrainStatus();
         if (retrainRes.data.needs_retrain) {
-          set({ retrainAlert: true });
+          set({ 
+            retrainAlert: true,
+            retrainDaysSince: retrainRes.data.days_since_retrain,
+            retrainHasModels: retrainRes.data.has_models ?? true,
+          });
         }
       } catch {
         // non-critical — ignore
       }
 
-      if (!authenticated) {
-        console.log('Zerodha session not active. Application will continue without live broker features.');
+      if (!authenticated && !window.location.pathname.startsWith('/token')) {
+        // Attempt Silent Refresh (skip if we're on the OAuth callback route)
+        const REFRESH_KEY = 'aitrade-last-refresh';
+        const now = Date.now();
+        const lastRefresh = sessionStorage.getItem(REFRESH_KEY);
+        
+        // Prevent infinite loops: only try auto-refreshing once every 5 minutes in this tab
+        if (!lastRefresh || (now - parseInt(lastRefresh)) > 300000) {
+          sessionStorage.setItem(REFRESH_KEY, now.toString());
+          console.log('Zerodha session expired. Attempting silent refresh...');
+          
+          try {
+            const loginRes = await getLoginUrl();
+            const loginUrl = loginRes.data.login_url;
+            if (loginUrl) {
+              // Append state=currentURL so backend knows to redirect back
+              const redirectUrl = `${loginUrl}&state=${encodeURIComponent(window.location.href)}`;
+              set({ isAuthRefreshing: true });
+              window.location.assign(redirectUrl);
+            }
+          } catch (err) {
+            console.error('Failed to trigger auto-refresh:', err);
+          }
+        }
       }
     } catch (err) {
       console.error('Initialization failed:', err);

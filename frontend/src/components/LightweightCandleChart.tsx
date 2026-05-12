@@ -106,10 +106,10 @@ export default function LightweightCandleChart({
         borderColor: grid,
         timeVisible: true,
         secondsVisible: false,
-        rightOffset: 12,
-        barSpacing: 8,
-        minBarSpacing: 2,
+        rightOffset: 3,
+        minBarSpacing: 1,
         fixLeftEdge: true,
+        fixRightEdge: true,
       },
       handleScroll: {
         mouseWheel: true,
@@ -127,26 +127,56 @@ export default function LightweightCandleChart({
     const candleSeries = chart.addSeries(CandlestickSeries, {
       upColor: up,
       downColor: down,
-      borderVisible: false,
+      borderUpColor: up,
+      borderDownColor: down,
       wickUpColor: up,
       wickDownColor: down,
+      borderVisible: true,
+      priceScaleId: 'right',
     });
 
     candleSeries.setData(ohlcv as any);
 
+    // Compute median close so we can detect indicators with a wildly different scale.
+    // e.g. VWKAMA at 162 vs VOLTAS at 1380 — if plotted on the same axis the candles
+    // get squished to a flat line.
+    const closes = ohlcv.map((d) => d.close).filter((v) => v > 0);
+    const sorted = [...closes].sort((a, b) => a - b);
+    const ohlcvMedian = sorted.length ? sorted[Math.floor(sorted.length / 2)] : 1;
+
     const lineSeriesList: { name: string; series: ISeriesApi<'Line'> }[] = [];
 
     // Add Indicators
-    indicators.forEach((ind) => {
+    indicators.forEach((ind, idx) => {
+      const vals = ind.data.map((d) => d.value).filter((v) => isFinite(v));
+      const srt = [...vals].sort((a, b) => a - b);
+      const indMedian = srt.length ? srt[Math.floor(srt.length / 2)] : 0;
+
+      // If the indicator median differs by more than 60% relative to the OHLCV median
+      // it lives on a completely different price scale — give it its own hidden scale.
+      const relDiff = ohlcvMedian > 0 ? Math.abs(indMedian - ohlcvMedian) / ohlcvMedian : 1;
+      const onMainScale = relDiff < 0.6;
+      const scaleId = onMainScale ? 'right' : `ind-${idx}`;
+
       const lineSeries = chart.addSeries(LineSeries, {
         color: ind.color,
-        lineWidth: 2,
+        lineWidth: 1,
         priceLineVisible: false,
-        lastValueVisible: true,
-        title: ind.name,
+        lastValueVisible: onMainScale,   // only show label if on same scale
+        title: onMainScale ? ind.name : '',
+        priceScaleId: scaleId,
       });
       lineSeries.setData(ind.data as any);
       lineSeriesList.push({ name: ind.name, series: lineSeries });
+
+      // Hide the axis for out-of-range overlay scales — they render visually but
+      // don't distort the main price axis.
+      if (!onMainScale) {
+        chart.priceScale(scaleId).applyOptions({
+          visible: false,
+          scaleMargins: { top: 0.7, bottom: 0 },  // pin them to the bottom 30% of the pane
+        });
+      }
     });
 
     // Add Trade Markers
@@ -206,13 +236,20 @@ export default function LightweightCandleChart({
       }
     };
 
-    const handleResize = () => {
-      if (chart && el) {
-        chart.applyOptions({ width: el.clientWidth });
+    // ResizeObserver fires whenever the container changes size — including when
+    // a modal finishes animating open and the element reaches its real width.
+    // This is more reliable than window 'resize' for charts inside modals/dialogs.
+    const ro = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (!entry) return;
+      const newWidth = entry.contentRect.width;
+      if (newWidth > 0) {
+        chart.applyOptions({ width: newWidth });
+        chart.timeScale().fitContent();
         updateVertLine();
       }
-    };
-    window.addEventListener('resize', handleResize);
+    });
+    ro.observe(el);
 
     if (verticalLineDate) {
       chart.timeScale().subscribeVisibleTimeRangeChange(updateVertLine);
@@ -221,7 +258,7 @@ export default function LightweightCandleChart({
     }
 
     return () => {
-      window.removeEventListener('resize', handleResize);
+      ro.disconnect();
       if (verticalLineDate) {
         chart.timeScale().unsubscribeVisibleTimeRangeChange(updateVertLine);
         chart.timeScale().unsubscribeVisibleLogicalRangeChange(updateVertLine);

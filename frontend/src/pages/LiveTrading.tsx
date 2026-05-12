@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react';
 import { Card, Button, Badge, StatCard, Select, EmptyState, PageHeader, Table, Modal, Checkbox, Tooltip, SkeletonTable, type TableColumn } from '../components/ui';
 import { usePredictions, useOrders, useRunPredictions, usePlaceOrder, useUniverseStocks, useOhlcv, useIndicators, useBatches, useDeleteBatch, usePredictionJob, useCancelPredictionJob, useForwardLook } from '../hooks/useApi';
 import { useAppStore } from '../store/appStore';
-import { Crosshair, Play, Shield, ShieldAlert, Trash2, XCircle, Loader2 } from 'lucide-react';
+import { Crosshair, Play, Shield, ShieldAlert, Trash2, XCircle, Loader2, Filter } from 'lucide-react';
 import { useEffect } from 'react';
 import LightweightCandleChart, { type IndicatorSeries } from '../components/LightweightCandleChart';
 
@@ -83,6 +83,11 @@ export default function LiveTrading() {
 
   const [orderConfirm, setOrderConfirm] = useState<any>(null);
   const [selectedStock, setSelectedStock] = useState<{ id: number; symbol: string; date: string; action: string } | null>(null);
+
+  // Stock selection for targeted prediction runs
+  const [showStockSelector, setShowStockSelector] = useState(false);
+  const [selectedStockIds, setSelectedStockIds] = useState<Set<number>>(new Set());
+  const [stockSearchQuery, setStockSearchQuery] = useState('');
 
   const filteredPredictions = useMemo(() => {
     const all = predictions ?? [];
@@ -247,7 +252,9 @@ export default function LiveTrading() {
   const handleRunPredictions = () => {
     if (isSubmitting || !!activeJobId) return;  // guard against rapid clicks
     setIsSubmitting(true);
-    const stockIds = universeStocks?.map((s: any) => s.id);
+    const stockIds = selectedStockIds.size > 0
+      ? Array.from(selectedStockIds)
+      : universeStocks?.map((s: any) => s.id);
     runPredictions.mutate(
       { interval, agreement_required: agreementOnly, stock_ids: stockIds, target_date: targetDate },
       {
@@ -367,6 +374,23 @@ export default function LiveTrading() {
               </Button>
             </div>
           )}
+
+          <Tooltip content="Select specific stocks to predict (default: all universe stocks)" side="bottom">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setShowStockSelector(true)}
+              disabled={isSubmitting || !!activeJobId}
+              icon={<Filter size={14} />}
+              className="h-9 gap-1.5 border border-[var(--border)] bg-[var(--bg-input)] hover:bg-[var(--bg-hover)]"
+            >
+              {selectedStockIds.size > 0 ? (
+                <span className="text-[var(--primary)] font-semibold">{selectedStockIds.size} selected</span>
+              ) : (
+                <span className="text-[var(--text-dim)]">All stocks</span>
+              )}
+            </Button>
+          </Tooltip>
 
           <Button 
             variant="primary" 
@@ -574,6 +598,75 @@ export default function LiveTrading() {
           <ForwardLookContent target={forwardLookTarget} interval={interval} />
         </Modal>
       )}
+
+      {/* Stock Selector Modal */}
+      <Modal
+        open={showStockSelector}
+        onClose={() => { setShowStockSelector(false); setStockSearchQuery(''); }}
+        title="Select Stocks for Prediction"
+        description="Choose specific stocks to predict. Leave all unchecked to predict the entire universe."
+        size="lg"
+        icon={<Filter size={20} className="text-[var(--primary)]" />}
+        footer={
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-xs text-[var(--text-dim)]">
+              {selectedStockIds.size > 0
+                ? `${selectedStockIds.size} of ${universeStocks?.length ?? 0} stocks selected`
+                : `All ${universeStocks?.length ?? 0} stocks will be predicted`}
+            </span>
+            <div className="flex gap-2">
+              <Button variant="secondary" size="sm" onClick={() => setSelectedStockIds(new Set())}>
+                Clear All
+              </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => setSelectedStockIds(new Set(universeStocks?.map((s: any) => s.id) ?? []))}
+              >
+                Select All
+              </Button>
+              <Button variant="primary" size="sm" onClick={() => { setShowStockSelector(false); setStockSearchQuery(''); }}>
+                Done
+              </Button>
+            </div>
+          </div>
+        }
+      >
+        <div className="space-y-3">
+          <input
+            type="text"
+            value={stockSearchQuery}
+            onChange={(e) => setStockSearchQuery(e.target.value)}
+            placeholder="Search symbol..."
+            className="w-full h-9 rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--bg-input)] px-3 text-sm text-[var(--text)] placeholder:text-[var(--text-dim)] focus:outline-none focus:ring-2 focus:ring-[var(--primary)]/40"
+          />
+          <div className="max-h-[380px] overflow-y-auto space-y-1 pr-1">
+            {(universeStocks ?? [])
+              .filter((s: any) => !stockSearchQuery || String(s.symbol ?? '').toLowerCase().includes(stockSearchQuery.toLowerCase()))
+              .map((s: any) => (
+                <label
+                  key={s.id}
+                  className="flex items-center gap-3 px-3 py-2 rounded-[var(--radius-sm)] hover:bg-[var(--bg-hover)] cursor-pointer transition-colors"
+                >
+                  <input
+                    type="checkbox"
+                    checked={selectedStockIds.has(s.id)}
+                    onChange={(e) => {
+                      setSelectedStockIds(prev => {
+                        const next = new Set(prev);
+                        if (e.target.checked) next.add(s.id); else next.delete(s.id);
+                        return next;
+                      });
+                    }}
+                    className="w-4 h-4 rounded border-[var(--border)] accent-[var(--primary)] cursor-pointer"
+                  />
+                  <span className="text-sm font-medium">{s.symbol}</span>
+                  {s.sector && <span className="text-xs text-[var(--text-dim)] ml-auto">{s.sector}</span>}
+                </label>
+              ))}
+          </div>
+        </div>
+      </Modal>
     </div>
   );
 }

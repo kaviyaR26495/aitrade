@@ -25,11 +25,12 @@ from sklearn.mixture import GaussianMixture
 logger = logging.getLogger(__name__)
 
 # ── Trend detection weights ────────────────────────────────────────────
-W_SMA_CROSS = 0.40
+W_SMA_CROSS = 0.30
 W_ADX = 0.15
 W_RSI = 0.15
 W_MACD = 0.15
 W_BB = 0.15
+W_ROC = 0.10  # leading indicator: 10-day rate-of-change (weights sum to 1.0)
 
 # Trend enum mapping
 BULLISH, NEUTRAL, BEARISH = "bullish", "neutral", "bearish"
@@ -133,13 +134,29 @@ def _bb_signal(df: pd.DataFrame) -> pd.Series:
     Close above BB mid → bullish, below → bearish.
     """
     close = df["close"]
-    bb_mid = df["bbl"] if "bbl" in df.columns else df.get("bb_mid")
+    bb_mid = df["bb_mid"] if "bb_mid" in df.columns else None
     if bb_mid is None:
         return pd.Series(0.0, index=df.index)
 
     signal = pd.Series(0.0, index=df.index)
     signal[close > bb_mid] = 1.0
     signal[close < bb_mid] = -1.0
+    return signal
+
+
+def _roc_signal(df: pd.DataFrame, period: int = 10) -> pd.Series:
+    """
+    Rate-of-Change leading indicator (10% weight).
+
+    Captures price momentum *before* a moving-average crossover forms,
+    providing earlier regime detection than the lagging SMA cross signal.
+
+    ROC_10 > +2% → bullish (+1)   |   ROC_10 < -2% → bearish (-1)
+    """
+    roc = df["close"].pct_change(period) * 100
+    signal = pd.Series(0.0, index=df.index)
+    signal[roc > 2.0] = 1.0
+    signal[roc < -2.0] = -1.0
     return signal
 
 
@@ -221,12 +238,13 @@ def classify_regimes(df: pd.DataFrame) -> pd.DataFrame:
     if missing:
         raise ValueError(f"Missing required columns for regime classification: {missing}")
 
-    # ── Trend: weighted majority vote of 5 signals ──
+    # ── Trend: weighted majority vote of 6 signals ──
     sma_sig = _sma_cross_signal(df)
     adx_sig = _adx_signal(df)
     rsi_sig = _rsi_signal(df)
     macd_sig = _macd_signal(df)
     bb_sig = _bb_signal(df)
+    roc_sig = _roc_signal(df)
 
     # Weighted combination (-1 to +1)
     trend_score = (
@@ -235,6 +253,7 @@ def classify_regimes(df: pd.DataFrame) -> pd.DataFrame:
         + W_RSI * rsi_sig
         + W_MACD * macd_sig
         + W_BB * bb_sig
+        + W_ROC * roc_sig
     )
 
     # Map to trend enum
@@ -246,13 +265,13 @@ def classify_regimes(df: pd.DataFrame) -> pd.DataFrame:
     # Confidence: how strongly signals agree (0-1)
     # Take absolute value of weighted score — closer to 1.0 = stronger agreement
     signals = pd.DataFrame({
-        "sma": sma_sig, "adx": adx_sig, "rsi": rsi_sig, "macd": macd_sig, "bb": bb_sig
+        "sma": sma_sig, "adx": adx_sig, "rsi": rsi_sig, "macd": macd_sig, "bb": bb_sig, "roc": roc_sig
     })
     # Count how many agree with the majority direction
     bullish_count = (signals > 0).sum(axis=1)
     bearish_count = (signals < 0).sum(axis=1)
     max_agreement = pd.concat([bullish_count, bearish_count], axis=1).max(axis=1)
-    df["regime_confidence"] = (max_agreement / 5.0).clip(0.2, 1.0)
+    df["regime_confidence"] = (max_agreement / 6.0).clip(0.2, 1.0)
 
     # ── Volatility: ATR + BB width + hist vol ──
     df = _classify_volatility(df)

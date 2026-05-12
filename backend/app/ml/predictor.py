@@ -18,11 +18,12 @@ from app.config import settings
 from app.core.data_service import get_model_ready_data
 from app.core.normalizer import prepare_model_input
 from app.db import crud
-from app.db.models import KNNModel, LSTMModel, EnsembleConfig, EnsemblePrediction
+from app.db.models import KNNModel, LSTMModel, EnsembleConfig, EnsemblePrediction, Stock
 from app.db.database import async_session_factory
 from app.ml.knn_distiller import load_knn_model, predict_knn, load_knn_norm_params
 from app.ml.lstm_distiller import load_lstm_model, predict_lstm
 from app.ml.ensemble import ensemble_predict
+from app.ml.position_sizer import sector_concentration_multiplier
 from app.core.regime_classifier import classify_regimes
 
 logger = logging.getLogger(__name__)
@@ -95,6 +96,8 @@ async def run_daily_predictions(
     lstm_model_id: int | None = None,
     job_id: str | None = None,
     batch_id: str | None = None,
+    sector_guard: bool = True,
+    weekly_confluence_filter: bool = True,
 ) -> dict[str, Any]:
     """Run ensemble predictions for all active stocks and store results.
 
@@ -219,6 +222,41 @@ async def run_daily_predictions(
     except Exception as oms_exc:
         logger.warning("OMS reconciliation failed (non-fatal): %s", oms_exc)
 
+    # Snapshot open BUY positions for sector concentration guard (best-effort)
+    open_positions_for_sector: dict[str, dict] = {}
+    total_portfolio_equity: float = 1.0
+    if sector_guard:
+        try:
+            # Build sector map from ALL stocks (not just prediction universe)
+            # so open orders for stocks outside the universe are still counted.
+            all_stocks_res = await db.execute(select(Stock))
+            stock_sector_map: dict[int, str | None] = {
+                s.id: s.sector for s in all_stocks_res.scalars().all()
+            }
+
+            raw_orders = await crud.get_open_trade_orders(db)
+            for o in raw_orders:
+                if o.transaction_type == "BUY":
+                    price = o.avg_fill_price or o.price or 0.0
+                    open_positions_for_sector[str(o.id)] = {
+                        "quantity": o.filled_quantity or o.quantity,
+                        "price": price,
+                        "sector": stock_sector_map.get(o.stock_id),
+                    }
+
+            # Use PortfolioSnapshot for total equity (cash + holdings) when available
+            snap = await crud.get_latest_portfolio_snapshot(db)
+            if snap and (snap.cash_available or 0) + (snap.holdings_value or 0) > 0:
+                total_portfolio_equity = (snap.cash_available or 0) + (snap.holdings_value or 0)
+            else:
+                # Fallback: sum open position values (underestimates equity)
+                total_portfolio_equity = max(
+                    sum(p["quantity"] * p["price"] for p in open_positions_for_sector.values()),
+                    1.0,
+                )
+        except Exception as sp_exc:
+            logger.warning("Failed to build open positions for sector guard (non-fatal): %s", sp_exc)
+
     for i, stock in enumerate(stocks):
         try:
             # Check for cancellation every N stocks to avoid per-stock session overhead
@@ -276,6 +314,26 @@ async def run_daily_predictions(
                 agreement_required=agreement_required,
             )
 
+            # ── Sector concentration guard ──────────────────────────────────
+            if preds and sector_guard and stock.sector and preds[0]["action"] == 1:
+                sect_mult = sector_concentration_multiplier(
+                    stock.sector, open_positions_for_sector, total_portfolio_equity
+                )
+                if sect_mult == 0.0:
+                    preds[0]["action"] = 0
+                    preds[0]["sector_cap_flag"] = True
+
+            # ── Weekly confluence filter ─────────────────────────────────────
+            if preds and weekly_confluence_filter and preds[0]["action"] == 1:
+                try:
+                    w_rsi = float(latest_row["weekly_rsi"].iloc[0]) if "weekly_rsi" in latest_row.columns else 1.0
+                    w_roc = float(latest_row["weekly_roc_1"].iloc[0]) if "weekly_roc_1" in latest_row.columns else 0.0
+                    if w_rsi < 0.4 and w_roc < 0:
+                        preds[0]["action"] = 0
+                        preds[0]["weekly_confluence_blocked"] = True
+                except Exception:
+                    pass
+
             if preds:
                 p = preds[0]
                 pred_row = {
@@ -295,48 +353,54 @@ async def run_daily_predictions(
                     "regime_id": regime_id,
                 }
                 
-                pending_predictions.append(EnsemblePrediction(**pred_row))
+                pending_predictions.append(pred_row)
                 # Batch-commit to avoid per-row transaction overhead
                 if len(pending_predictions) >= _COMMIT_BATCH_SIZE:
-                    db.add_all(pending_predictions)
-                    await db.commit()
+                    await crud.bulk_upsert_ensemble_predictions(db, pending_predictions)
                     pending_predictions.clear()
                     gc.collect()  # free cyclic garbage at existing periodic boundary
 
                 results.append(pred_row)
 
+        except Exception as stock_exc:
+            logger.error("Prediction failed for %s: %s", stock.symbol, stock_exc, exc_info=True)
+            errors.append({"stock_id": stock.id, "symbol": stock.symbol, "error": str(stock_exc)})
         finally:
             processed_count += 1
             # Progressive throttling: update every stock for first 10, then every 5
             is_last = processed_count == len(stocks)
             if job_id and (processed_count <= 10 or processed_count % 5 == 0 or is_last):
                 progress = int((processed_count / len(stocks)) * 100)
-                await crud.update_prediction_job(
-                    db, job_id, 
-                    completed_stocks=processed_count, 
-                    progress=progress
-                )
+                try:
+                    await crud.update_prediction_job(
+                        db, job_id,
+                        completed_stocks=processed_count,
+                        progress=progress
+                    )
+                except Exception as prog_exc:
+                    logger.warning("Failed to update prediction job progress (non-fatal): %s", prog_exc)
 
         
     # Flush any remaining predictions that didn't fill a full batch
     if pending_predictions:
-        db.add_all(pending_predictions)
-        await db.commit()
+        await crud.bulk_upsert_ensemble_predictions(db, pending_predictions)
         pending_predictions.clear()
 
-    # Finalize job status
+    # Finalize job status — use a fresh session to avoid "transaction aborted" errors
+    # that can occur when the long-running db session hit an earlier error/rollback.
     if job_id:
-        is_cancelled = False
-        job = await crud.get_prediction_job(db, job_id)
-        if job and job.status == "cancelled":
-            is_cancelled = True
-        
-        await crud.update_prediction_job(
-            db, job_id, 
-            status="cancelled" if is_cancelled else "completed",
-            batch_id=batch_id,
-            progress=100
-        )
+        try:
+            async with async_session_factory() as final_db:
+                job_check = await crud.get_prediction_job(final_db, job_id)
+                is_cancelled = bool(job_check and job_check.status == "cancelled")
+                await crud.update_prediction_job(
+                    final_db, job_id,
+                    status="cancelled" if is_cancelled else "completed",
+                    batch_id=batch_id,
+                    progress=100
+                )
+        except Exception as finalize_exc:
+            logger.error("Failed to finalize prediction job %s status: %s", job_id, finalize_exc)
 
     return {
         "date": str(target_date),

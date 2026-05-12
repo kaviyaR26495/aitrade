@@ -15,7 +15,7 @@ const NOTIFICATION_STYLES = {
 };
 
 export default function Layout() {
-  const { notifications, removeNotification, retrainAlert, setRetrainAlert, addNotification } = useAppStore();
+  const { notifications, removeNotification, retrainAlert, retrainDaysSince, retrainHasModels, setRetrainAlert, addNotification } = useAppStore();
   const location = useLocation();
   const mainRef = useRef<HTMLElement>(null);
   const [retrainLoading, setRetrainLoading] = useState(false);
@@ -43,8 +43,12 @@ export default function Layout() {
           <div className="flex items-center gap-3 px-4 py-2.5 bg-amber-500/10 border-b border-amber-500/30 text-[13px] text-[var(--text)] shrink-0">
             <AlertTriangle size={15} className="flex-shrink-0 text-amber-400" />
             <span className="flex-1">
-              Model ensemble may be stale — it has been over 30 days since the last auto-retrain.
-              Training on fresh patterns improves signal quality as market regimes evolve.
+              {retrainDaysSince === null
+                ? (retrainHasModels
+                    ? "Model ensemble not yet built — individual models exist but have not been assembled. Run auto-retrain to configure the ensemble."
+                    : "No trained models found — run auto-retrain to train and assemble the trading engine.")
+                : `Model ensemble may be stale — it has been ${retrainDaysSince} day${retrainDaysSince === 1 ? '' : 's'} since the last auto-retrain.`}
+              <span className="ml-1 text-[var(--text-muted)]">Training on fresh patterns improves signal quality as market regimes evolve.</span>
             </span>
             <button
               disabled={retrainLoading}
