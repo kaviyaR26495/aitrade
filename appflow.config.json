@@ -1,7 +1,7 @@
 {
   "apps": [
     {
-      "appId": "c3ecb1d0",
+      "appId": "903ffa29",
       "root": "frontend",
       "dependencyInstallCommand": "npm install",
       "webBuildCommand": "npm run build",
