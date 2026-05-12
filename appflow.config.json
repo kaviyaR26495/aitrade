@@ -1,7 +1,6 @@
 {
   "apps": [
     {
-      "appId": "REPLACE_WITH_YOUR_APPFLOW_APP_ID",
       "root": "frontend",
       "dependencyInstallCommand": "npm install",
       "webBuildCommand": "npm run build",
