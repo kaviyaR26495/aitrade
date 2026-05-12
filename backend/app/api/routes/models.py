@@ -12,7 +12,7 @@ from typing import Any
 import math
 
 import pandas as pd
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, UploadFile, File
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -1619,7 +1619,7 @@ async def export_model_bundle(
 @router.post("/import")
 async def import_model_bundle(
     db: AsyncSession = Depends(get_db),
-    file: "UploadFile" = None,
+    file: UploadFile = File(...),
 ):
     """Import a model bundle ZIP and register the models in the DB.
 

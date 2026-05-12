@@ -281,6 +281,13 @@ export default function AutoPilotPipeline() {
   // so the user sees the Resume button instead of a blank start panel.
   useEffect(() => {
     if (jobId) return; // Already tracking a job — nothing to restore
+    // If the user explicitly purged everything, skip the auto-restore for this
+    // page load so stale older DB jobs don't reappear as "Resume from Step N".
+    const purgedFlag = localStorage.getItem('aitrade-pipeline-purged');
+    if (purgedFlag) {
+      localStorage.removeItem('aitrade-pipeline-purged');
+      return;
+    }
     getLatestPipelineJob()
       .then((res) => {
         const latest = res.data;
@@ -398,6 +405,9 @@ export default function AutoPilotPipeline() {
             type: 'success',
             message: `Pipeline purged — ${models} model(s) and ${files} file(s) deleted.`,
           });
+          // Set a flag so the auto-restore effect skips the DB lookup on next
+          // page load — prevents older jobs from reappearing as "Resume".
+          localStorage.setItem('aitrade-pipeline-purged', 'true');
           setJobId(null);
         },
         onError: () => {

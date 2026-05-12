@@ -563,7 +563,15 @@ async def _purge_pipeline_data(job_id: str) -> dict:
                     f.unlink(missing_ok=True)
                     files_deleted.append(f.name)
 
-        # ── Finally delete the pipeline_job record itself ─────────────────
+        # ── Finally delete this pipeline_job AND all other terminal/old jobs ─
+        # Deleting all non-running jobs prevents older failed jobs from being
+        # auto-restored as "Resume from Step N" on the next page load.
+        await db.execute(
+            sqla_delete(PipelineJob).where(
+                PipelineJob.status.in_(["failed", "cancelled", "completed", "purged"])
+            )
+        )
+        # Also delete the current job in case it's still "running" (edge case)
         await db.execute(sqla_delete(PipelineJob).where(PipelineJob.id == job_id))
         await db.commit()
 

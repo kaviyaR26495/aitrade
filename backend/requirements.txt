@@ -62,3 +62,6 @@ python-dotenv==1.0.1
 httpx==0.28.1
 orjson==3.10.13
 tenacity>=8.2.0
+
+# Local packages
+-e ../trading_env

@@ -182,7 +182,7 @@ async def is_authenticated_live() -> bool:
         return True
     except Exception as e:
         err = str(e).lower()
-        if "token" in err or "access" in err or "invalid" in err or "403" in err:
+        if "token" in err or "access" in err or "invalid" in err or "403" in err or "permission" in err or getattr(e, "code", 500) == 403:
             logger.warning("Zerodha token validation failed: %s", e)
             return False
         # For other network errors, assume we're still authenticated but server is down/unreachable
