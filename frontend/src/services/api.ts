@@ -1,8 +1,11 @@
 import axios from 'axios';
 import { useAppStore } from '../store/appStore';
 
+const isMobileApp = typeof window !== 'undefined' && (window as any).Capacitor !== undefined;
+export const BASE_URL = import.meta.env.VITE_API_BASE_URL || (isMobileApp ? 'http://192.168.1.11:8000/api' : '/api');
+
 const api = axios.create({
-  baseURL: '/api',
+  baseURL: BASE_URL,
   headers: { 'Content-Type': 'application/json' },
 });
 
@@ -188,7 +191,7 @@ export async function sendChatMessage(
   provider?: string,
   model?: string,
 ): Promise<ReadableStreamDefaultReader<Uint8Array>> {
-  const res = await fetch('/api/chat', {
+  const res = await fetch(`${BASE_URL}/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ messages, page, provider, model }),
