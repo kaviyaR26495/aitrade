@@ -163,7 +163,7 @@ export default function Sidebar() {
           </div>
         ))}
 
-                {/* User Management Section */}
+        {/* User Management Section */}
         <div className="mb-1">
           {sidebarOpen && (
             <div className="flex items-center gap-2 px-2 pt-4 pb-1.5">
@@ -177,74 +177,74 @@ export default function Sidebar() {
             <div className="mx-2 my-3 h-px bg-[var(--border-light)]" />
           )}
           <div className="space-y-0.5">
-          <div className="space-y-0.5">
-            {/* Roles link - super_admin only */}
-            {userRole === 'super_admin' && (
-              <NavLink
-                to="/admin?tab=roles"
-                className={({ isActive }) => `
+            <div className="space-y-0.5">
+              {/* Roles link - super_admin only */}
+              {userRole === 'super_admin' && (
+                <NavLink
+                  to="/admin?tab=roles"
+                  className={({ isActive }) => `
                   flex items-center gap-3 px-3 py-2 rounded-[var(--radius-sm)]
                   text-[13px] font-medium transition-all duration-150 group relative
                   ${(isActive && location.search.includes('tab=roles'))
-                    ? 'bg-[var(--primary-subtle)] text-[var(--primary)] border-l-2 border-[var(--primary)] pl-[10px]'
-                    : 'text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text)]'
-                  }
+                      ? 'bg-[var(--primary-subtle)] text-[var(--primary)] border-l-2 border-[var(--primary)] pl-[10px]'
+                      : 'text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text)]'
+                    }
                 `}
-              >
-                <ShieldCheck size={18} className={`flex-shrink-0 transition-opacity ${location.search.includes('tab=roles') ? '' : 'opacity-60 group-hover:opacity-100'}`} />
-                {sidebarOpen && <span className="truncate">Roles</span>}
-                {!sidebarOpen && (
-                  <div className="absolute left-full ml-3 px-3 py-1.5 rounded-md bg-[var(--bg-elevated)] border border-[var(--border)] text-xs text-[var(--text)] whitespace-nowrap opacity-0 pointer-events-none group-hover:opacity-100 transition-opacity duration-150 shadow-[var(--shadow-lg)] z-50">
-                    Roles
-                  </div>
-                )}
-              </NavLink>
-            )}
+                >
+                  <ShieldCheck size={18} className={`flex-shrink-0 transition-opacity ${location.search.includes('tab=roles') ? '' : 'opacity-60 group-hover:opacity-100'}`} />
+                  {sidebarOpen && <span className="truncate">Roles</span>}
+                  {!sidebarOpen && (
+                    <div className="absolute left-full ml-3 px-3 py-1.5 rounded-md bg-[var(--bg-elevated)] border border-[var(--border)] text-xs text-[var(--text)] whitespace-nowrap opacity-0 pointer-events-none group-hover:opacity-100 transition-opacity duration-150 shadow-[var(--shadow-lg)] z-50">
+                      Roles
+                    </div>
+                  )}
+                </NavLink>
+              )}
 
-            {/* User link - super_admin or admin */}
-            {(userRole === 'super_admin' || userRole === 'admin') && (
-              <NavLink
-                to="/admin?tab=user"
-                className={({ isActive }) => `
+              {/* User link - super_admin or admin */}
+              {(userRole === 'super_admin' || userRole === 'admin') && (
+                <NavLink
+                  to="/admin?tab=user"
+                  className={({ isActive }) => `
                   flex items-center gap-3 px-3 py-2 rounded-[var(--radius-sm)]
                   text-[13px] font-medium transition-all duration-150 group relative
                   ${(isActive && location.search.includes('tab=user'))
-                    ? 'bg-[var(--primary-subtle)] text-[var(--primary)] border-l-2 border-[var(--primary)] pl-[10px]'
-                    : 'text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text)]'
-                  }
+                      ? 'bg-[var(--primary-subtle)] text-[var(--primary)] border-l-2 border-[var(--primary)] pl-[10px]'
+                      : 'text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text)]'
+                    }
                 `}
-              >
-                <User size={18} className={`flex-shrink-0 transition-opacity ${location.search.includes('tab=user') ? '' : 'opacity-60 group-hover:opacity-100'}`} />
-                {sidebarOpen && <span className="truncate">{userRole === 'admin' ? 'Create User' : 'User'}</span>}
-                {!sidebarOpen && (
-                  <div className="absolute left-full ml-3 px-3 py-1.5 rounded-md bg-[var(--bg-elevated)] border border-[var(--border)] text-xs text-[var(--text)] whitespace-nowrap opacity-0 pointer-events-none group-hover:opacity-100 transition-opacity duration-150 shadow-[var(--shadow-lg)] z-50">
-                    {userRole === 'admin' ? 'Create User' : 'User'}
-                  </div>
-                )}
-              </NavLink>
-            )}
+                >
+                  <User size={18} className={`flex-shrink-0 transition-opacity ${location.search.includes('tab=user') ? '' : 'opacity-60 group-hover:opacity-100'}`} />
+                  {sidebarOpen && <span className="truncate">{userRole === 'admin' ? 'Create User' : 'User'}</span>}
+                  {!sidebarOpen && (
+                    <div className="absolute left-full ml-3 px-3 py-1.5 rounded-md bg-[var(--bg-elevated)] border border-[var(--border)] text-xs text-[var(--text)] whitespace-nowrap opacity-0 pointer-events-none group-hover:opacity-100 transition-opacity duration-150 shadow-[var(--shadow-lg)] z-50">
+                      {userRole === 'admin' ? 'Create User' : 'User'}
+                    </div>
+                  )}
+                </NavLink>
+              )}
 
-            {/* My Profile link - available to everyone */}
-            <NavLink
-              to="/admin?tab=profile"
-              className={({ isActive }) => `
+              {/* My Profile link - available to everyone */}
+              <NavLink
+                to="/admin?tab=profile"
+                className={({ isActive }) => `
                 flex items-center gap-3 px-3 py-2 rounded-[var(--radius-sm)]
                 text-[13px] font-medium transition-all duration-150 group relative
                 ${(isActive && location.search.includes('tab=profile'))
-                  ? 'bg-[var(--primary-subtle)] text-[var(--primary)] border-l-2 border-[var(--primary)] pl-[10px]'
-                  : 'text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text)]'
-                }
+                    ? 'bg-[var(--primary-subtle)] text-[var(--primary)] border-l-2 border-[var(--primary)] pl-[10px]'
+                    : 'text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text)]'
+                  }
               `}
-            >
-              <ShieldCheck size={18} className={`flex-shrink-0 transition-opacity ${location.search.includes('tab=profile') ? '' : 'opacity-60 group-hover:opacity-100'}`} />
-              {sidebarOpen && <span className="truncate">My Profile</span>}
-              {!sidebarOpen && (
-                <div className="absolute left-full ml-3 px-3 py-1.5 rounded-md bg-[var(--bg-elevated)] border border-[var(--border)] text-xs text-[var(--text)] whitespace-nowrap opacity-0 pointer-events-none group-hover:opacity-100 transition-opacity duration-150 shadow-[var(--shadow-lg)] z-50">
-                  My Profile
-                </div>
-              )}
-            </NavLink>
-          </div>
+              >
+                <ShieldCheck size={18} className={`flex-shrink-0 transition-opacity ${location.search.includes('tab=profile') ? '' : 'opacity-60 group-hover:opacity-100'}`} />
+                {sidebarOpen && <span className="truncate">My Profile</span>}
+                {!sidebarOpen && (
+                  <div className="absolute left-full ml-3 px-3 py-1.5 rounded-md bg-[var(--bg-elevated)] border border-[var(--border)] text-xs text-[var(--text)] whitespace-nowrap opacity-0 pointer-events-none group-hover:opacity-100 transition-opacity duration-150 shadow-[var(--shadow-lg)] z-50">
+                    My Profile
+                  </div>
+                )}
+              </NavLink>
+            </div>
           </div>
         </div>
 
@@ -259,7 +259,7 @@ export default function Sidebar() {
               <span className="text-[9px] font-bold uppercase tracking-[0.12em] text-[var(--primary)]">Pipeline</span>
             </div>
             <div className="text-[11px] text-[var(--text-muted)] font-medium mb-3">{pipelineLabel}</div>
-            
+
             <button
               onClick={() => {
                 localStorage.removeItem('aitrade-logged-in');
