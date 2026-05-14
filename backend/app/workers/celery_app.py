@@ -57,9 +57,17 @@ celery_app.conf.update(
         "app.workers.tasks.task_morning_sentiment": {"queue": "data"},
         "app.workers.tasks.task_morning_predictions": {"queue": "ml"},
         "app.workers.tasks.task_monthly_retrain": {"queue": "ml"},
+        "app.workers.tasks.task_morning_auth_check": {"queue": "data"},
+        "app.workers.tasks.task_morning_trade_start": {"queue": "data"},
     },
     # Beat schedule (IST = UTC+5:30)
     beat_schedule={
+        # Morning auth check — 08:00 IST (02:30 UTC) Mon-Fri
+        # Safety net: alerts via Telegram if Android auto-login hasn't fired yet
+        "morning-auth-check": {
+            "task": "app.workers.tasks.task_morning_auth_check",
+            "schedule": crontab(hour=2, minute=30, day_of_week="1-5"),
+        },
         # Nightly OHLCV + indicator sync — 18:30 IST (13:00 UTC)
         "nightly-sync": {
             "task": "app.workers.tasks.task_nightly_sync",

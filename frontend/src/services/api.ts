@@ -57,6 +57,14 @@ export const getLoginUrl = () => api.get('/auth/login-url');
 export const getAuthStatus = () => api.get('/auth/status');
 export const zerodhaCallback = (requestToken: string, state?: string) =>
   api.get('/auth/callback', { params: { request_token: requestToken, state } });
+export const triggerMorningTrade = () => api.post('/auth/trigger-morning-trade');
+export const saveAutoLoginConfig = (config: {
+  zerodha_user_id: string;
+  zerodha_password: string;
+  zerodha_totp_secret: string;
+  enabled: boolean;
+}) => api.post('/auth/save-auto-login', config);
+export const getAutoLoginStatus = () => api.get('/auth/auto-login-status');
 
 // ── Config ──
 export const getConfig = () => api.get('/config/');

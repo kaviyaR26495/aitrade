@@ -557,9 +557,142 @@ async def _async_train_mh_lstm() -> dict:
             model_path=mh_path,
             accuracy=float(1.0 - metrics.get("best_val_loss", 1.0)),
             status=ModelStatus.completed,
-        )
         db.add(db_record)
         await db.commit()
         _log.info("[task_train_mh_lstm] Registered model id=%d", db_record.id)
 
     return {"model_path": mh_path, "samples": len(X), "metrics": metrics}
+
+
+# ── Task: Morning Auth Check ───────────────────────────────────────────
+
+@celery_app.task(name="app.workers.tasks.task_morning_auth_check", bind=True, max_retries=0)
+def task_morning_auth_check(self):
+    """Check Zerodha authentication at 08:00 IST.
+
+    If not authenticated, sends a Telegram alert and logs a warning so the
+    user knows to log in manually. This is the safety net for days when the
+    Android auto-login service fails (phone off, app killed, etc.).
+    """
+    _log.info("[task_morning_auth_check] Checking Zerodha auth status at 08:00 IST")
+    try:
+        return _run_async(_async_morning_auth_check())
+    except Exception as exc:
+        _log.error("[task_morning_auth_check] Failed: %s", exc)
+        return {"error": str(exc)}
+
+
+async def _async_morning_auth_check() -> dict:
+    from app.db.database import async_session_factory
+    from app.db import crud
+    from app.core import zerodha
+    from app.core.zerodha import send_emergency_alert
+
+    async with async_session_factory() as db:
+        token = await crud.get_setting(db, "KITE_ACCESS_TOKEN")
+
+    if not token:
+        msg = (
+            "⚠️ AItrade 08:00 AM Check: Zerodha NOT authenticated.\n"
+            "Auto-login may have failed. Please open the app and authenticate manually\n"
+            "to ensure today's trades are executed."
+        )
+        send_emergency_alert(msg)
+        _log.warning("[task_morning_auth_check] Zerodha not authenticated — alert sent")
+        return {"authenticated": False, "alert_sent": True}
+
+    # Restore token in memory if needed
+    if not zerodha.is_authenticated():
+        zerodha.set_access_token(token)
+
+    # Live check
+    is_valid = await zerodha.is_authenticated_live()
+    if not is_valid:
+        msg = (
+            "⚠️ AItrade 08:00 AM Check: Zerodha token EXPIRED or INVALID.\n"
+            "Please open the AItrade app and re-authenticate with Zerodha."
+        )
+        send_emergency_alert(msg)
+        _log.warning("[task_morning_auth_check] Token invalid — alert sent")
+        return {"authenticated": False, "alert_sent": True}
+
+    _log.info("[task_morning_auth_check] Zerodha authenticated ✓")
+    return {"authenticated": True, "alert_sent": False}
+
+
+# ── Task: Morning Trade Start ──────────────────────────────────────────
+
+@celery_app.task(name="app.workers.tasks.task_morning_trade_start", bind=True, max_retries=1)
+def task_morning_trade_start(self):
+    """Kick off the morning trading sequence after Zerodha connects.
+
+    Called by the Android auto-login service via POST /api/auth/trigger-morning-trade
+    after it successfully exchanges the request_token for an access_token.
+
+    Steps:
+      1. Build portfolio snapshot (reconciles cash + holdings with Zerodha)
+      2. Trigger morning predictions batch (if not already run today)
+      3. Log the summary — actual signal execution happens via separate Celery beat tasks
+    """
+    _log.info("[task_morning_trade_start] Morning trade start triggered")
+    try:
+        return _run_async(_async_morning_trade_start())
+    except Exception as exc:
+        _log.error("[task_morning_trade_start] Failed: %s", exc)
+        raise self.retry(exc=exc, countdown=60)
+
+
+async def _async_morning_trade_start() -> dict:
+    from app.db.database import async_session_factory
+    from app.core import zerodha
+
+    # 1. Build portfolio snapshot to reconcile cash/holdings with Zerodha
+    try:
+        snapshot = await zerodha.async_build_portfolio_snapshot()
+        _log.info(
+            "[task_morning_trade_start] Portfolio snapshot: cash=%.2f, holdings=%d",
+            snapshot.get("cash_available", 0), len(snapshot.get("holdings", []))
+        )
+    except Exception as exc:
+        _log.warning("[task_morning_trade_start] Portfolio snapshot failed (non-fatal): %s", exc)
+        snapshot = {}
+
+    # 2. Sync stock list from Zerodha (ensures instruments are fresh)
+    try:
+        async with async_session_factory() as db:
+            from app.core import data_pipeline
+            count = await data_pipeline.populate_stock_list(db)
+            _log.info("[task_morning_trade_start] Stock list synced: %d instruments", count)
+    except Exception as exc:
+        _log.warning("[task_morning_trade_start] Stock list sync failed (non-fatal): %s", exc)
+
+    # 3. Check if morning predictions have been run today; if not, trigger them
+    try:
+        from datetime import date
+        from app.db.database import async_session_factory
+        async with async_session_factory() as db:
+            from app.db import crud
+            last_pred_date = await crud.get_setting(db, "last_morning_prediction_date")
+            today_str = date.today().isoformat()
+            if last_pred_date != today_str:
+                from app.workers.tasks import task_morning_predictions
+                task_morning_predictions.delay()
+                _log.info("[task_morning_trade_start] Morning predictions queued")
+            else:
+                _log.info("[task_morning_trade_start] Morning predictions already ran today")
+    except Exception as exc:
+        _log.warning("[task_morning_trade_start] Predictions trigger failed (non-fatal): %s", exc)
+
+    from app.core.zerodha import send_emergency_alert
+    send_emergency_alert(
+        "✅ AItrade: Zerodha connected at 08:00 AM.\n"
+        f"Cash available: ₹{snapshot.get('cash_available', 0):,.2f}\n"
+        f"Holdings: {len(snapshot.get('holdings', []))} positions\n"
+        "Morning trading sequence started."
+    )
+
+    return {
+        "status": "trade_sequence_started",
+        "cash_available": snapshot.get("cash_available", 0),
+        "holdings_count": len(snapshot.get("holdings", [])),
+    }

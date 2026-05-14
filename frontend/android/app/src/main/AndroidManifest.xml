@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- ── Core permissions ── -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- ── Auto-login permissions ── -->
+    <!-- Wake up device at exact 8:00 AM -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+    <!-- Run foreground service while login is in progress -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <!-- Keep CPU awake during login -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Show login progress notification -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <application
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/AppTheme"
+        android:usesCleartextTraffic="true">
+
+        <activity
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode|navigation|density"
+            android:name=".MainActivity"
+            android:label="@string/title_activity_main"
+            android:theme="@style/AppTheme.NoActionBarLaunch"
+            android:launchMode="singleTask"
+            android:exported="true">
+
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+        </activity>
+
+        <!-- ── Zerodha Auto-Login Service ── -->
+        <!-- Foreground service that drives the headless WebView at 8:00 AM -->
+        <service
+            android:name=".ZerodhaAutoLoginService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Automated Zerodha daily authentication for trading" />
+        </service>
+
+        <!-- ── Alarm + Boot Receiver ── -->
+        <!-- Wakes the app at 8:00 AM and re-registers alarm after reboot -->
+        <receiver
+            android:name=".AlarmReceiver"
+            android:exported="true">
+            <intent-filter>
+                <!-- Re-register alarm after phone reboot -->
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <!-- Re-register alarm after app update -->
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <!-- The actual daily 8:00 AM login trigger -->
+                <action android:name="com.aitrade.app.ZERODHA_AUTO_LOGIN" />
+            </intent-filter>
+        </receiver>
+
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths"></meta-data>
+        </provider>
+    </application>
+
+</manifest>

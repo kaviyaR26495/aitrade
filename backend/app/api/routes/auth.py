@@ -1,5 +1,6 @@
 import asyncio
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sqlalchemy import delete
@@ -14,6 +15,13 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 KITE_TOKEN_KEY = "KITE_ACCESS_TOKEN"
+
+
+class AutoLoginConfig(BaseModel):
+    zerodha_user_id: str
+    zerodha_password: str
+    zerodha_totp_secret: str
+    enabled: bool = True
 
 
 @router.get("/login-url")
@@ -98,3 +106,70 @@ async def auth_status(db: AsyncSession = Depends(get_db)):
         return {"authenticated": False}
 
     return {"authenticated": True}
+
+
+@router.post("/trigger-morning-trade")
+async def trigger_morning_trade(db: AsyncSession = Depends(get_db)):
+    """Called by the Android auto-login service after successful Zerodha authentication.
+
+    Verifies the token is active then queues the morning trade-start Celery task.
+    This fires portfolio reconciliation and trade signal generation.
+    """
+    # Ensure in-memory token is valid
+    token = await crud.get_setting(db, KITE_TOKEN_KEY)
+    if not token:
+        raise HTTPException(status_code=401, detail="Zerodha not authenticated — no token found")
+
+    if not zerodha.is_authenticated():
+        zerodha.set_access_token(token)
+
+    is_valid = await zerodha.is_authenticated_live()
+    if not is_valid:
+        raise HTTPException(status_code=401, detail="Zerodha token is expired or invalid")
+
+    # Queue the morning trade start task via Celery
+    try:
+        from app.workers.tasks import task_morning_trade_start
+        result = task_morning_trade_start.delay()
+        logger.info("Morning trade start queued: task_id=%s", result.id)
+        return {"status": "trade_start_queued", "task_id": result.id}
+    except Exception as exc:
+        logger.error("Failed to queue morning trade task: %s", exc)
+        raise HTTPException(status_code=500, detail=f"Failed to queue trade task: {exc}")
+
+
+@router.post("/save-auto-login")
+async def save_auto_login_config(config: AutoLoginConfig, db: AsyncSession = Depends(get_db)):
+    """Store Zerodha auto-login credentials in the DB (encrypted by DB layer).
+
+    The Android app also stores these in EncryptedSharedPreferences locally.
+    This server-side copy allows the backend to perform a self-service auth
+    check at 8 AM if the Celery beat task is configured to do so.
+
+    SECURITY: Credentials are stored encrypted via the AppSetting model.
+    Only the backend process can read them.
+    """
+    await crud.set_setting(db, "ZERODHA_AUTO_LOGIN_USER_ID", config.zerodha_user_id)
+    await crud.set_setting(db, "ZERODHA_AUTO_LOGIN_ENABLED", str(config.enabled).lower())
+    # Store password and TOTP secret — backend never logs or returns these
+    if config.zerodha_password:
+        await crud.set_setting(db, "ZERODHA_AUTO_LOGIN_PASSWORD", config.zerodha_password)
+    if config.zerodha_totp_secret:
+        await crud.set_setting(db, "ZERODHA_AUTO_LOGIN_TOTP_SECRET", config.zerodha_totp_secret)
+
+    logger.info("Auto-login config saved for user: %s", config.zerodha_user_id)
+    return {"status": "saved", "enabled": config.enabled}
+
+
+@router.get("/auto-login-status")
+async def get_auto_login_status(db: AsyncSession = Depends(get_db)):
+    """Return whether auto-login is configured and enabled."""
+    user_id = await crud.get_setting(db, "ZERODHA_AUTO_LOGIN_USER_ID") or ""
+    enabled = (await crud.get_setting(db, "ZERODHA_AUTO_LOGIN_ENABLED") or "false") == "true"
+    has_password = bool(await crud.get_setting(db, "ZERODHA_AUTO_LOGIN_PASSWORD"))
+    has_totp = bool(await crud.get_setting(db, "ZERODHA_AUTO_LOGIN_TOTP_SECRET"))
+    return {
+        "configured": bool(user_id and has_password and has_totp),
+        "enabled": enabled,
+        "user_id": user_id,
+    }

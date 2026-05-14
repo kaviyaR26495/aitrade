@@ -12,10 +12,15 @@ import {
   getChatStatus,
   updateConfigBatch,
   listUniverseStocks,
+  saveAutoLoginConfig,
+  getAutoLoginStatus,
+  triggerMorningTrade,
 } from '../services/api';
 import { useAppStore } from '../store/appStore';
-import { ExternalLink, MessageCircle, Shield, ShieldCheck, ShieldAlert, Database, Server, Cpu, RefreshCw, Trash2 } from 'lucide-react';
+import { ExternalLink, MessageCircle, Shield, ShieldCheck, ShieldAlert, Database, Server, Cpu, RefreshCw, Trash2, Zap, Clock, KeyRound, Eye, EyeOff, CheckCircle2, AlertCircle, Smartphone } from 'lucide-react';
 import SystemMaintenance from '../components/SystemMaintenance';
+import { ZerodhaAutoLogin } from '../plugins/ZerodhaAutoLogin';
+import { Capacitor } from '@capacitor/core';
 
 const SETTING_FIELDS = [
   { key: 'KITE_API_KEY', label: 'Kite API Key', type: 'password', guideId: 'zerodha-api-key' },
@@ -36,11 +41,23 @@ export default function Settings() {
   const [formValues, setFormValues] = useState<Record<string, string>>({});
   const [dirty, setDirty] = useState<Set<string>>(new Set());
   const [loginUrl, setLoginUrl] = useState('');
-  const [authLoading, setAuthLoading] = useState(false);
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
   const [populateLoading, setPopulateLoading] = useState(false);
   const [showLoginSteps, setShowLoginSteps] = useState(false);
   const { data: authStatus, refetch: refetchAuth, isFetching: isAuthFetching } = useAuthStatus();
   const isAuthenticated = authStatus?.authenticated ?? false;
+
+  // Auto-Login state
+  const [autoLoginUserId, setAutoLoginUserId] = useState('');
+  const [autoLoginPassword, setAutoLoginPassword] = useState('');
+  const [autoLoginTotpSecret, setAutoLoginTotpSecret] = useState('');
+  const [autoLoginEnabled, setAutoLoginEnabled] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
+  const [showTotp, setShowTotp] = useState(false);
+  const [autoLoginSaving, setAutoLoginSaving] = useState(false);
+  const [autoLoginConfigured, setAutoLoginConfigured] = useState(false);
+  const [autoLoginTestLoading, setAutoLoginTestLoading] = useState(false);
+  const [autoLoginStatus, setAutoLoginStatus] = useState<{ configured: boolean; enabled: boolean; user_id: string } | null>(null);
 
   // Stock Universe state
   const { data: universe } = useUniverse();
@@ -145,8 +162,6 @@ export default function Settings() {
     dirty.forEach((key) => handleSave(key));
   };
 
-  const [isLoggingIn, setIsLoggingIn] = useState(false);
-
   const handleZerodhaLogin = async () => {
     try {
       setIsLoggingIn(true);
@@ -160,6 +175,96 @@ export default function Settings() {
     }
   };
 
+  // Auto-Login handlers
+  useEffect(() => {
+    const loadStatus = async () => {
+      try {
+        if (Capacitor.isNativePlatform()) {
+          // On Android APK: native plugin has the ground-truth alarm state
+          const nativeStatus = await ZerodhaAutoLogin.getStatus();
+          setAutoLoginConfigured(nativeStatus.configured);
+          setAutoLoginEnabled(nativeStatus.enabled);
+          setAutoLoginUserId(nativeStatus.userId || '');
+          setAutoLoginStatus({ configured: nativeStatus.configured, enabled: nativeStatus.enabled, user_id: nativeStatus.userId });
+        } else {
+          // On web: use the backend API
+          const res = await getAutoLoginStatus();
+          setAutoLoginStatus(res.data);
+          setAutoLoginEnabled(res.data.enabled);
+          setAutoLoginUserId(res.data.user_id || '');
+          setAutoLoginConfigured(res.data.configured);
+        }
+      } catch {
+        // Non-fatal — user just hasn't set it up yet
+      }
+    };
+    loadStatus();
+  }, []);
+
+  const handleSaveAutoLogin = async () => {
+    if (!autoLoginUserId || !autoLoginPassword || !autoLoginTotpSecret) {
+      addNotification({ type: 'error', message: 'All three fields (User ID, Password, TOTP Secret) are required' });
+      return;
+    }
+    setAutoLoginSaving(true);
+    try {
+      // Layer 1: Save to backend DB (for server-side Celery auth check + Telegram alerts)
+      await saveAutoLoginConfig({
+        zerodha_user_id: autoLoginUserId,
+        zerodha_password: autoLoginPassword,
+        zerodha_totp_secret: autoLoginTotpSecret,
+        enabled: autoLoginEnabled,
+      });
+
+      // Layer 2: Save to device's EncryptedSharedPreferences + schedule AlarmManager alarm
+      // This only works on the Android APK — on web it's a no-op
+      if (Capacitor.isNativePlatform()) {
+        await ZerodhaAutoLogin.saveCredentials({
+          userId: autoLoginUserId,
+          password: autoLoginPassword,
+          totpSecret: autoLoginTotpSecret,
+          enabled: autoLoginEnabled,
+        });
+      }
+
+      setAutoLoginConfigured(true);
+      setAutoLoginPassword('');
+      setAutoLoginTotpSecret('');
+
+      const msg = Capacitor.isNativePlatform()
+        ? autoLoginEnabled
+          ? '✅ Auto-login enabled — alarm set for 8:00 AM daily. Credentials stored on device.'
+          : '💾 Config saved (disabled). Toggle Enable to activate the daily alarm.'
+        : autoLoginEnabled
+          ? '✅ Config saved to server. Install the APK on your phone to activate the 8 AM alarm.'
+          : '💾 Config saved to server (disabled).';
+
+      addNotification({ type: 'success', message: msg });
+    } catch (e: any) {
+      addNotification({ type: 'error', message: e?.response?.data?.detail ?? 'Failed to save auto-login config' });
+    } finally {
+      setAutoLoginSaving(false);
+    }
+  };
+
+  const handleTestAutoLogin = async () => {
+    setAutoLoginTestLoading(true);
+    try {
+      if (Capacitor.isNativePlatform()) {
+        // On Android APK: fire the native login service right now (full WebView flow)
+        const result = await ZerodhaAutoLogin.testLoginNow();
+        addNotification({ type: 'success', message: `📱 ${result.message} — watch for the notification` });
+      } else {
+        // On web: trigger the backend trade sequence (requires Zerodha already connected)
+        const res = await triggerMorningTrade();
+        addNotification({ type: 'success', message: `✅ Trade sequence queued: task ${res.data.task_id}` });
+      }
+    } catch (e: any) {
+      addNotification({ type: 'error', message: e?.response?.data?.detail ?? 'Test failed — ensure Zerodha is connected first' });
+    } finally {
+      setAutoLoginTestLoading(false);
+    }
+  };
 
   const handlePopulateFromZerodha = async () => {
     setPopulateLoading(true);
@@ -275,6 +380,163 @@ export default function Settings() {
                 <Database size={14} /> Populate From Zerodha
               </Button>
             </div>
+        </div>
+      </Card>
+
+      {/* Auto-Login Configuration */}
+      <Card title="Automated Daily Login (8 AM)">
+        <div className="space-y-5">
+          {/* Status Banner */}
+          <div className={`flex flex-wrap items-center justify-between gap-3 p-4 rounded-[var(--radius)] ${autoLoginConfigured && autoLoginEnabled ? 'bg-emerald-500/10 border border-emerald-500/30' : autoLoginConfigured ? 'bg-amber-500/10 border border-amber-500/30' : 'bg-[var(--bg-input)] border border-[var(--border)]'}`}>
+            <div className="flex items-center gap-3">
+              {autoLoginConfigured && autoLoginEnabled
+                ? <CheckCircle2 size={18} className="text-emerald-400 flex-shrink-0" />
+                : autoLoginConfigured
+                ? <Clock size={18} className="text-amber-400 flex-shrink-0" />
+                : <AlertCircle size={18} className="text-[var(--text-muted)] flex-shrink-0" />
+              }
+              <div>
+                <p className={`text-sm font-semibold ${autoLoginConfigured && autoLoginEnabled ? 'text-emerald-300' : autoLoginConfigured ? 'text-amber-300' : 'text-[var(--text-muted)]'}`}>
+                  {autoLoginConfigured && autoLoginEnabled
+                    ? '✅ Auto-login active — Zerodha will connect at 8:00 AM daily'
+                    : autoLoginConfigured
+                    ? '⚡ Configured but disabled — toggle to activate'
+                    : '🔒 Not configured — set up below for hands-free daily login'
+                  }
+                </p>
+                {autoLoginStatus?.user_id && (
+                  <p className="text-xs text-[var(--text-muted)] mt-0.5">User: {autoLoginStatus.user_id}</p>
+                )}
+              </div>
+            </div>
+            {autoLoginConfigured && (
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-[var(--text-muted)]">Enabled</span>
+                <button
+                  type="button"
+                  onClick={() => setAutoLoginEnabled(v => !v)}
+                  className={`relative w-10 h-5 rounded-full transition-colors ${autoLoginEnabled ? 'bg-emerald-500' : 'bg-[var(--border)]'}`}
+                >
+                  <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${autoLoginEnabled ? 'translate-x-5' : ''}`} />
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* Platform context banner */}
+          <div className={`flex items-center gap-3 p-3 rounded-[var(--radius)] text-xs ${Capacitor.isNativePlatform() ? 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-300' : 'bg-[var(--bg-input)] border border-[var(--border)] text-[var(--text-muted)]'}`}>
+            <Smartphone size={14} className="flex-shrink-0" />
+            {Capacitor.isNativePlatform()
+              ? '📱 Running on Android APK — the 8 AM alarm will fire even when the app is closed.'
+              : '🌐 Running in browser — save config here, then open the app on your phone to activate the daily alarm.'
+            }
+          </div>
+
+          {/* How it works */}
+          <div className="p-4 rounded-[var(--radius)] bg-blue-500/5 border border-blue-500/20">
+            <div className="flex items-start gap-3">
+              <Zap size={16} className="text-blue-400 flex-shrink-0 mt-0.5" />
+              <div>
+                <p className="text-xs font-semibold text-blue-300 mb-1">How automated login works</p>
+                <ol className="text-xs text-[var(--text-muted)] space-y-1 list-decimal list-inside">
+                  <li>At 8:00 AM, the Android app wakes up automatically (even if you're asleep)</li>
+                  <li>It opens Zerodha's login page in the background</li>
+                  <li>Fills in your User ID, Password, and computes the TOTP code automatically</li>
+                  <li>Sends the token to the server — trading begins</li>
+                  <li>You get a notification: "✅ Connected to Zerodha"</li>
+                </ol>
+              </div>
+            </div>
+          </div>
+
+          {/* TOTP Secret help */}
+          <div className="p-4 rounded-[var(--radius)] bg-amber-500/5 border border-amber-500/20">
+            <div className="flex items-start gap-3">
+              <KeyRound size={16} className="text-amber-400 flex-shrink-0 mt-0.5" />
+              <div>
+                <p className="text-xs font-semibold text-amber-300 mb-1">Where to find your TOTP Secret Key</p>
+                <p className="text-xs text-[var(--text-muted)]">
+                  Go to <strong className="text-amber-200">Zerodha Console → My Profile → Security → Two-factor authentication → Setup TOTP</strong>.
+                  The "Secret key" is the 32-character code shown (e.g. <code className="font-mono bg-black/30 px-1 rounded">JBSWY3DPEHPK3PXP...</code>).
+                  This is NOT the 6-digit code — it's the seed used to generate it. Store this once; it doesn't change.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          {/* Credential fields */}
+          <div className="grid grid-cols-1 gap-4">
+            <Input
+              value={autoLoginUserId}
+              onChange={setAutoLoginUserId}
+              label="Zerodha User ID"
+              placeholder="e.g. AB1234"
+              id="auto-login-user-id"
+            />
+            <div className="relative">
+              <Input
+                value={autoLoginPassword}
+                onChange={setAutoLoginPassword}
+                label="Zerodha Password"
+                type={showPassword ? 'text' : 'password'}
+                placeholder={autoLoginConfigured ? '••••••• (saved — enter new to replace)' : 'Your Zerodha login password'}
+                id="auto-login-password"
+              />
+              <button
+                type="button"
+                onClick={() => setShowPassword(v => !v)}
+                className="absolute right-3 top-8 text-[var(--text-muted)] hover:text-[var(--text)] transition-colors"
+              >
+                {showPassword ? <EyeOff size={14} /> : <Eye size={14} />}
+              </button>
+            </div>
+            <div className="relative">
+              <Input
+                value={autoLoginTotpSecret}
+                onChange={setAutoLoginTotpSecret}
+                label="TOTP Secret Key (base32)"
+                type={showTotp ? 'text' : 'password'}
+                placeholder={autoLoginConfigured ? '••••••• (saved — enter new to replace)' : 'e.g. JBSWY3DPEHPK3PXP...'}
+                id="auto-login-totp-secret"
+              />
+              <button
+                type="button"
+                onClick={() => setShowTotp(v => !v)}
+                className="absolute right-3 top-8 text-[var(--text-muted)] hover:text-[var(--text)] transition-colors"
+              >
+                {showTotp ? <EyeOff size={14} /> : <Eye size={14} />}
+              </button>
+            </div>
+          </div>
+
+          {/* Enable toggle for new setup */}
+          {!autoLoginConfigured && (
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                onClick={() => setAutoLoginEnabled(v => !v)}
+                className={`relative w-10 h-5 rounded-full transition-colors ${autoLoginEnabled ? 'bg-emerald-500' : 'bg-[var(--border)]'}`}
+              >
+                <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${autoLoginEnabled ? 'translate-x-5' : ''}`} />
+              </button>
+              <span className="text-sm text-[var(--text-muted)]">Enable auto-login at 8:00 AM daily</span>
+            </div>
+          )}
+
+          {/* Actions */}
+          <div className="flex flex-wrap gap-3">
+            <Button onClick={handleSaveAutoLogin} loading={autoLoginSaving} id="save-auto-login-btn">
+              <KeyRound size={14} /> {autoLoginConfigured ? 'Update Auto-Login Config' : 'Save & Enable Auto-Login'}
+            </Button>
+            {autoLoginConfigured && (
+              <Button variant="secondary" onClick={handleTestAutoLogin} loading={autoLoginTestLoading} id="test-auto-login-btn">
+                <Zap size={14} /> Test Morning Trade Now
+              </Button>
+            )}
+          </div>
+          <p className="text-xs text-[var(--text-muted)]">
+            Credentials are encrypted and stored securely. The Android APK also caches them locally using Android Keystore (hardware-backed encryption).
+          </p>
         </div>
       </Card>
 
