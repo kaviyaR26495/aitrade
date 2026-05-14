@@ -115,7 +115,6 @@ async def trigger_morning_trade(db: AsyncSession = Depends(get_db)):
     Verifies the token is active then queues the morning trade-start Celery task.
     This fires portfolio reconciliation and trade signal generation.
     """
-    # Ensure in-memory token is valid
     token = await crud.get_setting(db, KITE_TOKEN_KEY)
     if not token:
         raise HTTPException(status_code=401, detail="Zerodha not authenticated — no token found")
@@ -127,7 +126,6 @@ async def trigger_morning_trade(db: AsyncSession = Depends(get_db)):
     if not is_valid:
         raise HTTPException(status_code=401, detail="Zerodha token is expired or invalid")
 
-    # Queue the morning trade start task via Celery
     try:
         from app.workers.tasks import task_morning_trade_start
         result = task_morning_trade_start.delay()
@@ -140,18 +138,13 @@ async def trigger_morning_trade(db: AsyncSession = Depends(get_db)):
 
 @router.post("/save-auto-login")
 async def save_auto_login_config(config: AutoLoginConfig, db: AsyncSession = Depends(get_db)):
-    """Store Zerodha auto-login credentials in the DB (encrypted by DB layer).
+    """Store Zerodha auto-login credentials in the DB.
 
     The Android app also stores these in EncryptedSharedPreferences locally.
-    This server-side copy allows the backend to perform a self-service auth
-    check at 8 AM if the Celery beat task is configured to do so.
-
-    SECURITY: Credentials are stored encrypted via the AppSetting model.
-    Only the backend process can read them.
+    SECURITY: Credentials stored encrypted via AppSetting. Only the backend process can read them.
     """
     await crud.set_setting(db, "ZERODHA_AUTO_LOGIN_USER_ID", config.zerodha_user_id)
     await crud.set_setting(db, "ZERODHA_AUTO_LOGIN_ENABLED", str(config.enabled).lower())
-    # Store password and TOTP secret — backend never logs or returns these
     if config.zerodha_password:
         await crud.set_setting(db, "ZERODHA_AUTO_LOGIN_PASSWORD", config.zerodha_password)
     if config.zerodha_totp_secret:
@@ -173,3 +166,45 @@ async def get_auto_login_status(db: AsyncSession = Depends(get_db)):
         "enabled": enabled,
         "user_id": user_id,
     }
+
+
+@router.get("/users")
+async def get_shared_users(db: AsyncSession = Depends(get_db)):
+    """Fetch the shared users list from DB settings."""
+    users_json = await crud.get_setting(db, "SHARED_USERS")
+    if not users_json:
+        return []
+    import json
+    try:
+        return json.loads(users_json)
+    except:
+        return []
+
+
+@router.post("/users")
+async def save_shared_users(users: list, db: AsyncSession = Depends(get_db)):
+    """Save the shared users list to DB settings."""
+    import json
+    await crud.set_setting(db, "SHARED_USERS", json.dumps(users))
+    return {"status": "success"}
+
+
+@router.get("/roles")
+async def get_shared_roles(db: AsyncSession = Depends(get_db)):
+    """Fetch the shared roles list from DB settings."""
+    roles_json = await crud.get_setting(db, "SHARED_ROLES")
+    if not roles_json:
+        return []
+    import json
+    try:
+        return json.loads(roles_json)
+    except:
+        return []
+
+
+@router.post("/roles")
+async def save_shared_roles(roles: list, db: AsyncSession = Depends(get_db)):
+    """Save the shared roles list to DB settings."""
+    import json
+    await crud.set_setting(db, "SHARED_ROLES", json.dumps(roles))
+    return {"status": "success"}

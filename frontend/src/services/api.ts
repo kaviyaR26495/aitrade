@@ -65,6 +65,10 @@ export const saveAutoLoginConfig = (config: {
   enabled: boolean;
 }) => api.post('/auth/save-auto-login', config);
 export const getAutoLoginStatus = () => api.get('/auth/auto-login-status');
+export const getSharedUsers = () => api.get<any[]>('/auth/users');
+export const saveSharedUsers = (users: any[]) => api.post('/auth/users', users);
+export const getSharedRoles = () => api.get<any[]>('/auth/roles');
+export const saveSharedRoles = (roles: any[]) => api.post('/auth/roles', roles);
 
 // ── Config ──
 export const getConfig = () => api.get('/config/');

@@ -52,8 +52,17 @@ export default function Portfolio() {
 
   const handleRefresh = async () => {
     try {
-      await Promise.all([refetchHoldings(), refetchPositions()]);
-      addNotification({ type: 'success', message: 'Portfolio refreshed' });
+      const [holdingsRes, positionsRes] = await Promise.all([refetchHoldings(), refetchPositions()]);
+      if (holdingsRes.isError || positionsRes.isError) {
+        const getErrorMsg = (res: any) => res.error?.response?.data?.detail ?? res.error?.message;
+        const errors = [getErrorMsg(holdingsRes), getErrorMsg(positionsRes)].filter(Boolean);
+        addNotification({ 
+          type: 'error', 
+          message: `Failed to refresh: ${errors.join(' | ')}`
+        });
+      } else {
+        addNotification({ type: 'success', message: 'Portfolio refreshed' });
+      }
     } catch {
       addNotification({ type: 'error', message: 'Failed to refresh portfolio' });
     }
